@@ -1,0 +1,138 @@
+{
+  "name": "gflags",
+  "version": "2.2.2",
+  "build": "hd77b12b_1",
+  "build_number": 1,
+  "channel": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64",
+  "subdir": "win-64",
+  "fn": "gflags-2.2.2-hd77b12b_1.conda",
+  "md5": "32176ec42845b89f52d7ef6c55030316",
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64/gflags-2.2.2-hd77b12b_1.conda",
+  "sha256": "cfb0fbfb9aa424b3a204e35da834e9c12b4ab63750caf5b2782533ed29522e60",
+  "depends": [
+    "vc >=14.1,<15.0a0",
+    "vs2015_runtime >=14.16.27012,<15.0a0"
+  ],
+  "constrains": [],
+  "license": "BSD-3-Clause",
+  "timestamp": 1706888324000,
+  "size": 253026,
+  "requested_spec": "None",
+  "package_tarball_full_path": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\gflags-2.2.2-hd77b12b_1.conda",
+  "extracted_package_dir": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\gflags-2.2.2-hd77b12b_1",
+  "files": [
+    "Library/bin/gflags.dll",
+    "Library/include/gflags/gflags.h",
+    "Library/include/gflags/gflags_completions.h",
+    "Library/include/gflags/gflags_declare.h",
+    "Library/include/gflags/gflags_gflags.h",
+    "Library/lib/cmake/gflags/gflags-config-version.cmake",
+    "Library/lib/cmake/gflags/gflags-config.cmake",
+    "Library/lib/cmake/gflags/gflags-nonamespace-targets-release.cmake",
+    "Library/lib/cmake/gflags/gflags-nonamespace-targets.cmake",
+    "Library/lib/cmake/gflags/gflags-targets-release.cmake",
+    "Library/lib/cmake/gflags/gflags-targets.cmake",
+    "Library/lib/gflags.lib",
+    "Library/lib/gflags_static.lib"
+  ],
+  "paths_data": {
+    "paths_version": 1,
+    "paths": [
+      {
+        "_path": "Library/bin/gflags.dll",
+        "path_type": "hardlink",
+        "sha256": "c216bbdb9bcd0889d76481df83add890b4ab8a93910d462571922be0d643dc41",
+        "size_in_bytes": 135680,
+        "sha256_in_prefix": "c216bbdb9bcd0889d76481df83add890b4ab8a93910d462571922be0d643dc41"
+      },
+      {
+        "_path": "Library/include/gflags/gflags.h",
+        "path_type": "hardlink",
+        "sha256": "09572e0f0dcfef9eff190000f7da95d91851486fe0a03a82ff8e87499caff237",
+        "size_in_bytes": 31243,
+        "sha256_in_prefix": "09572e0f0dcfef9eff190000f7da95d91851486fe0a03a82ff8e87499caff237"
+      },
+      {
+        "_path": "Library/include/gflags/gflags_completions.h",
+        "path_type": "hardlink",
+        "sha256": "c7a074ab3216c36b01e5034339b8930c43b4a7df3fce50cffcdf81712a45877a",
+        "size_in_bytes": 5882,
+        "sha256_in_prefix": "c7a074ab3216c36b01e5034339b8930c43b4a7df3fce50cffcdf81712a45877a"
+      },
+      {
+        "_path": "Library/include/gflags/gflags_declare.h",
+        "path_type": "hardlink",
+        "sha256": "e9351d245c4a46181eddefffae2760e0fa076f377e835a543a4a7da5b98e5e1c",
+        "size_in_bytes": 5522,
+        "sha256_in_prefix": "e9351d245c4a46181eddefffae2760e0fa076f377e835a543a4a7da5b98e5e1c"
+      },
+      {
+        "_path": "Library/include/gflags/gflags_gflags.h",
+        "path_type": "hardlink",
+        "sha256": "23ed96c00516eb8cfe1632e0c59066647ce72cafcb1911d410b9f7c194cd8cdf",
+        "size_in_bytes": 4173,
+        "sha256_in_prefix": "23ed96c00516eb8cfe1632e0c59066647ce72cafcb1911d410b9f7c194cd8cdf"
+      },
+      {
+        "_path": "Library/lib/cmake/gflags/gflags-config-version.cmake",
+        "path_type": "hardlink",
+        "sha256": "e7d704918082ea3936275a66f8a2f6e2422290123c9d2d40b3c6354801039938",
+        "size_in_bytes": 689,
+        "sha256_in_prefix": "e7d704918082ea3936275a66f8a2f6e2422290123c9d2d40b3c6354801039938"
+      },
+      {
+        "_path": "Library/lib/cmake/gflags/gflags-config.cmake",
+        "path_type": "hardlink",
+        "sha256": "629d35135149d50432f750107bcc42d210e494f1bb90225fa311f687ecd02a25",
+        "size_in_bytes": 6408,
+        "sha256_in_prefix": "629d35135149d50432f750107bcc42d210e494f1bb90225fa311f687ecd02a25"
+      },
+      {
+        "_path": "Library/lib/cmake/gflags/gflags-nonamespace-targets-release.cmake",
+        "path_type": "hardlink",
+        "sha256": "b7d8aec1840df088f3025cf3749481d869afa5af5474eb27349c8fea61c76a42",
+        "size_in_bytes": 1383,
+        "sha256_in_prefix": "b7d8aec1840df088f3025cf3749481d869afa5af5474eb27349c8fea61c76a42"
+      },
+      {
+        "_path": "Library/lib/cmake/gflags/gflags-nonamespace-targets.cmake",
+        "path_type": "hardlink",
+        "sha256": "ed39480df0b4d1853f35a70dabf7960d03241bc5c51ee8741d459c9430e56d14",
+        "size_in_bytes": 4550,
+        "sha256_in_prefix": "ed39480df0b4d1853f35a70dabf7960d03241bc5c51ee8741d459c9430e56d14"
+      },
+      {
+        "_path": "Library/lib/cmake/gflags/gflags-targets-release.cmake",
+        "path_type": "hardlink",
+        "sha256": "31fe4030cecf57340db9ce4fb0169e2ad6db08c1bb60a95af3f2229a03c0640e",
+        "size_in_bytes": 1463,
+        "sha256_in_prefix": "31fe4030cecf57340db9ce4fb0169e2ad6db08c1bb60a95af3f2229a03c0640e"
+      },
+      {
+        "_path": "Library/lib/cmake/gflags/gflags-targets.cmake",
+        "path_type": "hardlink",
+        "sha256": "2e246a2bd374b069301778faf4385ce6a993e22084a21dfc106493bcfa877435",
+        "size_in_bytes": 4602,
+        "sha256_in_prefix": "2e246a2bd374b069301778faf4385ce6a993e22084a21dfc106493bcfa877435"
+      },
+      {
+        "_path": "Library/lib/gflags.lib",
+        "path_type": "hardlink",
+        "sha256": "18f359e3a07ed3cae7b9262c446bf52e7994e7df480a751062f93dd108aac6bb",
+        "size_in_bytes": 29946,
+        "sha256_in_prefix": "18f359e3a07ed3cae7b9262c446bf52e7994e7df480a751062f93dd108aac6bb"
+      },
+      {
+        "_path": "Library/lib/gflags_static.lib",
+        "path_type": "hardlink",
+        "sha256": "6826f0cfe52403bc7a25780b9ff98a78334e8354ca618369c9fe6c30bc46e64e",
+        "size_in_bytes": 1784930,
+        "sha256_in_prefix": "6826f0cfe52403bc7a25780b9ff98a78334e8354ca618369c9fe6c30bc46e64e"
+      }
+    ]
+  },
+  "link": {
+    "source": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\gflags-2.2.2-hd77b12b_1",
+    "type": 1
+  }
+}

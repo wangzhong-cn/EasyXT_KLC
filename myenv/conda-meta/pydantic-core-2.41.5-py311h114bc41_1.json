@@ -1,0 +1,149 @@
+{
+  "name": "pydantic-core",
+  "version": "2.41.5",
+  "build": "py311h114bc41_1",
+  "build_number": 1,
+  "channel": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64",
+  "subdir": "win-64",
+  "fn": "pydantic-core-2.41.5-py311h114bc41_1.conda",
+  "md5": "ae5c06baa5b15b074273e310da741767",
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64/pydantic-core-2.41.5-py311h114bc41_1.conda",
+  "sha256": "69e7ba9b95447192ebb7b8b811a6c6e56f3cad57ddd5655e8a676c7c37bfe527",
+  "depends": [
+    "python >=3.11,<3.12.0a0",
+    "typing-extensions >=4.14.1",
+    "ucrt >=10.0.20348.0",
+    "vc >=14.2,<15",
+    "vc14_runtime >=14.29.30133"
+  ],
+  "constrains": [],
+  "license": "MIT",
+  "timestamp": 1764010120000,
+  "size": 1911404,
+  "requested_spec": "None",
+  "package_tarball_full_path": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\pydantic-core-2.41.5-py311h114bc41_1.conda",
+  "extracted_package_dir": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\pydantic-core-2.41.5-py311h114bc41_1",
+  "files": [
+    "Lib/site-packages/pydantic_core-2.41.5.dist-info/INSTALLER",
+    "Lib/site-packages/pydantic_core-2.41.5.dist-info/METADATA",
+    "Lib/site-packages/pydantic_core-2.41.5.dist-info/RECORD",
+    "Lib/site-packages/pydantic_core-2.41.5.dist-info/REQUESTED",
+    "Lib/site-packages/pydantic_core-2.41.5.dist-info/WHEEL",
+    "Lib/site-packages/pydantic_core-2.41.5.dist-info/direct_url.json",
+    "Lib/site-packages/pydantic_core-2.41.5.dist-info/licenses/LICENSE",
+    "Lib/site-packages/pydantic_core/__init__.py",
+    "Lib/site-packages/pydantic_core/__pycache__/__init__.cpython-311.pyc",
+    "Lib/site-packages/pydantic_core/__pycache__/core_schema.cpython-311.pyc",
+    "Lib/site-packages/pydantic_core/_pydantic_core.cp311-win_amd64.pyd",
+    "Lib/site-packages/pydantic_core/_pydantic_core.pyi",
+    "Lib/site-packages/pydantic_core/core_schema.py",
+    "Lib/site-packages/pydantic_core/py.typed"
+  ],
+  "paths_data": {
+    "paths_version": 1,
+    "paths": [
+      {
+        "_path": "Lib/site-packages/pydantic_core-2.41.5.dist-info/INSTALLER",
+        "path_type": "hardlink",
+        "sha256": "d0edee15f91b406f3f99726e44eb990be6e34fd0345b52b910c568e0eef6a2a8",
+        "size_in_bytes": 5,
+        "sha256_in_prefix": "d0edee15f91b406f3f99726e44eb990be6e34fd0345b52b910c568e0eef6a2a8"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core-2.41.5.dist-info/METADATA",
+        "path_type": "hardlink",
+        "sha256": "09f83baa3202ec3da98a284a56afdf1ba69976e4af7172488887e5b2b20591a9",
+        "size_in_bytes": 7277,
+        "sha256_in_prefix": "09f83baa3202ec3da98a284a56afdf1ba69976e4af7172488887e5b2b20591a9"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core-2.41.5.dist-info/RECORD",
+        "path_type": "hardlink",
+        "sha256": "99a5d23920083348aa99b712c1b103f25fcc87b046411abe2c68c2c9f5543d8c",
+        "size_in_bytes": 1186,
+        "sha256_in_prefix": "99a5d23920083348aa99b712c1b103f25fcc87b046411abe2c68c2c9f5543d8c"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core-2.41.5.dist-info/REQUESTED",
+        "path_type": "hardlink",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_in_bytes": 0,
+        "sha256_in_prefix": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core-2.41.5.dist-info/WHEEL",
+        "path_type": "hardlink",
+        "sha256": "60267d57185fd9a5cdc9fa11d901fe3cfaa752be3c220afdce38271a1a77c537",
+        "size_in_bytes": 96,
+        "sha256_in_prefix": "60267d57185fd9a5cdc9fa11d901fe3cfaa752be3c220afdce38271a1a77c537"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core-2.41.5.dist-info/direct_url.json",
+        "path_type": "hardlink",
+        "sha256": "015fee44a2a5ed0c9d9fb160783d0d947dca3fcbbec85f5c52f9f0a421a6b326",
+        "size_in_bytes": 91,
+        "sha256_in_prefix": "015fee44a2a5ed0c9d9fb160783d0d947dca3fcbbec85f5c52f9f0a421a6b326"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core-2.41.5.dist-info/licenses/LICENSE",
+        "path_type": "hardlink",
+        "sha256": "2afdd30d54b4d62b6f488a6bcc1546e84ec5061f13f4209c03d012348783795a",
+        "size_in_bytes": 1080,
+        "sha256_in_prefix": "2afdd30d54b4d62b6f488a6bcc1546e84ec5061f13f4209c03d012348783795a"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core/__init__.py",
+        "path_type": "hardlink",
+        "sha256": "9cad6292b75254af606a970aae9bff6e5ae9f0b08089cd63acafa391b60794d2",
+        "size_in_bytes": 5115,
+        "sha256_in_prefix": "9cad6292b75254af606a970aae9bff6e5ae9f0b08089cd63acafa391b60794d2"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core/__pycache__/__init__.cpython-311.pyc",
+        "path_type": "hardlink",
+        "sha256": "5e8faf4afac12b248a7340c252aa418a1d93d4fccf162d380b86ed01fb374182",
+        "size_in_bytes": 3791,
+        "sha256_in_prefix": "5e8faf4afac12b248a7340c252aa418a1d93d4fccf162d380b86ed01fb374182"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core/__pycache__/core_schema.cpython-311.pyc",
+        "path_type": "hardlink",
+        "sha256": "1ed7e4e5dcebfb24a35fdd5ae1dfefd97e6152ee0018b632ead543c77a0ba2db",
+        "size_in_bytes": 161318,
+        "sha256_in_prefix": "1ed7e4e5dcebfb24a35fdd5ae1dfefd97e6152ee0018b632ead543c77a0ba2db"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core/_pydantic_core.cp311-win_amd64.pyd",
+        "path_type": "hardlink",
+        "sha256": "3ea7069620ca9b6066810be1618cbf6754958d1d317c5bfcdfda4f72f7f81bec",
+        "size_in_bytes": 6134088,
+        "sha256_in_prefix": "3ea7069620ca9b6066810be1618cbf6754958d1d317c5bfcdfda4f72f7f81bec"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core/_pydantic_core.pyi",
+        "path_type": "hardlink",
+        "sha256": "3ea1dbd4182f08cf9341f24b3c5cf7db77a05b3535ffe9e23525127a3617a11f",
+        "size_in_bytes": 44927,
+        "sha256_in_prefix": "3ea1dbd4182f08cf9341f24b3c5cf7db77a05b3535ffe9e23525127a3617a11f"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core/core_schema.py",
+        "path_type": "hardlink",
+        "sha256": "bbdc850b72d685133a0e250fed263b33691dcdf3813492f3c0e31001e3d46005",
+        "size_in_bytes": 154730,
+        "sha256_in_prefix": "bbdc850b72d685133a0e250fed263b33691dcdf3813492f3c0e31001e3d46005"
+      },
+      {
+        "_path": "Lib/site-packages/pydantic_core/py.typed",
+        "path_type": "hardlink",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_in_bytes": 0,
+        "sha256_in_prefix": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "link": {
+    "source": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\pydantic-core-2.41.5-py311h114bc41_1",
+    "type": 1
+  }
+}

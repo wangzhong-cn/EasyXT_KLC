@@ -1,0 +1,33 @@
+{
+  "name": "duckdb",
+  "version": "1.2.1",
+  "build": "hd3eb1b0_0",
+  "build_number": 0,
+  "channel": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64",
+  "subdir": "noarch",
+  "fn": "duckdb-1.2.1-hd3eb1b0_0.conda",
+  "md5": "7816f7fc2db4c0fd735a8f4039a9f1f3",
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/noarch/duckdb-1.2.1-hd3eb1b0_0.conda",
+  "sha256": "0479ba33fc9d6eecbf75c192f2f8669fae3b14ee5972dfb81aa55a3d05dd2334",
+  "depends": [
+    "python-duckdb >=1.2.1,<1.2.2.0a0"
+  ],
+  "constrains": [],
+  "noarch": "generic",
+  "license": "MIT",
+  "package_type": "noarch_generic",
+  "timestamp": 1744669205000,
+  "size": 6551,
+  "requested_spec": "duckdb",
+  "package_tarball_full_path": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\duckdb-1.2.1-hd3eb1b0_0.conda",
+  "extracted_package_dir": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\duckdb-1.2.1-hd3eb1b0_0",
+  "files": [],
+  "paths_data": {
+    "paths_version": 1,
+    "paths": []
+  },
+  "link": {
+    "source": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\duckdb-1.2.1-hd3eb1b0_0",
+    "type": 1
+  }
+}

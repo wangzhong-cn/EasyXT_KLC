@@ -1,0 +1,113 @@
+{
+  "name": "six",
+  "version": "1.17.0",
+  "build": "py311haa95532_0",
+  "build_number": 0,
+  "channel": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64",
+  "subdir": "win-64",
+  "fn": "six-1.17.0-py311haa95532_0.conda",
+  "md5": "67a1b7d73a9a62e78d81e2968772525c",
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64/six-1.17.0-py311haa95532_0.conda",
+  "sha256": "2bed6922ad035a1971851080b8fc83507dd5fa2fb9c0aa7118e595810da3cb9e",
+  "depends": [
+    "python >=3.11,<3.12.0a0"
+  ],
+  "constrains": [],
+  "license": "MIT",
+  "timestamp": 1744271794000,
+  "size": 39300,
+  "requested_spec": "None",
+  "package_tarball_full_path": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\six-1.17.0-py311haa95532_0.conda",
+  "extracted_package_dir": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\six-1.17.0-py311haa95532_0",
+  "files": [
+    "Lib/site-packages/__pycache__/six.cpython-311.pyc",
+    "Lib/site-packages/six-1.17.0.dist-info/INSTALLER",
+    "Lib/site-packages/six-1.17.0.dist-info/LICENSE",
+    "Lib/site-packages/six-1.17.0.dist-info/METADATA",
+    "Lib/site-packages/six-1.17.0.dist-info/RECORD",
+    "Lib/site-packages/six-1.17.0.dist-info/REQUESTED",
+    "Lib/site-packages/six-1.17.0.dist-info/WHEEL",
+    "Lib/site-packages/six-1.17.0.dist-info/direct_url.json",
+    "Lib/site-packages/six-1.17.0.dist-info/top_level.txt",
+    "Lib/site-packages/six.py"
+  ],
+  "paths_data": {
+    "paths_version": 1,
+    "paths": [
+      {
+        "_path": "Lib/site-packages/__pycache__/six.cpython-311.pyc",
+        "path_type": "hardlink",
+        "sha256": "455a1f57f2c26f896922fdaef7722a6a32076b699b75cd2797b228266788454d",
+        "size_in_bytes": 46524,
+        "sha256_in_prefix": "455a1f57f2c26f896922fdaef7722a6a32076b699b75cd2797b228266788454d"
+      },
+      {
+        "_path": "Lib/site-packages/six-1.17.0.dist-info/INSTALLER",
+        "path_type": "hardlink",
+        "sha256": "d0edee15f91b406f3f99726e44eb990be6e34fd0345b52b910c568e0eef6a2a8",
+        "size_in_bytes": 5,
+        "sha256_in_prefix": "d0edee15f91b406f3f99726e44eb990be6e34fd0345b52b910c568e0eef6a2a8"
+      },
+      {
+        "_path": "Lib/site-packages/six-1.17.0.dist-info/LICENSE",
+        "path_type": "hardlink",
+        "sha256": "4375ba20e2b9c6c4e7cad2940a628fd90e95cc3d50ee92aae755715d8ba1fbd0",
+        "size_in_bytes": 1066,
+        "sha256_in_prefix": "4375ba20e2b9c6c4e7cad2940a628fd90e95cc3d50ee92aae755715d8ba1fbd0"
+      },
+      {
+        "_path": "Lib/site-packages/six-1.17.0.dist-info/METADATA",
+        "path_type": "hardlink",
+        "sha256": "760b8303d7f9147f2f476c9ca80024d5b12330efb4e049e4537827cddac6da18",
+        "size_in_bytes": 1866,
+        "sha256_in_prefix": "760b8303d7f9147f2f476c9ca80024d5b12330efb4e049e4537827cddac6da18"
+      },
+      {
+        "_path": "Lib/site-packages/six-1.17.0.dist-info/RECORD",
+        "path_type": "hardlink",
+        "sha256": "136e3402b6abdbc03945acacea8e131dbc94be3469a0a60d6e6a03eed36e43e5",
+        "size_in_bytes": 738,
+        "sha256_in_prefix": "136e3402b6abdbc03945acacea8e131dbc94be3469a0a60d6e6a03eed36e43e5"
+      },
+      {
+        "_path": "Lib/site-packages/six-1.17.0.dist-info/REQUESTED",
+        "path_type": "hardlink",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_in_bytes": 0,
+        "sha256_in_prefix": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "_path": "Lib/site-packages/six-1.17.0.dist-info/WHEEL",
+        "path_type": "hardlink",
+        "sha256": "f479b6381fa3d5070252af4982e86dedac8620864145374e5c3d6a83d70280f3",
+        "size_in_bytes": 109,
+        "sha256_in_prefix": "f479b6381fa3d5070252af4982e86dedac8620864145374e5c3d6a83d70280f3"
+      },
+      {
+        "_path": "Lib/site-packages/six-1.17.0.dist-info/direct_url.json",
+        "path_type": "hardlink",
+        "sha256": "7ba6cfe049daabcf2d5e0805f6714432394a3eadbeefbf54543fd7b78ff90c3b",
+        "size_in_bytes": 83,
+        "sha256_in_prefix": "7ba6cfe049daabcf2d5e0805f6714432394a3eadbeefbf54543fd7b78ff90c3b"
+      },
+      {
+        "_path": "Lib/site-packages/six-1.17.0.dist-info/top_level.txt",
+        "path_type": "hardlink",
+        "sha256": "fe2547fe2604b445e70fc9d819062960552f9145bdb043b51986e478a4806a2b",
+        "size_in_bytes": 4,
+        "sha256_in_prefix": "fe2547fe2604b445e70fc9d819062960552f9145bdb043b51986e478a4806a2b"
+      },
+      {
+        "_path": "Lib/site-packages/six.py",
+        "path_type": "hardlink",
+        "sha256": "c51c91f703d3d4b3696c923cb5fec213e05e75d9215393befac7f2fa6a3904df",
+        "size_in_bytes": 34703,
+        "sha256_in_prefix": "c51c91f703d3d4b3696c923cb5fec213e05e75d9215393befac7f2fa6a3904df"
+      }
+    ]
+  },
+  "link": {
+    "source": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\six-1.17.0-py311haa95532_0",
+    "type": 1
+  }
+}

@@ -1,0 +1,122 @@
+{
+  "name": "snappy",
+  "version": "1.2.1",
+  "build": "hcdb6601_0",
+  "build_number": 0,
+  "channel": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64",
+  "subdir": "win-64",
+  "fn": "snappy-1.2.1-hcdb6601_0.conda",
+  "md5": "b7133f63b981e65f199cc15b0faec196",
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64/snappy-1.2.1-hcdb6601_0.conda",
+  "sha256": "d021894916fd7088859d08fd16262adb8a13c91c61ae6e08f10fe52de6dca6b6",
+  "depends": [
+    "vc >=14.2,<15.0a0",
+    "vs2015_runtime >=14.29.30133,<15.0a0"
+  ],
+  "constrains": [],
+  "license": "BSD-3-clause AND CC-BY-3.0 AND MIT AND CC-BY AND Public Domain",
+  "timestamp": 1723557526000,
+  "size": 110563,
+  "requested_spec": "None",
+  "package_tarball_full_path": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\snappy-1.2.1-hcdb6601_0.conda",
+  "extracted_package_dir": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\snappy-1.2.1-hcdb6601_0",
+  "files": [
+    "Library/bin/snappy.dll",
+    "Library/include/snappy-c.h",
+    "Library/include/snappy-sinksource.h",
+    "Library/include/snappy-stubs-public.h",
+    "Library/include/snappy.h",
+    "Library/lib/cmake/Snappy/SnappyConfig.cmake",
+    "Library/lib/cmake/Snappy/SnappyConfigVersion.cmake",
+    "Library/lib/cmake/Snappy/SnappyTargets-release.cmake",
+    "Library/lib/cmake/Snappy/SnappyTargets.cmake",
+    "Library/lib/snappy.lib",
+    "Library/lib/snappy_static.lib"
+  ],
+  "paths_data": {
+    "paths_version": 1,
+    "paths": [
+      {
+        "_path": "Library/bin/snappy.dll",
+        "path_type": "hardlink",
+        "sha256": "a47ed960f9b158bc74d0772d08b9c576ed0218eb7120c89a83536c2638dd69c0",
+        "size_in_bytes": 92944,
+        "sha256_in_prefix": "a47ed960f9b158bc74d0772d08b9c576ed0218eb7120c89a83536c2638dd69c0"
+      },
+      {
+        "_path": "Library/include/snappy-c.h",
+        "path_type": "hardlink",
+        "sha256": "205e85257ab386f547b024bfec7ab57fcdac95c34874c787c72b50a3d95debf4",
+        "size_in_bytes": 5414,
+        "sha256_in_prefix": "205e85257ab386f547b024bfec7ab57fcdac95c34874c787c72b50a3d95debf4"
+      },
+      {
+        "_path": "Library/include/snappy-sinksource.h",
+        "path_type": "hardlink",
+        "sha256": "ba6308f8d64d670fbb068284096e2f4685e3919ed213a6de1a185aa3680203bb",
+        "size_in_bytes": 7265,
+        "sha256_in_prefix": "ba6308f8d64d670fbb068284096e2f4685e3919ed213a6de1a185aa3680203bb"
+      },
+      {
+        "_path": "Library/include/snappy-stubs-public.h",
+        "path_type": "hardlink",
+        "sha256": "8c1d966b1dd6a616d2a3b7530488d7cb788f95c98e7d3592da24950fec2972ac",
+        "size_in_bytes": 2642,
+        "sha256_in_prefix": "8c1d966b1dd6a616d2a3b7530488d7cb788f95c98e7d3592da24950fec2972ac"
+      },
+      {
+        "_path": "Library/include/snappy.h",
+        "path_type": "hardlink",
+        "sha256": "b4c51fd24a03d09dc17a6ba517a243a06a83c71ce7841955972a83576318b315",
+        "size_in_bytes": 12567,
+        "sha256_in_prefix": "b4c51fd24a03d09dc17a6ba517a243a06a83c71ce7841955972a83576318b315"
+      },
+      {
+        "_path": "Library/lib/cmake/Snappy/SnappyConfig.cmake",
+        "path_type": "hardlink",
+        "sha256": "3dc26f9a35c3736673368be5c60fa0f5a61443789c4d64fdc088219d9850e8eb",
+        "size_in_bytes": 2555,
+        "sha256_in_prefix": "3dc26f9a35c3736673368be5c60fa0f5a61443789c4d64fdc088219d9850e8eb"
+      },
+      {
+        "_path": "Library/lib/cmake/Snappy/SnappyConfigVersion.cmake",
+        "path_type": "hardlink",
+        "sha256": "7c40e0948eb1952728b3aa7e61dd3992f7618ad9398270fabf53d870d898ddfc",
+        "size_in_bytes": 2827,
+        "sha256_in_prefix": "7c40e0948eb1952728b3aa7e61dd3992f7618ad9398270fabf53d870d898ddfc"
+      },
+      {
+        "_path": "Library/lib/cmake/Snappy/SnappyTargets-release.cmake",
+        "path_type": "hardlink",
+        "sha256": "cd8d64535d1960246c85bb72cca0886a82cc8391df68413bb4e0818e466e06ed",
+        "size_in_bytes": 874,
+        "sha256_in_prefix": "cd8d64535d1960246c85bb72cca0886a82cc8391df68413bb4e0818e466e06ed"
+      },
+      {
+        "_path": "Library/lib/cmake/Snappy/SnappyTargets.cmake",
+        "path_type": "hardlink",
+        "sha256": "9be2efa06f2662f394931f65910713ee3f923a79508ebb1296131b21650fb5be",
+        "size_in_bytes": 4000,
+        "sha256_in_prefix": "9be2efa06f2662f394931f65910713ee3f923a79508ebb1296131b21650fb5be"
+      },
+      {
+        "_path": "Library/lib/snappy.lib",
+        "path_type": "hardlink",
+        "sha256": "d28f1ec4d36d558823213061830a471b409fa36f7d6d9f80ba465c58b22dfdb3",
+        "size_in_bytes": 177970,
+        "sha256_in_prefix": "d28f1ec4d36d558823213061830a471b409fa36f7d6d9f80ba465c58b22dfdb3"
+      },
+      {
+        "_path": "Library/lib/snappy_static.lib",
+        "path_type": "hardlink",
+        "sha256": "88d8b4510ed6f1141bcb77f2783925298c11dd1a311396d967402a90966386af",
+        "size_in_bytes": 293630,
+        "sha256_in_prefix": "88d8b4510ed6f1141bcb77f2783925298c11dd1a311396d967402a90966386af"
+      }
+    ]
+  },
+  "link": {
+    "source": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\snappy-1.2.1-hcdb6601_0",
+    "type": 1
+  }
+}

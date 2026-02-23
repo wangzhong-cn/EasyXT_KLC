@@ -1,0 +1,32 @@
+{
+  "name": "typing-extensions",
+  "version": "4.15.0",
+  "build": "py311haa95532_0",
+  "build_number": 0,
+  "channel": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64",
+  "subdir": "win-64",
+  "fn": "typing-extensions-4.15.0-py311haa95532_0.conda",
+  "md5": "b04c2c6003185b885ecd218e42cc7713",
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64/typing-extensions-4.15.0-py311haa95532_0.conda",
+  "sha256": "af4e15652dd82927e514166f7e058f432c41f86dedb5c95cedb4a522c20af29b",
+  "depends": [
+    "python >=3.11,<3.12.0a0",
+    "typing_extensions 4.15.0 py311haa95532_0"
+  ],
+  "constrains": [],
+  "license": "PSF-2.0",
+  "timestamp": 1756281476000,
+  "size": 12344,
+  "requested_spec": "None",
+  "package_tarball_full_path": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\typing-extensions-4.15.0-py311haa95532_0.conda",
+  "extracted_package_dir": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\typing-extensions-4.15.0-py311haa95532_0",
+  "files": [],
+  "paths_data": {
+    "paths_version": 1,
+    "paths": []
+  },
+  "link": {
+    "source": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\typing-extensions-4.15.0-py311haa95532_0",
+    "type": 1
+  }
+}

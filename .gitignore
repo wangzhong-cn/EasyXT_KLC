@@ -1,0 +1,319 @@
+﻿﻿# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# 项目特定文件
+# 数据文件
+data/
+logs/
+*.csv
+*.xlsx
+*.xls
+
+# 配置文件（包含敏感信息）
+config/user_config.py
+config/account_config.py
+**/userdata_mini/
+**/userdata/
+
+# 交易相关敏感文件
+**/trade_log_*.csv
+**/real_trade_log_*.csv
+account_*.json
+position_*.json
+
+# 通达信自选股文件（自动生成，不应提交）
+my_favorites.txt
+*_favorites.txt
+selected_stocks.txt
+
+# 临时文件
+temp/
+tmp/
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# IDE文件
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# xtquant相关（需要单独下载，不纳入版本控制）
+xtquant/
+
+# 开发和调试文件
+*test*.py
+*debug*.py
+*fix*.py
+测试*.py
+调试*.py
+修复*.py
+诊断*.py
+验证*.py
+检查*.py
+快速*.py
+数据*.py
+改进的*.py
+获取*.py
+环境*.py
+第*课*.py
+最终*.py
+启动*.py
+启动*.bat
+claude-start.bat
+mock_*.py
+qmt_*.py
+example*.py
+simple_*.py
+verify_*.py
+check_*.py
+compare_*.py
+comprehensive_*.py
+
+# ==================== 例外规则：保留重要文件 ====================
+# Alpha分析平台的核心文件
+!easy_xt/alpha_analysis/test_alpha_analysis.py
+!easy_xt/alpha_analysis/example_usage.py
+# JQ2QMT策略的核心文件
+!strategies/jq2qmt/qmt_signal_client.py
+!strategies/jq2qmt/qmt_client_mini.py
+
+# 文档和总结文件
+*总结.md
+*完成*.md
+*规范*.md
+*报告.md
+*计划.md
+*指南.md
+easy_xt项目API函数说明文档_第*.md
+EasyXT*.md
+QMT*.md
+qstock*.md
+功能调用对照表.md
+股票量化交易学习案例系统.md
+数据获取问题*.md
+修复说明.md
+
+# 临时和重复文件
+*.dmp
+获取历史行情测试/
+正确的*.py
+
+# Jupyter Notebook检查点
+.ipynb_checkpoints/
+
+# CodeBuddy相关
+.codebuddy/
+# config structure cleanup (mixed: core + easy_xt + strategy)
+local/*.json
+*.secrets.json
+
+# config cleanup (strategy overrides only)
+strategies/xueqiu_follow/config/backup/
+strategies/xueqiu_follow/config/settings.json
+strategies/xueqiu_follow/config/realtime_config.json
+strategies/xueqiu_follow/config/default.json
+strategies/xueqiu_follow/config/jq2qmt_config.json
+
+# 私有实时服务依赖清单（不随仓库发布）
+requirements_realtime.txt
+deploy/requirements_realtime.txt
+
+# 服务器配置文件（包含敏感信息）
+easy_xt/realtime_data/config/server_config.py
+# 服务器配置文件备份
+easy_xt/realtime_data/config/server_config.json
+
+!gui_app/widgets/backtest_widget.py
+
+# ==================== 例外规则：重要的启动脚本 ====================
+# 网格回测启动脚本（重要工具，需要提交）
+!launch_grid_backtest.py
+# 数据管理工具（重要）
+!diagnose_grid_trades.py
+
+# 临时目录和文件
+examples/
+backup/
+integration_test_logs/
+logs/
+reports/
+tests/
+demo*/
+deploy/
+demo_config_new/
+PLAN.md
+
+# 历史存档目录
+101因子/101因子分析平台/archive/
+**/archive/
+archive/
+
+# 101因子平台的开发文档（项目根docs已有完整版本）
+101因子/101因子分析平台/docs/
+
+# 根目录下的特定目录
+scripts/
+markdown/
+QMT-MCP/
+
+# 忽略code_converter目录中的API文档文件
+code_converter/*.pdf
+code_converter/*.html
+code_converter/*.docx
+code_converter/api_docs/*.pdf
+code_converter/api_docs/*.html
+code_converter/api_docs/*.docx
+
+# 忽略Ptrade API PDF文档目录
+code_converter/api_docs/ptrade api/
+
+# 忽略bilibili_videos目录中的视频相关文件
+bilibili_videos/
+bilibili_videos/*.html
+bilibili_videos/*.md
+bilibili_videos/*.mp4
+bilibili_videos/*.avi
+bilibili_videos/*.mov
+
+# 忽略skills工具目录（个人使用的内容生成工具）
+skills/
+101因子/101因子分析平台/workflows/test.json
+101因子/101因子分析平台/workflows/TEST2.json
+.claude/settings.local.json
+code_converter/转换后的ptrade代码.py
+code_converter/full_converted_strategy.py
+gui_app/widgets/GUI使用说明.md
+nul
+FACTOR_ENHANCEMENT_PLAN.md
+data_manager/unified_data_interface.py.backup
+strategies/小市值基础策略V1_QMT版.py
+strategies/小市值基础策略V1.py
+strategies/小市值基础策略V2_QMT版.py
+strategies/小市值基础策略V2.py
+tools/diagnose_front_adjust_null.py
+tools/restore_widget_from_github.py

@@ -1,0 +1,137 @@
+{
+  "name": "annotated-doc",
+  "version": "0.0.4",
+  "build": "py311haa95532_0",
+  "build_number": 0,
+  "channel": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64",
+  "subdir": "win-64",
+  "fn": "annotated-doc-0.0.4-py311haa95532_0.conda",
+  "md5": "4c3aa1747ab1a1d8534458ab5de27ad1",
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/win-64/annotated-doc-0.0.4-py311haa95532_0.conda",
+  "sha256": "18e3ea4161f2a7a9658c3e472b7bc04725282910d550dc072c64cab16a95bcf9",
+  "depends": [
+    "python >=3.11,<3.12.0a0"
+  ],
+  "constrains": [],
+  "license": "MIT",
+  "timestamp": 1763372713000,
+  "size": 11441,
+  "requested_spec": "None",
+  "package_tarball_full_path": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\annotated-doc-0.0.4-py311haa95532_0.conda",
+  "extracted_package_dir": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\annotated-doc-0.0.4-py311haa95532_0",
+  "files": [
+    "Lib/site-packages/annotated_doc-0.0.4.dist-info/INSTALLER",
+    "Lib/site-packages/annotated_doc-0.0.4.dist-info/METADATA",
+    "Lib/site-packages/annotated_doc-0.0.4.dist-info/RECORD",
+    "Lib/site-packages/annotated_doc-0.0.4.dist-info/REQUESTED",
+    "Lib/site-packages/annotated_doc-0.0.4.dist-info/WHEEL",
+    "Lib/site-packages/annotated_doc-0.0.4.dist-info/direct_url.json",
+    "Lib/site-packages/annotated_doc-0.0.4.dist-info/entry_points.txt",
+    "Lib/site-packages/annotated_doc-0.0.4.dist-info/licenses/LICENSE",
+    "Lib/site-packages/annotated_doc/__init__.py",
+    "Lib/site-packages/annotated_doc/__pycache__/__init__.cpython-311.pyc",
+    "Lib/site-packages/annotated_doc/__pycache__/main.cpython-311.pyc",
+    "Lib/site-packages/annotated_doc/main.py",
+    "Lib/site-packages/annotated_doc/py.typed"
+  ],
+  "paths_data": {
+    "paths_version": 1,
+    "paths": [
+      {
+        "_path": "Lib/site-packages/annotated_doc-0.0.4.dist-info/INSTALLER",
+        "path_type": "hardlink",
+        "sha256": "d0edee15f91b406f3f99726e44eb990be6e34fd0345b52b910c568e0eef6a2a8",
+        "size_in_bytes": 5,
+        "sha256_in_prefix": "d0edee15f91b406f3f99726e44eb990be6e34fd0345b52b910c568e0eef6a2a8"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc-0.0.4.dist-info/METADATA",
+        "path_type": "hardlink",
+        "sha256": "22b9b9289b9adf7758daa28a02327e3a129a5415487f01467a3fdd49edd9d535",
+        "size_in_bytes": 6566,
+        "sha256_in_prefix": "22b9b9289b9adf7758daa28a02327e3a129a5415487f01467a3fdd49edd9d535"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc-0.0.4.dist-info/RECORD",
+        "path_type": "hardlink",
+        "sha256": "7396a32f50e4f67aaed7449adb5d90f4f12e3695432e737dd195af95aba67e86",
+        "size_in_bytes": 1063,
+        "sha256_in_prefix": "7396a32f50e4f67aaed7449adb5d90f4f12e3695432e737dd195af95aba67e86"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc-0.0.4.dist-info/REQUESTED",
+        "path_type": "hardlink",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_in_bytes": 0,
+        "sha256_in_prefix": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc-0.0.4.dist-info/WHEEL",
+        "path_type": "hardlink",
+        "sha256": "b6169a036c352737060b8f1662e7c0b3c9eb6198c99bc2ea35f9d714e172082e",
+        "size_in_bytes": 90,
+        "sha256_in_prefix": "b6169a036c352737060b8f1662e7c0b3c9eb6198c99bc2ea35f9d714e172082e"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc-0.0.4.dist-info/direct_url.json",
+        "path_type": "hardlink",
+        "sha256": "c31d3aa2636f0c2e2a914fec2317aaa3c3c22f26a56ac37670760f9a2fd12cc9",
+        "size_in_bytes": 91,
+        "sha256_in_prefix": "c31d3aa2636f0c2e2a914fec2317aaa3c3c22f26a56ac37670760f9a2fd12cc9"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc-0.0.4.dist-info/entry_points.txt",
+        "path_type": "hardlink",
+        "sha256": "e8e62005c2f21425207aa2e09ef332389c4f096ce0cbbb1ee2b2cf2ad3689ccb",
+        "size_in_bytes": 34,
+        "sha256_in_prefix": "e8e62005c2f21425207aa2e09ef332389c4f096ce0cbbb1ee2b2cf2ad3689ccb"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc-0.0.4.dist-info/licenses/LICENSE",
+        "path_type": "hardlink",
+        "sha256": "fff170779a6acbf65abdb405c087f1cee1786691e4a96a4034517e4a504a0cdf",
+        "size_in_bytes": 1086,
+        "sha256_in_prefix": "fff170779a6acbf65abdb405c087f1cee1786691e4a96a4034517e4a504a0cdf"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc/__init__.py",
+        "path_type": "hardlink",
+        "sha256": "56ecb1c547bcd247c4c969ceac2c7f064f21c9ba3768aa3a4580659010585bc9",
+        "size_in_bytes": 52,
+        "sha256_in_prefix": "56ecb1c547bcd247c4c969ceac2c7f064f21c9ba3768aa3a4580659010585bc9"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc/__pycache__/__init__.cpython-311.pyc",
+        "path_type": "hardlink",
+        "sha256": "b8b8377881ede03617fd0d9c0e4f4bc38fa1e6f2d0a9614ce65ed4009ade5fa8",
+        "size_in_bytes": 225,
+        "sha256_in_prefix": "b8b8377881ede03617fd0d9c0e4f4bc38fa1e6f2d0a9614ce65ed4009ade5fa8"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc/__pycache__/main.cpython-311.pyc",
+        "path_type": "hardlink",
+        "sha256": "260c8d3fa73ef7e03c475e734ca3027aaef536b2ec47088c0ad37693d255da0c",
+        "size_in_bytes": 1975,
+        "sha256_in_prefix": "260c8d3fa73ef7e03c475e734ca3027aaef536b2ec47088c0ad37693d255da0c"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc/main.py",
+        "path_type": "hardlink",
+        "sha256": "e597efc6ff344b0c0baa9456ef7019c99ca23386d699af505916e9fdc803db4b",
+        "size_in_bytes": 1075,
+        "sha256_in_prefix": "e597efc6ff344b0c0baa9456ef7019c99ca23386d699af505916e9fdc803db4b"
+      },
+      {
+        "_path": "Lib/site-packages/annotated_doc/py.typed",
+        "path_type": "hardlink",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size_in_bytes": 0,
+        "sha256_in_prefix": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "link": {
+    "source": "C:\\Users\\wangzhong\\miniconda3\\pkgs\\annotated-doc-0.0.4-py311haa95532_0",
+    "type": 1
+  }
+}
