@@ -27,12 +27,16 @@ except ImportError:
     EASYXT_AVAILABLE = False
     print("警告: easy_xt未安装，部分功能将不可用")
 
+from core.signal_bus import SignalBus
+from core.theme_manager import ThemeManager
+
 class MainWindow(QMainWindow):
     """主窗口"""
     
     def __init__(self):
         super().__init__()
         self.executor_thread = None
+        self.signal_bus = SignalBus()
         self.init_ui()
         
     def init_ui(self):
@@ -242,6 +246,7 @@ class MainWindow(QMainWindow):
                 }
             """)
             self.status_bar.showMessage("MiniQMT未连接，请检查QMT客户端是否启动")
+        self.signal_bus.emit("connection_status_changed", connected=connected)
 
     def closeEvent(self, a0):
         """关闭事件"""
@@ -267,51 +272,8 @@ def main():
     font = QFont("Microsoft YaHei", 9)
     app.setFont(font)
     
-    # 设置样式
-    app.setStyleSheet("""
-        QMainWindow {
-            background-color: #f0f0f0;
-        }
-        QTabWidget::pane {
-            border: 1px solid #c0c0c0;
-            background-color: white;
-        }
-        QTabBar::tab {
-            background-color: #e0e0e0;
-            padding: 8px 16px;
-            margin-right: 2px;
-            border-top-left-radius: 5px;
-            border-top-right-radius: 5px;
-        }
-        QTabBar::tab:selected {
-            background-color: white;
-            border-bottom: 2px solid #2196F3;
-        }
-        QGroupBox {
-            font-weight: bold;
-            border: 2px solid #cccccc;
-            border-radius: 5px;
-            margin-top: 1ex;
-            padding-top: 10px;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 5px 0 5px;
-        }
-        QPushButton {
-            padding: 6px 12px;
-            border-radius: 4px;
-            border: 1px solid #ccc;
-            background-color: #f0f0f0;
-        }
-        QPushButton:hover {
-            background-color: #e0e0e0;
-        }
-        QPushButton:pressed {
-            background-color: #d0d0d0;
-        }
-    """)
+    theme_manager = ThemeManager()
+    theme_manager.apply(app)
     
     # 创建并显示主窗口
     window = MainWindow()

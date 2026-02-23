@@ -1,0 +1,63 @@
+from typing import Dict, Optional
+
+from PyQt5.QtWidgets import QApplication
+
+
+class ThemeManager:
+    def __init__(self) -> None:
+        self._themes: Dict[str, str] = {
+            "light": """
+        QMainWindow {
+            background-color: #f0f0f0;
+        }
+        QTabWidget::pane {
+            border: 1px solid #c0c0c0;
+            background-color: white;
+        }
+        QTabBar::tab {
+            background-color: #e0e0e0;
+            padding: 8px 16px;
+            margin-right: 2px;
+            border-top-left-radius: 5px;
+            border-top-right-radius: 5px;
+        }
+        QTabBar::tab:selected {
+            background-color: white;
+            border-bottom: 2px solid #2196F3;
+        }
+        QGroupBox {
+            font-weight: bold;
+            border: 2px solid #cccccc;
+            border-radius: 5px;
+            margin-top: 1ex;
+            padding-top: 10px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px 0 5px;
+        }
+        QPushButton {
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            background-color: #f0f0f0;
+        }
+        QPushButton:hover {
+            background-color: #e0e0e0;
+        }
+        QPushButton:pressed {
+            background-color: #d0d0d0;
+        }
+    """
+        }
+        self._current = "light"
+
+    def apply(self, app: QApplication, theme: Optional[str] = None) -> None:
+        if theme is not None:
+            self._current = theme
+        stylesheet = self._themes.get(self._current, "")
+        app.setStyleSheet(stylesheet)
+
+    def current(self) -> str:
+        return self._current
