@@ -13,7 +13,7 @@ from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QLineEdit, QPushButton, QTextEdit,
-    QTableWidget, QTabWidget,
+    QTableWidget, QTableWidgetItem, QTabWidget,
     QCheckBox, QSpinBox, QDoubleSpinBox, QComboBox,
     QSplitter, QFrame, QMessageBox,
     QFileDialog, QFormLayout, QScrollArea
@@ -26,6 +26,9 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'strategies'))
 
 EASYXT_AVAILABLE = importlib.util.find_spec("easy_xt") is not None
+
+from core.events import Events
+from core.signal_bus import signal_bus
 
 
 class StrategyThread(QThread):
@@ -90,6 +93,7 @@ class GridTradingWidget(QWidget):
         self.strategy_thread = None  # 策略线程
         self.init_ui()
         self.setup_timer()
+        self._connect_events()
 
     def init_ui(self):
         """初始化用户界面"""
@@ -507,6 +511,28 @@ class GridTradingWidget(QWidget):
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_monitor_data)
         self.update_timer.start(3000)  # 每3秒更新一次
+
+    def _connect_events(self):
+        signal_bus.subscribe(Events.ORDER_SUBMITTED, self.on_order_submitted)
+
+    def on_order_submitted(self, symbol: str, side: str, price: float, volume: int, **kwargs):
+        if not symbol:
+            return
+        pool = [s.strip() for s in self.stock_pool_edit.text().split(',') if s.strip()]
+        if pool and symbol not in pool:
+            return
+        row = self.trade_table.rowCount()
+        self.trade_table.insertRow(row)
+        items = [
+            datetime.now().strftime('%H:%M:%S'),
+            symbol,
+            (side or "").upper(),
+            str(volume),
+            f"{price:.2f}"
+        ]
+        for col, value in enumerate(items):
+            self.trade_table.setItem(row, col, QTableWidgetItem(value))
+        self.log(f"订单提交 {side} {symbol} {volume} @ {price}")
 
     def on_strategy_changed(self, index):
         """策略选择改变事件"""

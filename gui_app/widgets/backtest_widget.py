@@ -43,6 +43,9 @@ DualMovingAverageStrategyType: Optional[Type[Any]] = None
 RSIStrategyType: Optional[Type[Any]] = None
 MACDStrategyType: Optional[Type[Any]] = None
 
+from core.events import Events
+from core.signal_bus import signal_bus
+
 try:
     engine_module = importlib.import_module("gui_app.backtest.engine")
     AdvancedBacktestEngineType = getattr(engine_module, "AdvancedBacktestEngine", None)
@@ -1550,6 +1553,7 @@ class BacktestWidget(QWidget):
         
         self.init_ui()
         self.setup_connections()
+        self._connect_events()
         self.update_connection_status()  # 更新连接状态显示
         
     def init_ui(self):
@@ -2704,6 +2708,14 @@ class BacktestWidget(QWidget):
         self.update_overfit_controls(self.overfit_warning_checkbox.isChecked())
         self.update_walk_forward_controls(self.walk_forward_checkbox.isChecked())
         self.update_multi_asset_controls(self.multi_asset_checkbox.isChecked())
+
+    def _connect_events(self):
+        signal_bus.subscribe(Events.CHART_DATA_LOADED, self.on_chart_data_loaded)
+
+    def on_chart_data_loaded(self, symbol: str, **kwargs):
+        if not symbol:
+            return
+        self.stock_code_edit.setText(symbol)
     
     def update_optimize_controls(self, enabled: bool):
         self.optimize_method_combo.setEnabled(enabled)
@@ -3571,6 +3583,9 @@ class BacktestWidget(QWidget):
         
         # 启用导出按钮
         self.export_button.setEnabled(True)
+        backtest_params = results.get('backtest_params', {}) if isinstance(results, dict) else {}
+        symbol = backtest_params.get('stock_code') if isinstance(backtest_params, dict) else None
+        signal_bus.emit(Events.STRATEGY_STOPPED, results=results, symbol=symbol)
     
     def handle_error(self, error_msg: str):
         """处理错误"""
