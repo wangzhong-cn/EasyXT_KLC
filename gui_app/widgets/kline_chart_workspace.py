@@ -14,6 +14,9 @@ from PyQt5.QtCore import Qt, QTimer, QDate, QFileSystemWatcher
 import pandas as pd
 import numpy as np
 
+from core.events import Events
+from core.signal_bus import signal_bus
+
 class KLineChartWorkspace(QWidget):
     def __init__(self):
         super().__init__()
@@ -42,6 +45,7 @@ class KLineChartWorkspace(QWidget):
         self.file_watcher = QFileSystemWatcher(self)
         self.file_watcher.fileChanged.connect(self._on_duckdb_changed)
         self.init_ui()
+        self._connect_events()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -82,6 +86,35 @@ class KLineChartWorkspace(QWidget):
         self.root_splitter.setCollapsible(1, True)
         self.root_splitter.splitterMoved.connect(self._enforce_split_limits)
         QTimer.singleShot(0, self._apply_initial_split)
+
+    def _connect_events(self):
+        signal_bus.subscribe(Events.SYMBOL_SELECTED, self.load_symbol)
+        signal_bus.subscribe(Events.PERIOD_CHANGED, self.change_period)
+        signal_bus.subscribe(Events.ORDER_SUBMITTED, self.mark_order)
+
+    def load_symbol(self, symbol: str, **kwargs):
+        if not symbol:
+            return
+        self.symbol_input.setText(symbol)
+        self.refresh_chart_data()
+
+    def change_period(self, period: str, **kwargs):
+        if not period:
+            return
+        index = self.period_combo.findText(period)
+        if index >= 0:
+            self.period_combo.setCurrentIndex(index)
+        self.refresh_chart_data()
+
+    def mark_order(self, side: str, symbol: str, price: float, volume: int, **kwargs):
+        if self.chart is None:
+            return
+        current_symbol = self.symbol_input.text().strip()
+        if symbol != current_symbol:
+            return
+        normalized_side = (side or "").lower()
+        marker_text = f"{'📈' if normalized_side == 'buy' else '📉'} {normalized_side.upper()}"
+        self.chart.marker(text=marker_text)
 
     def _create_left_panel(self) -> QWidget:
         panel = QWidget()
@@ -479,6 +512,8 @@ class KLineChartWorkspace(QWidget):
         self.last_bar_time = chart_data["time"].iloc[-1]
         self.last_close = float(chart_data["close"].iloc[-1])
         self._evaluate_signals(chart_data)
+        signal_bus.emit(Events.CHART_DATA_LOADED, symbol=symbol, period=period)
+        signal_bus.emit(Events.DATA_UPDATED, symbol=symbol, period=period)
 
     def refresh_latest_bar(self):
         if self.chart is None or self.interface is None:
@@ -515,6 +550,7 @@ class KLineChartWorkspace(QWidget):
         self.last_close = current_close
         self.last_bar_time = last_row["time"]
         self._evaluate_signals(self.last_data)
+        signal_bus.emit(Events.DATA_UPDATED, symbol=symbol, period=period)
 
     def _merge_latest_data(self, latest_data: pd.DataFrame) -> pd.DataFrame:
         if self.last_data is None or self.last_data.empty:

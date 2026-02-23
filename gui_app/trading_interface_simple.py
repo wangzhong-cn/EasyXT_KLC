@@ -22,6 +22,9 @@ from PyQt5.QtGui import QFont, QColor
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.events import Events
+from core.signal_bus import signal_bus
+
 try:
     import easy_xt
     EASYXT_AVAILABLE = True
@@ -57,6 +60,15 @@ class TradingInterface(QMainWindow):
         self.init_ui()
         self.setup_timer()
         self.setup_style()
+        self._connect_events()
+
+    def _connect_events(self):
+        signal_bus.subscribe(Events.CHART_DATA_LOADED, self.update_stock_code)
+
+    def update_stock_code(self, symbol: str, **kwargs):
+        if not symbol:
+            return
+        self.stock_combo.setCurrentText(symbol)
         
     def init_ui(self):
         """初始化用户界面"""
@@ -628,12 +640,14 @@ class TradingInterface(QMainWindow):
                     self.refresh_account_info()
                     if hasattr(self, "status_bar") and self.status_bar:
                         self.status_bar.showMessage(f"自动交易 {side} {stock_code} {volume} @{price}", 5000)
+                    signal_bus.emit(Events.ORDER_SUBMITTED, side=side, symbol=stock_code, price=price, volume=volume)
                     return True
                 if hasattr(self, "status_bar") and self.status_bar:
                     self.status_bar.showMessage("自动交易下单失败", 5000)
                 return False
             if hasattr(self, "status_bar") and self.status_bar:
                 self.status_bar.showMessage(f"模拟交易 {side} {stock_code} {volume} @{price}", 5000)
+            signal_bus.emit(Events.ORDER_SUBMITTED, side=side, symbol=stock_code, price=price, volume=volume)
             return True
         except Exception:
             if hasattr(self, "status_bar") and self.status_bar:
@@ -656,12 +670,13 @@ class TradingInterface(QMainWindow):
                 if result:
                     QMessageBox.information(self, "交易成功", f"买入订单已提交\\n{stock_code} {volume}股 @{price}")
                     self.refresh_account_info()
+                    signal_bus.emit(Events.ORDER_SUBMITTED, side="buy", symbol=stock_code, price=price, volume=volume)
                 else:
                     QMessageBox.warning(self, "交易失败", "买入订单提交失败")
             else:
-                # 模拟交易
                 QMessageBox.information(self, "模拟交易", 
                                       f"模拟买入: {stock_code}\\n数量: {volume}股\\n价格: {price}")
+                signal_bus.emit(Events.ORDER_SUBMITTED, side="buy", symbol=stock_code, price=price, volume=volume)
                 
         except Exception as e:
             QMessageBox.critical(self, "交易错误", f"买入失败: {str(e)}")
@@ -682,12 +697,13 @@ class TradingInterface(QMainWindow):
                 if result:
                     QMessageBox.information(self, "交易成功", f"卖出订单已提交\\n{stock_code} {volume}股 @{price}")
                     self.refresh_account_info()
+                    signal_bus.emit(Events.ORDER_SUBMITTED, side="sell", symbol=stock_code, price=price, volume=volume)
                 else:
                     QMessageBox.warning(self, "交易失败", "卖出订单提交失败")
             else:
-                # 模拟交易
                 QMessageBox.information(self, "模拟交易", 
                                       f"模拟卖出: {stock_code}\\n数量: {volume}股\\n价格: {price}")
+                signal_bus.emit(Events.ORDER_SUBMITTED, side="sell", symbol=stock_code, price=price, volume=volume)
                 
         except Exception as e:
             QMessageBox.critical(self, "交易错误", f"卖出失败: {str(e)}")
