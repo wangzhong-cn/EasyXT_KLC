@@ -27,7 +27,8 @@ except ImportError:
     EASYXT_AVAILABLE = False
     print("警告: easy_xt未安装，部分功能将不可用")
 
-from core.signal_bus import SignalBus
+from core.events import Events
+from core.signal_bus import signal_bus
 from core.theme_manager import ThemeManager
 
 class MainWindow(QMainWindow):
@@ -36,7 +37,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.executor_thread = None
-        self.signal_bus = SignalBus()
+        self.signal_bus = signal_bus
         self.init_ui()
         
     def init_ui(self):
@@ -246,7 +247,7 @@ class MainWindow(QMainWindow):
                 }
             """)
             self.status_bar.showMessage("MiniQMT未连接，请检查QMT客户端是否启动")
-        self.signal_bus.emit("connection_status_changed", connected=connected)
+        self.signal_bus.emit(Events.CONNECTION_STATUS_CHANGED, connected=connected)
 
     def closeEvent(self, a0):
         """关闭事件"""
@@ -272,7 +273,8 @@ def main():
     font = QFont("Microsoft YaHei", 9)
     app.setFont(font)
     
-    theme_manager = ThemeManager()
+    config_path = os.path.join(project_path, "config", "unified_config.json")
+    theme_manager = ThemeManager(config_path=config_path)
     theme_manager.apply(app)
     
     # 创建并显示主窗口

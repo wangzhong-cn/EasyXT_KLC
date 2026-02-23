@@ -28,3 +28,6 @@ class SignalBus:
                 handler(**payload)
             except Exception:
                 logger.exception("Signal handler error: %s", event)
+
+
+signal_bus = SignalBus()

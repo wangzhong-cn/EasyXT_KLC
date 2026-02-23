@@ -1,0 +1,13 @@
+class Events:
+    CONNECTION_STATUS_CHANGED = "connection_status_changed"
+    SYMBOL_SELECTED = "symbol_selected"
+    CHART_DATA_LOADED = "chart_data_loaded"
+    PERIOD_CHANGED = "period_changed"
+    ORDER_SUBMITTED = "order_submitted"
+    ORDER_FILLED = "order_filled"
+    POSITION_UPDATED = "position_updated"
+    STRATEGY_STARTED = "strategy_started"
+    STRATEGY_STOPPED = "strategy_stopped"
+    SIGNAL_GENERATED = "signal_generated"
+    DATA_DOWNLOADED = "data_downloaded"
+    DATA_UPDATED = "data_updated"
