@@ -130,9 +130,28 @@ else:
         class BaseStrategy:
             pass
 
+# GUI 策略类名 → strategy_factory 类型映射
+# 参数适配：GUI 的 position_size → BaseStrategy 的 trade_volume 等
+_GUI_NAME_TO_FACTORY: dict[str, str] = {
+    "DualMovingAverageStrategy": "trend",
+    "RSIStrategy": "reversion",
+    # MACDStrategy 暂无原生 BaseStrategy 子类，保留 Engine C 内部实现
+}
+
+# GUI 参数名 → BaseStrategy 参数名
+_GUI_PARAM_ADAPTER: dict[str, str] = {
+    "position_size": "trade_volume",
+    "rsi_buy": "rsi_lower",
+    "rsi_sell": "rsi_upper",
+}
+
+
 class AdvancedBacktestEngine:
     """
-    高级回测引擎
+    高级回测引擎（FROZEN — 仅维护性修复）
+
+    新增策略请通过 strategies.strategy_factory 注册。
+    新增回测需求请使用 easyxt_backtest.strategy_runner.StrategyRunner。
 
     功能特性：
     1. 基于Backtrader的专业回测框架
@@ -434,8 +453,44 @@ class AdvancedBacktestEngine:
         if str(self.data_adjust or "none").lower() == "none" and not allow_raw:
             return False
         name = str(self.strategy_name or "")
-        supported = {"DualMovingAverageStrategy", "RSIStrategy", "MACDStrategy"}
-        return name in supported
+        # 固定白名单 + strategy_factory 动态探测
+        _HARDCODED = {"DualMovingAverageStrategy", "RSIStrategy", "MACDStrategy"}
+        if name in _HARDCODED:
+            return True
+        # 检查 strategy_factory 是否能创建
+        gui_type = _GUI_NAME_TO_FACTORY.get(name)
+        return gui_type is not None
+
+    def _try_factory_strategy(self) -> Optional[Any]:
+        """尝试通过 strategy_factory 创建 BaseStrategy 实例。
+
+        返回 BaseStrategy 实例或 None（需回退到内部 _GuiNativeSignalStrategy）。
+        """
+        name = str(self.strategy_name or "")
+        factory_type = _GUI_NAME_TO_FACTORY.get(name)
+        if factory_type is None:
+            return None
+        try:
+            from strategies.strategy_factory import create_strategy_from_config
+            # 适配 GUI 参数名 → BaseStrategy 参数名
+            adapted = {}
+            raw = dict(self.strategy_params or {})
+            for k, v in raw.items():
+                adapted[_GUI_PARAM_ADAPTER.get(k, k)] = v
+            # 构造轻量 config 对象
+            class _Cfg:
+                pass
+            cfg = _Cfg()
+            cfg.strategy_type = factory_type  # type: ignore[attr-defined]
+            cfg.strategy_id = f"gui_{name}"  # type: ignore[attr-defined]
+            cfg.parameters = adapted  # type: ignore[attr-defined]
+            strategy = create_strategy_from_config(cfg)
+            # 将 adapted params 注入策略（on_init 时读取 context.params）
+            strategy._gui_params = adapted  # type: ignore[attr-defined]
+            return strategy
+        except Exception as e:
+            logger.debug("strategy_factory 创建失败(%s)，回退内部策略: %s", name, e)
+            return None
 
     def _run_native_backtest(self) -> dict[str, Any]:
         try:
@@ -447,7 +502,11 @@ class AdvancedBacktestEngine:
             print(f"[WARNING] 原生引擎导入失败，回退Backtrader: {e}")
             return {}
 
-        class _GuiNativeSignalStrategy(NativeStrategyBase):
+        # ── 优先通过 strategy_factory 创建原生策略 ──────────────────
+        factory_strategy = self._try_factory_strategy()
+        # factory_strategy 非 None 时跳过下方的 _GuiNativeSignalStrategy
+
+        class _GuiNativeSignalStrategy(NativeStrategyBase):  # legacy — FROZEN
             def __init__(self, strategy_id: str, strategy_name: str, params: dict[str, Any]):
                 super().__init__(strategy_id)
                 self._name = strategy_name
@@ -560,11 +619,15 @@ class AdvancedBacktestEngine:
             )
         )
         native_engine._load_data = lambda *a, **k: {code: df}
-        strategy = _GuiNativeSignalStrategy(
-            strategy_id=f"gui_{str(self.strategy_name or 'native')}",
-            strategy_name=str(self.strategy_name or "DualMovingAverageStrategy"),
-            params=dict(self.strategy_params or {}),
-        )
+        # 优先使用 strategy_factory 创建的策略实例
+        if factory_strategy is not None:
+            strategy = factory_strategy
+        else:
+            strategy = _GuiNativeSignalStrategy(
+                strategy_id=f"gui_{str(self.strategy_name or 'native')}",
+                strategy_name=str(self.strategy_name or "DualMovingAverageStrategy"),
+                params=dict(self.strategy_params or {}),
+            )
         adjust_map = {
             "front": "qfq",
             "qfq": "qfq",
