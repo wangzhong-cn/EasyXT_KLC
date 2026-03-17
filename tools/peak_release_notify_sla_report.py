@@ -926,12 +926,12 @@ def main(argv: list[str] | None = None) -> int:
             batch_exit_code = 0
         else:
             if not args.batch_update_ack_file or not args.batch_update_ack_file.exists():
-                print(f"[ERR] batch update file not found: {args.batch_update_ack_file}")
+                print("[ERR] batch update file not found:", args.batch_update_ack_file)
                 return 1
             try:
                 batch_payload = json.loads(args.batch_update_ack_file.read_text(encoding="utf-8"))
             except Exception:
-                print(f"[ERR] invalid batch update json: {args.batch_update_ack_file}")
+                print("[ERR] invalid batch update json:", args.batch_update_ack_file)
                 return 1
             if not isinstance(batch_payload, list):
                 print("[ERR] batch update json must be an array")
