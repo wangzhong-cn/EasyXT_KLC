@@ -1,4 +1,4 @@
-﻿﻿# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -324,3 +324,29 @@ strategies/小市值基础策略V2_QMT版.py
 strategies/小市值基础策略V2.py
 tools/diagnose_front_adjust_null.py
 tools/restore_widget_from_github.py
+myenv/
+artifacts/
+data_export/
+.tmp_*.json
+.tmp_*.ddb
+data_updater_checkpoint.json
+cov_*.txt
+coverage.txt
+engine_cov.txt
+gate_stderr_latest.txt
+pytest_*.txt
+reg_*.txt
+regression_*.txt
+smoke_*.txt
+test_*.txt
+tf*.txt
+udi_test.txt
+uni_cov.txt
+diag_*.py
+diagnose_*.py
+inspect_*.py
+google_gemini_demo.py
+refactor_t1_part1.py
+test_v2*.json
+docs/Untitled-*.jsonc
+*.dmp
