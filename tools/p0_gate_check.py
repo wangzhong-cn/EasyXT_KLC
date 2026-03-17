@@ -52,7 +52,7 @@ PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 BASELINE_FILE = PROJECT_ROOT / ".p0_baseline.json"
 
 # 脚本版本号：与 baseline 签名绑定，跨版本使用旧 baseline 时会发出警告
-SCRIPT_VERSION = "2.2.0"
+SCRIPT_VERSION = "2.3.0"
 
 
 def _get_git_commit() -> str:
@@ -955,6 +955,149 @@ def check_sla_gate() -> CheckResult:
     return CheckResult("sla_daily_gate", status, detail, violations)
 
 
+def check_duckdb_write_probe() -> CheckResult:
+    db_path = os.environ.get("EASYXT_DUCKDB_PATH", "")
+    try:
+        from data_manager.duckdb_connection_pool import resolve_duckdb_path
+        resolved = resolve_duckdb_path(db_path if db_path else None)
+    except Exception:
+        resolved = db_path or "d:/stockdata/stock_data.ddb"
+    db_file = pathlib.Path(resolved)
+    parent = db_file.parent
+    violations: list[Violation] = []
+    if not parent.exists():
+        violations.append(
+            Violation(
+                location=str(parent),
+                message=f"DuckDB 目录不存在: {parent}",
+                severity="high",
+                fix_hint="创建数据目录并确保服务账户可写",
+            )
+        )
+    if not db_file.exists():
+        violations.append(
+            Violation(
+                location=str(db_file),
+                message=f"DuckDB 文件不存在: {db_file}",
+                severity="high",
+                fix_hint="先初始化数据库文件或修正 EASYXT_DUCKDB_PATH",
+            )
+        )
+    if violations:
+        return CheckResult("duckdb_write_probe", "fail", "DuckDB 路径基础检查失败", violations)
+    try:
+        import duckdb
+        con = duckdb.connect(str(db_file), read_only=False)
+        try:
+            con.execute("BEGIN TRANSACTION")
+            con.execute("CREATE TABLE IF NOT EXISTS __p0_write_probe(id BIGINT, ts TIMESTAMP)")
+            con.execute("INSERT INTO __p0_write_probe VALUES (1, NOW())")
+            con.execute("DELETE FROM __p0_write_probe WHERE id = 1")
+            con.execute("COMMIT")
+            con.execute("CHECKPOINT")
+        except Exception:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            con.close()
+    except Exception as e:
+        return CheckResult(
+            "duckdb_write_probe",
+            "fail",
+            f"DuckDB 写入探针失败: {e}",
+            [
+                Violation(
+                    location=str(db_file),
+                    message=f"写入/提交/检查点失败: {e}",
+                    severity="high",
+                    fix_hint="排查并发占用、目录权限、磁盘可用空间与 .wal/.write.lock 状态",
+                )
+            ],
+        )
+    return CheckResult("duckdb_write_probe", "pass", f"DuckDB 写入探针通过: {db_file}")
+
+
+def check_realtime_quote_contract() -> CheckResult:
+    violations: list[Violation] = []
+
+    main_window = PROJECT_ROOT / "gui_app" / "main_window.py"
+    if not main_window.exists():
+        return CheckResult("realtime_quote_contract_check", "fail", "main_window.py 不存在", [
+            Violation(
+                location="gui_app/main_window.py",
+                message="入口文件缺失，无法验证实时行情启动契约",
+                severity="high",
+                fix_hint="恢复 gui_app/main_window.py 并重跑门禁",
+            )
+        ])
+    main_src = main_window.read_text(encoding="utf-8", errors="ignore")
+    idx_sys_path = main_src.find("sys.path.insert(0, project_path)")
+    idx_guard_import = main_src.find("from gui_app.widgets.chart.trading_hours_guard import TradingHoursGuard")
+    if idx_guard_import >= 0 and (idx_sys_path < 0 or idx_guard_import < idx_sys_path):
+        violations.append(
+            Violation(
+                location="gui_app/main_window.py",
+                message="TradingHoursGuard 导入出现在 sys.path 注入之前，直接运行会 ModuleNotFoundError",
+                severity="high",
+                fix_hint="先注入 project_path 到 sys.path，再导入 gui_app 包内模块",
+            )
+        )
+
+    ws_file = PROJECT_ROOT / "gui_app" / "widgets" / "kline_chart_workspace.py"
+    if not ws_file.exists():
+        return CheckResult("realtime_quote_contract_check", "fail", "kline_chart_workspace.py 不存在", [
+            Violation(
+                location="gui_app/widgets/kline_chart_workspace.py",
+                message="K 线工作区文件缺失，无法验证实时行情/五档契约",
+                severity="high",
+                fix_hint="恢复 gui_app/widgets/kline_chart_workspace.py 后重跑门禁",
+            )
+        ])
+    ws_src = ws_file.read_text(encoding="utf-8", errors="ignore")
+
+    required_tokens = [
+        "def _normalize_realtime_quote(",
+        "quote = self._normalize_realtime_quote(quote)",
+        "lastPrice",
+        "askPrice",
+    ]
+    for token in required_tokens:
+        if token not in ws_src:
+            violations.append(
+                Violation(
+                    location="gui_app/widgets/kline_chart_workspace.py",
+                    message=f"缺少实时行情归一化契约片段: {token}",
+                    severity="high",
+                    fix_hint="确保实时消息在入管道与更新五档前完成统一字段映射",
+                )
+            )
+    if 'raw.get(f"sell{level}")' not in ws_src:
+        violations.append(
+            Violation(
+                location="gui_app/widgets/kline_chart_workspace.py",
+                message="缺少 sellN -> askN 映射契约",
+                severity="high",
+                fix_hint="在实时归一化中补齐 sell{level} 到 ask{level} 的字段映射",
+            )
+        )
+    if 'raw.get(f"buy{level}")' not in ws_src:
+        violations.append(
+            Violation(
+                location="gui_app/widgets/kline_chart_workspace.py",
+                message="缺少 buyN -> bidN 映射契约",
+                severity="high",
+                fix_hint="在实时归一化中补齐 buy{level} 到 bid{level} 的字段映射",
+            )
+        )
+
+    status: Status = "fail" if violations else "pass"
+    detail = "实时行情接收与五档字段归一化契约通过" if not violations else f"发现 {len(violations)} 处实时契约缺口"
+    return CheckResult("realtime_quote_contract_check", status, detail, violations)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 注册表
 # ─────────────────────────────────────────────────────────────────────────────
@@ -966,11 +1109,13 @@ ALL_CHECKS: dict[str, object] = {
     "xtdata":      check_xtdata_import,
     "publish":     check_atomic_publish,
     "sla":         check_sla_gate,
+    "duckdb_write": check_duckdb_write_probe,
+    "realtime":    check_realtime_quote_contract,
     "schema":      check_schema_version,
     "allowlist":   check_allowlist_governance,
 }
 
-P0_CHECKS = {"credential", "sql", "timestamp", "xtdata", "publish", "sla", "allowlist"}
+P0_CHECKS = {"credential", "sql", "timestamp", "xtdata", "publish", "sla", "duckdb_write", "realtime", "allowlist"}
 P0_RESULT_NAMES = {
     "credential_scan",
     "sql_injection_scan",
@@ -978,6 +1123,8 @@ P0_RESULT_NAMES = {
     "xtdata_import_check",
     "snapshot_publish_atomic",
     "sla_daily_gate",
+    "duckdb_write_probe",
+    "realtime_quote_contract_check",
     "allowlist_governance",
 }
 

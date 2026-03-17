@@ -43,10 +43,36 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 project_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_path not in sys.path:
     sys.path.insert(0, project_path)
+
+from gui_app.widgets.chart.trading_hours_guard import TradingHoursGuard
+
+
+def _ensure_writable_duckdb_env() -> None:
+    try:
+        from data_manager.duckdb_connection_pool import resolve_duckdb_path
+
+        resolved = resolve_duckdb_path()
+    except Exception:
+        resolved = os.environ.get("EASYXT_DUCKDB_PATH", "")
+    if not resolved:
+        return
+    parent = os.path.dirname(resolved) or "."
+    probe = os.path.join(parent, ".easyxt_gui_write_probe.tmp")
+    try:
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+        return
+    except OSError:
+        fallback = os.path.join(project_path, "data", "stock_data.ddb")
+        os.makedirs(os.path.dirname(fallback), exist_ok=True)
+        os.environ["EASYXT_DUCKDB_PATH"] = fallback
 
 Events = importlib.import_module("core.events").Events
 signal_bus = importlib.import_module("core.signal_bus").signal_bus
@@ -352,13 +378,17 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        _ensure_writable_duckdb_env()
         # _logger 必须在所有调用 _p() 的代码之前初始化
         self._logger = logging.getLogger(__name__)
         os.environ["EASYXT_CONNECTION_PROBE_MODE"] = "passive"
-        os.environ.setdefault("EASYXT_ENABLE_XTDATA_QUOTE_PROBE", "0")
+        os.environ.setdefault("EASYXT_ENABLE_XTDATA_QUOTE_PROBE", "1")
         os.environ.setdefault("EASYXT_RT_XTDATA_ONLY", "0")
         os.environ.setdefault("EASYXT_ENABLE_XT_LISTING_DATE", "0")
-        os.environ.setdefault("EASYXT_ENABLE_QMT_ONLINE", "0")
+        os.environ.setdefault("EASYXT_ENABLE_QMT_ONLINE", "1")
+        in_session, _session_name = TradingHoursGuard.current_session()
+        if in_session:
+            os.environ["EASYXT_RT_XTDATA_ONLY"] = "1"
         self.executor_thread = None
         self.signal_bus = signal_bus
         self.service_process = None

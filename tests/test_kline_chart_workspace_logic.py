@@ -929,6 +929,27 @@ class TestThreadSafetyHelpers:
         assert KLineChartWorkspace._is_thread_running(stub, None) is False
 
 
+class TestNormalizeRealtimeQuote:
+    def test_normalize_supports_nested_data_and_last_price(self):
+        stub = _make_stub()
+        quote = {"data": {"lastPrice": 11.2, "openPrice": 10.8, "highPrice": 11.5, "lowPrice": 10.6, "vol": 12345}}
+        normalized = KLineChartWorkspace._normalize_realtime_quote(stub, quote)
+        assert normalized["price"] == 11.2
+        assert normalized["open"] == 10.8
+        assert normalized["high"] == 11.5
+        assert normalized["low"] == 10.6
+        assert normalized["volume"] == 12345
+
+    def test_normalize_supports_sell_buy_schema_for_orderbook(self):
+        stub = _make_stub()
+        quote = {"sell1": 11.31, "buy1": 11.29, "sell1_vol": 1200, "buy1_vol": 800, "price": 11.30}
+        normalized = KLineChartWorkspace._normalize_realtime_quote(stub, quote)
+        assert normalized["ask1"] == 11.31
+        assert normalized["bid1"] == 11.29
+        assert normalized["ask1_vol"] == 1200
+        assert normalized["bid1_vol"] == 800
+
+
 # ---------------------------------------------------------------------------
 # 覆盖率回退守卫
 # 确保关键分支都被上方的测试覆盖到；若日后误删测试导致分支丢失，本类会第一时间报警

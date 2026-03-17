@@ -481,6 +481,8 @@ class KLineChartWorkspace(QWidget):
         self._quote_worker: Optional[_RealtimeQuoteWorker] = None
         self._ws_quote_worker: Optional[_WsMarketQuoteWorker] = None
         self._use_ws_quote: bool = os.environ.get("EASYXT_USE_WS_QUOTE", "1") in ("1", "true", "True")
+        self._ws_error_consecutive: int = 0
+        self._ws_error_emit_threshold: int = int(os.environ.get("EASYXT_WS_ERROR_ALERT_THRESHOLD", "3"))
         self._last_realtime_probe_line: Optional[str] = None
         self._orderbook_sink: Optional[RealtimeDuckDBSink] = None
         self.orderbook_panel: Optional[OrderbookPanel] = None
@@ -2111,6 +2113,8 @@ class KLineChartWorkspace(QWidget):
         self._quote_worker.start()
 
     def _on_quote_received(self, quote: dict, symbol: str):
+        quote = self._normalize_realtime_quote(quote)
+        self._ws_error_consecutive = 0
         self._last_quote_monotonic = time.monotonic()
         quote_ts = pd.Timestamp.now().strftime("%H:%M:%S")
         self._emit_realtime_probe(connected=True, reason="quote_ok", quote_ts=quote_ts)
@@ -2216,10 +2220,16 @@ class KLineChartWorkspace(QWidget):
         self._update_orderbook(quote)
 
     def _on_quote_error(self, symbol: str, reason: str):
-        self._emit_realtime_probe(connected=False, reason=reason or "quote_error")
-        self._load_orderbook_snapshot_from_db(reason=reason or "quote_error")
+        reason_text = reason or "quote_error"
+        if str(reason_text).startswith("ws_conn_error"):
+            self._ws_error_consecutive += 1
+            if self._ws_error_consecutive < max(1, self._ws_error_emit_threshold):
+                return
+        self._emit_realtime_probe(connected=False, reason=reason_text)
+        self._load_orderbook_snapshot_from_db(reason=reason_text)
 
     def _apply_realtime_quote(self, quote: dict, symbol: str):
+        quote = self._normalize_realtime_quote(quote)
         price = float(quote.get("price") or 0)
         if price <= 0:
             return
@@ -2298,7 +2308,64 @@ class KLineChartWorkspace(QWidget):
         self.last_bar_time = bar_time
         self._update_orderbook(quote)
 
+    def _normalize_realtime_quote(self, quote: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(quote, dict):
+            return {}
+        raw = quote.get("data") if isinstance(quote.get("data"), dict) else quote
+        normalized: dict[str, Any] = dict(raw)
+
+        price = (
+            raw.get("price")
+            or raw.get("lastPrice")
+            or raw.get("last_price")
+            or raw.get("close")
+            or raw.get("current")
+            or 0
+        )
+        normalized["price"] = float(price or 0)
+        normalized["open"] = float(raw.get("open") or raw.get("openPrice") or normalized["price"] or 0)
+        normalized["high"] = float(raw.get("high") or raw.get("highPrice") or normalized["price"] or 0)
+        normalized["low"] = float(raw.get("low") or raw.get("lowPrice") or normalized["price"] or 0)
+        normalized["volume"] = float(raw.get("volume") or raw.get("vol") or 0)
+        normalized["amount"] = float(raw.get("amount") or raw.get("turnover") or 0)
+
+        ask_prices = raw.get("askPrice") or raw.get("ask_price") or []
+        bid_prices = raw.get("bidPrice") or raw.get("bid_price") or []
+        ask_vols = raw.get("askVol") or raw.get("ask_volume") or []
+        bid_vols = raw.get("bidVol") or raw.get("bid_volume") or []
+        for i in range(5):
+            level = i + 1
+            if i < len(ask_prices):
+                normalized[f"ask{level}"] = ask_prices[i]
+            if i < len(ask_vols):
+                normalized[f"ask{level}_vol"] = ask_vols[i]
+            if i < len(bid_prices):
+                normalized[f"bid{level}"] = bid_prices[i]
+            if i < len(bid_vols):
+                normalized[f"bid{level}_vol"] = bid_vols[i]
+
+            if f"ask{level}" not in normalized:
+                normalized[f"ask{level}"] = raw.get(f"ask{level}") or raw.get(f"sell{level}") or raw.get(f"a{level}_p")
+            if f"bid{level}" not in normalized:
+                normalized[f"bid{level}"] = raw.get(f"bid{level}") or raw.get(f"buy{level}") or raw.get(f"b{level}_p")
+            if f"ask{level}_vol" not in normalized:
+                normalized[f"ask{level}_vol"] = (
+                    raw.get(f"ask{level}_vol")
+                    or raw.get(f"ask{level}_volume")
+                    or raw.get(f"sell{level}_vol")
+                    or raw.get(f"a{level}_v")
+                )
+            if f"bid{level}_vol" not in normalized:
+                normalized[f"bid{level}_vol"] = (
+                    raw.get(f"bid{level}_vol")
+                    or raw.get(f"bid{level}_volume")
+                    or raw.get(f"buy{level}_vol")
+                    or raw.get(f"b{level}_v")
+                )
+        return normalized
+
     def _update_orderbook(self, quote: dict):
+        quote = self._normalize_realtime_quote(quote)
         if hasattr(self, "orderbook_panel") and self.orderbook_panel is not None:
             self.orderbook_panel.update_orderbook(quote)
             return

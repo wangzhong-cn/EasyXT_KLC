@@ -16,6 +16,8 @@ timestamp_contract_check == pass
 credential_scan          == pass
 snapshot_publish_atomic  == pass
 sla_daily_gate           == pass
+duckdb_write_probe       == pass
+realtime_quote_contract_check == pass
 ```
 
 **一键全量验收**（推荐 CI 使用）：
