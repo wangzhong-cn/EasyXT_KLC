@@ -305,3 +305,70 @@ class TestVerifyChainIntegrity:
         result = trail.verify_chain_integrity()
         assert result["ok"] is False
         assert result["signals"]["chain_breaks"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: account_id 多账户治理
+# ---------------------------------------------------------------------------
+
+
+class TestAccountIdEnrichment:
+    """P2-4: 审计三表 account_id 维度增强。"""
+
+    def test_signal_account_id_stored(self, trail):
+        sid = trail.record_signal("s1", "600519.SH", "buy", account_id="ACC_001")
+        chain = trail.get_chain(sid)
+        assert chain.signal is not None
+        assert chain.signal.account_id == "ACC_001"
+
+    def test_signal_account_id_default_empty(self, trail):
+        sid = trail.record_signal("s1", "600519.SH", "buy")
+        chain = trail.get_chain(sid)
+        assert chain.signal.account_id == ""
+
+    def test_order_account_id(self, trail):
+        sid = trail.record_signal("s1", "600519.SH", "buy")
+        trail.record_order("O1", sid, "600519.SH", "buy", 100, 1800.0, account_id="ACC_A")
+        chain = trail.get_chain(sid)
+        assert chain.orders[0].account_id == "ACC_A"
+
+    def test_fill_account_id(self, trail):
+        sid = trail.record_signal("s1", "600519.SH", "buy")
+        trail.record_order("O2", sid, "600519.SH", "buy", 100, 1800.0)
+        trail.record_fill("O2", 1801.0, 100, pnl_snapshot=50.0, account_id="ACC_B")
+        chain = trail.get_chain(sid)
+        assert chain.fills[0].account_id == "ACC_B"
+
+    def test_get_signals_by_account(self, trail):
+        trail.record_signal("s1", "600519.SH", "buy", account_id="ACC_001")
+        trail.record_signal("s2", "000001.SZ", "sell", account_id="ACC_001")
+        trail.record_signal("s3", "600036.SH", "buy", account_id="ACC_002")
+        results = trail.get_signals_by_account("ACC_001")
+        assert len(results) == 2
+
+    def test_get_signals_by_account_empty(self, trail):
+        trail.record_signal("s1", "600519.SH", "buy", account_id="ACC_001")
+        results = trail.get_signals_by_account("NONEXISTENT")
+        assert len(results) == 0
+
+    def test_get_signals_by_account_limit(self, trail):
+        for i in range(5):
+            trail.record_signal("s1", f"00000{i}.SZ", "buy", account_id="ACC_X")
+        results = trail.get_signals_by_account("ACC_X", limit=3)
+        assert len(results) == 3
+
+    def test_get_signals_by_account_db_exception(self):
+        t = _make_failing_trail()
+        result = t.get_signals_by_account("ACC_001")
+        assert result == []
+
+    def test_schema_version_bumped(self):
+        from core.audit_trail import _SCHEMA_VERSION
+        assert _SCHEMA_VERSION == 3
+
+    def test_account_id_column_in_all_tables(self, trail):
+        """验证迁移后三表都有 account_id 列。"""
+        with trail._db.get_write_connection() as con:
+            for table in ("audit_signals", "audit_orders", "audit_fills"):
+                cols = [r[1] for r in con.execute(f"PRAGMA table_info('{table}')").fetchall()]
+                assert "account_id" in cols, f"{table} 缺少 account_id 列"

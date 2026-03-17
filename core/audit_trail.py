@@ -32,7 +32,7 @@ def _utc_ms() -> int:
 
 
 # 当前 Schema 版本（每次修改表结构时递增，用于迁移可观测）
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 # DDL —— 首次建表（IF NOT EXISTS 幂等）
 _DDL = """
@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS audit_signals (
     entry_hash  VARCHAR NOT NULL DEFAULT '',
     prev_hash   VARCHAR NOT NULL DEFAULT '',   -- 前一条记录的 entry_hash（链式不可篡改）
     batch_hash  VARCHAR NOT NULL DEFAULT '',   -- 同批次关联写入的组合哈希
-    sig_version INTEGER NOT NULL DEFAULT 0     -- 0=迁移旧记录，1=v1 审计链规范
+    sig_version INTEGER NOT NULL DEFAULT 0,    -- 0=迁移旧记录，1=v1 审计链规范
+    account_id  VARCHAR NOT NULL DEFAULT ''    -- 账户ID（Phase 2 多账户治理）
 );
 
 CREATE TABLE IF NOT EXISTS audit_orders (
@@ -62,7 +63,8 @@ CREATE TABLE IF NOT EXISTS audit_orders (
     entry_hash  VARCHAR NOT NULL DEFAULT '',
     prev_hash   VARCHAR NOT NULL DEFAULT '',
     batch_hash  VARCHAR NOT NULL DEFAULT '',
-    sig_version INTEGER NOT NULL DEFAULT 0
+    sig_version INTEGER NOT NULL DEFAULT 0,
+    account_id  VARCHAR NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS audit_fills (
@@ -75,7 +77,8 @@ CREATE TABLE IF NOT EXISTS audit_fills (
     entry_hash   VARCHAR NOT NULL DEFAULT '',
     prev_hash    VARCHAR NOT NULL DEFAULT '',
     batch_hash   VARCHAR NOT NULL DEFAULT '',   -- SHA-256(signal_id|order_id|fill_id|entry_hash)
-    sig_version  INTEGER NOT NULL DEFAULT 0
+    sig_version  INTEGER NOT NULL DEFAULT 0,
+    account_id   VARCHAR NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS audit_schema_migrations (
@@ -92,12 +95,15 @@ _MIGRATION_ADDS = [
     ("audit_signals", "prev_hash",   "VARCHAR NOT NULL DEFAULT ''"),
     ("audit_signals", "batch_hash",  "VARCHAR NOT NULL DEFAULT ''"),
     ("audit_signals", "sig_version", "INTEGER NOT NULL DEFAULT 0"),
+    ("audit_signals", "account_id",  "VARCHAR NOT NULL DEFAULT ''"),
     ("audit_orders",  "prev_hash",   "VARCHAR NOT NULL DEFAULT ''"),
     ("audit_orders",  "batch_hash",  "VARCHAR NOT NULL DEFAULT ''"),
     ("audit_orders",  "sig_version", "INTEGER NOT NULL DEFAULT 0"),
+    ("audit_orders",  "account_id",  "VARCHAR NOT NULL DEFAULT ''"),
     ("audit_fills",   "prev_hash",   "VARCHAR NOT NULL DEFAULT ''"),
     ("audit_fills",   "batch_hash",  "VARCHAR NOT NULL DEFAULT ''"),
     ("audit_fills",   "sig_version", "INTEGER NOT NULL DEFAULT 0"),
+    ("audit_fills",   "account_id",  "VARCHAR NOT NULL DEFAULT ''"),
 ]
 
 
@@ -113,7 +119,8 @@ class AuditSignal:
     entry_hash: str = ""
     prev_hash: str = ""            # 前一条信号的 entry_hash（链式不可抵赖）
     batch_hash: str = ""           # 批次组合哈希
-    sig_version: int = 0           # 0=旧记录，1=v1 审计链规范
+    sig_version: int = 0           # 0=迁移旧记录，1=v1 审计链规范
+    account_id: str = ""           # 账户ID（Phase 2 多账户治理）
 
 
 @dataclass
@@ -130,6 +137,7 @@ class AuditOrder:
     prev_hash: str = ""
     batch_hash: str = ""
     sig_version: int = 0
+    account_id: str = ""
 
 
 @dataclass
@@ -144,6 +152,7 @@ class AuditFill:
     prev_hash: str = ""
     batch_hash: str = ""           # SHA-256(signal_id|order_id|fill_id|entry_hash)
     sig_version: int = 0
+    account_id: str = ""
 
 
 @dataclass
@@ -222,6 +231,7 @@ class AuditTrail:
         price_hint: Optional[float] = None,
         volume_hint: Optional[float] = None,
         signal_id: Optional[str] = None,
+        account_id: str = "",
     ) -> str:
         """记录策略信号，返回 signal_id（UUID）。"""
         sid = signal_id or str(uuid.uuid4())
@@ -240,11 +250,11 @@ class AuditTrail:
                     """
                     INSERT INTO audit_signals
                         (signal_id, strategy_id, code, direction, price_hint, volume_hint,
-                         created_at, entry_hash, prev_hash, batch_hash, sig_version)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         created_at, entry_hash, prev_hash, batch_hash, sig_version, account_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [sid, strategy_id, code, direction, price_hint, volume_hint,
-                     ts, entry_hash, prev_hash, batch_hash, 1],
+                     ts, entry_hash, prev_hash, batch_hash, 1, account_id],
                 )
         except Exception:
             log.exception("record_signal 失败 signal_id=%s", sid)
@@ -259,6 +269,7 @@ class AuditTrail:
         volume: float,
         price: float,
         status: str = "submitted",
+        account_id: str = "",
     ) -> None:
         """记录委托提交。"""
         ts = _utc_ms()
@@ -276,11 +287,11 @@ class AuditTrail:
                     """
                     INSERT OR IGNORE INTO audit_orders
                         (order_id, signal_id, code, direction, volume, price,
-                         submitted_at, status, entry_hash, prev_hash, batch_hash, sig_version)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         submitted_at, status, entry_hash, prev_hash, batch_hash, sig_version, account_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [order_id, signal_id, code, direction, volume, price,
-                     ts, status, entry_hash, prev_hash, batch_hash, 1],
+                     ts, status, entry_hash, prev_hash, batch_hash, 1, account_id],
                 )
         except Exception:
             log.exception("record_order 失败 order_id=%s", order_id)
@@ -292,6 +303,7 @@ class AuditTrail:
         filled_volume: float,
         pnl_snapshot: Optional[float] = None,
         fill_id: Optional[str] = None,
+        account_id: str = "",
     ) -> str:
         """记录成交回报，返回 fill_id。"""
         fid = fill_id or str(uuid.uuid4())
@@ -317,11 +329,11 @@ class AuditTrail:
                     """
                     INSERT INTO audit_fills
                         (fill_id, order_id, filled_at, filled_price, filled_volume,
-                         pnl_snapshot, entry_hash, prev_hash, batch_hash, sig_version)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         pnl_snapshot, entry_hash, prev_hash, batch_hash, sig_version, account_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [fid, order_id, ts, filled_price, filled_volume,
-                     pnl_snapshot, entry_hash, prev_hash, batch_hash, 1],
+                     pnl_snapshot, entry_hash, prev_hash, batch_hash, 1, account_id],
                 )
                 # 同步更新委托状态
                 con.execute(
@@ -400,6 +412,31 @@ class AuditTrail:
             return df.to_dict("records")
         except Exception:
             log.exception("get_signals_by_strategy 失败 strategy_id=%s", strategy_id)
+            return []
+
+    def get_signals_by_account(
+        self, account_id: str, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """查询账户最近 N 条信号（概览，含成交状态）。"""
+        try:
+            with self._db.get_read_connection() as con:
+                df = con.execute(
+                    """
+                    SELECT s.signal_id, s.strategy_id, s.code, s.direction, s.created_at,
+                           COUNT(o.order_id) AS order_count,
+                           SUM(CASE WHEN o.status='filled' THEN 1 ELSE 0 END) AS filled_count
+                    FROM audit_signals s
+                    LEFT JOIN audit_orders o ON s.signal_id = o.signal_id
+                    WHERE s.account_id = ?
+                    GROUP BY s.signal_id, s.strategy_id, s.code, s.direction, s.created_at
+                    ORDER BY s.created_at DESC
+                    LIMIT ?
+                    """,
+                    [account_id, limit],
+                ).df()
+            return df.to_dict("records")
+        except Exception:
+            log.exception("get_signals_by_account 失败 account_id=%s", account_id)
             return []
 
     # ------------------------------------------------------------------
