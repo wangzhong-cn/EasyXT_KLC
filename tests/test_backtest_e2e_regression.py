@@ -389,16 +389,19 @@ class TestDualEngineMetricsContract:
 # ===========================================================================
 
 class TestBacktestWorkerParamContract:
-    """BacktestWorker.run_single_backtest() UI 参数 → engine 传参契约"""
+    """BacktestWorker.run_single_backtest() UI 参数 → StrategyController 传参契约
+
+    S7 重构后 run_single_backtest 委托给 StrategyController.run_adhoc_backtest，
+    因此契约变为：UI params → controller.run_adhoc_backtest(period=..., adjust=...)。
+    """
 
     def _make_worker(self):
-        """返回最小可用的 fake self，供直接调用 run_single_backtest()。
-
-        run_single_backtest 对非"101因子工作流策略"路径只读 params，
-        不访问任何 QThread 状态，因此 SimpleNamespace 完全够用。
-        """
+        """返回最小可用的 fake self，供直接调用 run_single_backtest()。"""
         import types
-        return types.SimpleNamespace(_stop_requested=False)
+        import gui_app.widgets.backtest_widget as bw
+        ns = types.SimpleNamespace(_stop_requested=False)
+        ns._build_default_strategy_params = bw.BacktestWorker._build_default_strategy_params
+        return ns
 
     def _base_params(self, strategy_name: str = "双均线策略", **overrides) -> dict:
         params = {
@@ -415,120 +418,80 @@ class TestBacktestWorkerParamContract:
         params.update(overrides)
         return params
 
+    @staticmethod
+    def _mock_adhoc(captured: dict):
+        """返回一个 mock run_adhoc_backtest，把调用参数记录到 captured。"""
+        def _fake_run_adhoc_backtest(self_ctrl, *, stock_data, strategy_name,
+                                     strategy_params, initial_cash, commission,
+                                     period, adjust):
+            captured["period"] = period
+            captured["adjust"] = adjust
+            captured["strategy_name"] = strategy_name
+            captured["call_count"] = captured.get("call_count", 0) + 1
+            return {"ok": True, "metrics": {"total_return": 0.0}, "detailed": {}}
+        return _fake_run_adhoc_backtest
+
     def test_adjust_front_propagates_to_set_data_profile(self, monkeypatch):
-        """params['adjust']='front' → engine.set_data_profile(adjust='front')"""
-        import gui_app.widgets.backtest_widget as bw
-
+        """params['adjust']='front' → controller.run_adhoc_backtest(adjust='front')"""
+        from gui_app.strategy_controller import StrategyController
         captured: dict = {}
+        monkeypatch.setattr(StrategyController, "run_adhoc_backtest", self._mock_adhoc(captured))
 
-        class _FakeEngine:
-            def __init__(self, initial_cash=100_000, commission=0.0003): pass
-            def add_data(self, data, **_): pass
-            def set_data_profile(self, period, adjust):
-                captured["period"] = period
-                captured["adjust"] = adjust
-            def add_strategy(self, cls, **kw): pass
-            def run_backtest(self): return {"total_return": 0.05}
-            def get_detailed_results(self): return {}
-
-        monkeypatch.setattr(bw, "AdvancedBacktestEngine", _FakeEngine)
-
-        worker = self._make_worker()
-        df = _ascending_df(n=30)
-        bw.BacktestWorker.run_single_backtest(worker, df, self._base_params(adjust="front"))
-
+        import gui_app.widgets.backtest_widget as bw
+        bw.BacktestWorker.run_single_backtest(
+            self._make_worker(), _ascending_df(n=30), self._base_params(adjust="front")
+        )
         assert captured.get("adjust") == "front", (
-            "BacktestWorker.run_single_backtest 未将 params['adjust'] 原样传入 set_data_profile"
+            "BacktestWorker.run_single_backtest 未将 params['adjust'] 原样传入 StrategyController"
         )
 
     def test_period_propagates_to_set_data_profile(self, monkeypatch):
-        """params['period']='1w' → engine.set_data_profile(period='1w')"""
-        import gui_app.widgets.backtest_widget as bw
-
+        """params['period']='1w' → controller.run_adhoc_backtest(period='1w')"""
+        from gui_app.strategy_controller import StrategyController
         captured: dict = {}
+        monkeypatch.setattr(StrategyController, "run_adhoc_backtest", self._mock_adhoc(captured))
 
-        class _FakeEngine:
-            def __init__(self, initial_cash=100_000, commission=0.0003): pass
-            def add_data(self, data, **_): pass
-            def set_data_profile(self, period, adjust):
-                captured["period"] = period
-                captured["adjust"] = adjust
-            def add_strategy(self, cls, **kw): pass
-            def run_backtest(self): return {"total_return": 0.0}
-            def get_detailed_results(self): return {}
-
-        monkeypatch.setattr(bw, "AdvancedBacktestEngine", _FakeEngine)
-
-        worker = self._make_worker()
-        df = _ascending_df(n=30)
-        bw.BacktestWorker.run_single_backtest(worker, df, self._base_params(period="1w"))
-
+        import gui_app.widgets.backtest_widget as bw
+        bw.BacktestWorker.run_single_backtest(
+            self._make_worker(), _ascending_df(n=30), self._base_params(period="1w")
+        )
         assert captured.get("period") == "1w"
 
     def test_set_data_profile_called_even_with_none_adjust(self, monkeypatch):
         """adjust 缺席时 fallback 为 'none'，而非抛异常或跳过调用"""
+        from gui_app.strategy_controller import StrategyController
+        captured: dict = {}
+        monkeypatch.setattr(StrategyController, "run_adhoc_backtest", self._mock_adhoc(captured))
+
         import gui_app.widgets.backtest_widget as bw
-
-        called = {"count": 0}
-
-        class _FakeEngine:
-            def __init__(self, initial_cash=100_000, commission=0.0003): pass
-            def add_data(self, data, **_): pass
-            def set_data_profile(self, period, adjust):
-                called["count"] += 1
-                called["adjust"] = adjust
-            def add_strategy(self, cls, **kw): pass
-            def run_backtest(self): return {}
-            def get_detailed_results(self): return {}
-
-        monkeypatch.setattr(bw, "AdvancedBacktestEngine", _FakeEngine)
-
         params = self._base_params()
         params.pop("adjust")  # 故意不传 adjust
 
-        worker = self._make_worker()
-        bw.BacktestWorker.run_single_backtest(worker, _ascending_df(n=20), params)
-
-        assert called["count"] == 1, "set_data_profile 应被调用恰好一次"
-        assert called["adjust"] == "none", "adjust 缺席时应 fallback 为 'none'"
+        bw.BacktestWorker.run_single_backtest(
+            self._make_worker(), _ascending_df(n=20), params
+        )
+        assert captured.get("call_count") == 1, "run_adhoc_backtest 应被调用恰好一次"
+        assert captured.get("adjust") == "none", "adjust 缺席时应 fallback 为 'none'"
 
     def test_adjust_back_propagates_to_set_data_profile(self, monkeypatch):
-        """params['adjust']='back' → engine.set_data_profile(adjust='back')"""
-        import gui_app.widgets.backtest_widget as bw
-
+        """params['adjust']='back' → controller.run_adhoc_backtest(adjust='back')"""
+        from gui_app.strategy_controller import StrategyController
         captured: dict = {}
+        monkeypatch.setattr(StrategyController, "run_adhoc_backtest", self._mock_adhoc(captured))
 
-        class _FakeEngine:
-            def __init__(self, initial_cash=100_000, commission=0.0003): pass
-            def add_data(self, data, **_): pass
-            def set_data_profile(self, period, adjust):
-                captured["adjust"] = adjust
-            def add_strategy(self, cls, **kw): pass
-            def run_backtest(self): return {"total_return": 0.0}
-            def get_detailed_results(self): return {}
-
-        monkeypatch.setattr(bw, "AdvancedBacktestEngine", _FakeEngine)
+        import gui_app.widgets.backtest_widget as bw
         bw.BacktestWorker.run_single_backtest(
             self._make_worker(), _ascending_df(n=20), self._base_params(adjust="back")
         )
         assert captured.get("adjust") == "back"
 
     def test_adjust_none_propagates_to_set_data_profile(self, monkeypatch):
-        """params['adjust']='none' → engine.set_data_profile(adjust='none')"""
-        import gui_app.widgets.backtest_widget as bw
-
+        """params['adjust']='none' → controller.run_adhoc_backtest(adjust='none')"""
+        from gui_app.strategy_controller import StrategyController
         captured: dict = {}
+        monkeypatch.setattr(StrategyController, "run_adhoc_backtest", self._mock_adhoc(captured))
 
-        class _FakeEngine:
-            def __init__(self, initial_cash=100_000, commission=0.0003): pass
-            def add_data(self, data, **_): pass
-            def set_data_profile(self, period, adjust):
-                captured["adjust"] = adjust
-            def add_strategy(self, cls, **kw): pass
-            def run_backtest(self): return {"total_return": 0.0}
-            def get_detailed_results(self): return {}
-
-        monkeypatch.setattr(bw, "AdvancedBacktestEngine", _FakeEngine)
+        import gui_app.widgets.backtest_widget as bw
         bw.BacktestWorker.run_single_backtest(
             self._make_worker(), _ascending_df(n=20), self._base_params(adjust="none")
         )
