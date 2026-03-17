@@ -207,6 +207,69 @@ class StrategyController:
             log.error("run_backtest(%s) failed: %s", strategy_id, exc)
             return {"ok": False, "error": str(exc)}
 
+    def run_adhoc_backtest(
+        self,
+        stock_data: Any,
+        strategy_name: str,
+        strategy_params: dict[str, Any],
+        initial_cash: float = 1_000_000.0,
+        commission: float = 0.0003,
+        period: str = "1d",
+        adjust: str = "none",
+    ) -> dict[str, Any]:
+        """执行临时（非持久化策略）回测。
+
+        供 BacktestWidget 使用，将引擎创建集中到控制器层。
+
+        Returns::
+            {"ok": True, "metrics": {...}, "detailed": {...}, "elapsed_sec": 1.23}
+            {"ok": False, "error": "..."}
+        """
+        t0 = time.perf_counter()
+        try:
+            engine_cls = _safe_import(
+                "gui_app.backtest.engine", "AdvancedBacktestEngine"
+            )
+            if engine_cls is None:
+                return {"ok": False, "error": "回测引擎不可用"}
+
+            engine = engine_cls(initial_cash=initial_cash, commission=commission)
+            engine.add_data(stock_data)
+            if hasattr(engine, "set_data_profile"):
+                engine.set_data_profile(period=period, adjust=adjust)
+
+            strategy_class = self._resolve_strategy_class(strategy_name)
+            if strategy_class is None:
+                return {"ok": False, "error": f"策略不可用: {strategy_name}"}
+
+            engine.add_strategy(strategy_class, **strategy_params)
+            metrics = engine.run_backtest()
+            detailed = engine.get_detailed_results()
+            elapsed = round(time.perf_counter() - t0, 3)
+            return {
+                "ok": True,
+                "metrics": metrics,
+                "detailed": detailed,
+                "elapsed_sec": elapsed,
+            }
+        except Exception as exc:
+            log.error("run_adhoc_backtest failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _resolve_strategy_class(strategy_name: str) -> Any:
+        """根据中文策略名称解析策略类。"""
+        mapping = {
+            "双均线策略": "DualMovingAverageStrategy",
+            "RSI策略": "RSIStrategy",
+            "MACD策略": "MACDStrategy",
+            "固定网格策略": "GridStrategy",
+            "自适应网格策略": "AdaptiveGridStrategy",
+            "ATR网格策略": "ATRGridStrategy",
+        }
+        class_name = mapping.get(strategy_name, "DualMovingAverageStrategy")
+        return _safe_import("gui_app.backtest.engine", class_name)
+
     # ------------------------------------------------------------------
     # 3. 绩效指标
     # ------------------------------------------------------------------

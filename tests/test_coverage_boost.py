@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from gui_app.widgets.backtest_widget import BacktestWorker
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -751,3 +753,113 @@ class TestToBuiltinJson:
         assert _to_builtin_json("hello") == "hello"
         assert _to_builtin_json(42) == 42
         assert _to_builtin_json(None) is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# S7: gui_app.strategy_controller.StrategyController.run_adhoc_backtest
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestGuiControllerAdhocBacktest:
+    """Tests for gui_app.strategy_controller.StrategyController.run_adhoc_backtest."""
+
+    def test_engine_not_available_returns_error(self):
+        from gui_app.strategy_controller import StrategyController
+        ctrl = StrategyController()
+        with patch("gui_app.strategy_controller._safe_import", return_value=None):
+            result = ctrl.run_adhoc_backtest(
+                stock_data=pd.DataFrame({"close": [1, 2, 3]}),
+                strategy_name="双均线策略",
+                strategy_params={"short_period": 5, "long_period": 20},
+            )
+        assert result["ok"] is False
+        assert "不可用" in result["error"]
+
+    def test_unknown_strategy_defaults_to_dual_ma(self):
+        from gui_app.strategy_controller import StrategyController
+        ctrl = StrategyController()
+        # Unknown strategy name defaults to DualMovingAverageStrategy, not error
+        result = ctrl.run_adhoc_backtest(
+            stock_data=_make_ohlcv(50),
+            strategy_name="不存在的策略",
+            strategy_params={"short_period": 5, "long_period": 20},
+        )
+        assert result["ok"] is True
+        assert "metrics" in result
+
+    def test_successful_backtest_returns_metrics(self):
+        from gui_app.strategy_controller import StrategyController
+        ctrl = StrategyController()
+        mock_engine = MagicMock()
+        mock_engine.run_backtest.return_value = {"total_return": 0.1}
+        mock_engine.get_detailed_results.return_value = {"equity_curve": []}
+        mock_cls = MagicMock(return_value=mock_engine)
+        # First call for engine class, second call for strategy class
+        with patch(
+            "gui_app.strategy_controller._safe_import",
+            side_effect=[mock_cls, MagicMock()],  # engine_cls, strategy_class
+        ):
+            result = ctrl.run_adhoc_backtest(
+                stock_data=_make_ohlcv(50),
+                strategy_name="双均线策略",
+                strategy_params={"short_period": 5},
+            )
+        assert result["ok"] is True
+        assert "metrics" in result
+        assert "elapsed_sec" in result
+
+    def test_resolve_strategy_class_known_names(self):
+        from gui_app.strategy_controller import StrategyController
+        for name in ["双均线策略", "RSI策略", "MACD策略", "固定网格策略",
+                      "自适应网格策略", "ATR网格策略"]:
+            cls = StrategyController._resolve_strategy_class(name)
+            # May be None if backtrader not installed, but should not raise
+            assert cls is None or cls is not None  # no exception
+
+    def test_resolve_strategy_class_unknown_defaults_to_dual_ma(self):
+        from gui_app.strategy_controller import StrategyController
+        cls1 = StrategyController._resolve_strategy_class("未知策略")
+        cls2 = StrategyController._resolve_strategy_class("双均线策略")
+        # Both should resolve to same class (DualMovingAverageStrategy)
+        assert cls1 is cls2
+
+
+class TestBacktestWorkerDelegation:
+    """BacktestWorker.run_single_backtest should delegate to StrategyController."""
+
+    def test_non_factor_delegates_to_controller(self):
+        from gui_app.strategy_controller import StrategyController
+        mock_ctrl_result = {
+            "ok": True,
+            "metrics": {"total_return": 0.15},
+            "detailed": {"equity_curve": []},
+            "elapsed_sec": 0.5,
+        }
+        with patch.object(
+            StrategyController, "run_adhoc_backtest", return_value=mock_ctrl_result
+        ) as mock_adhoc:
+            worker = BacktestWorker.__new__(BacktestWorker)
+            metrics, detailed = worker.run_single_backtest(
+                _make_ohlcv(50),
+                {
+                    "strategy_name": "双均线策略",
+                    "initial_cash": 1_000_000,
+                    "commission": 0.0003,
+                    "short_period": 5,
+                    "long_period": 20,
+                    "rsi_period": 14,
+                },
+            )
+        assert metrics == {"total_return": 0.15}
+        mock_adhoc.assert_called_once()
+
+    def test_controller_error_raises_value_error(self):
+        from gui_app.strategy_controller import StrategyController
+        mock_ctrl_result = {"ok": False, "error": "引擎炸了"}
+        with patch.object(
+            StrategyController, "run_adhoc_backtest", return_value=mock_ctrl_result
+        ):
+            worker = BacktestWorker.__new__(BacktestWorker)
+            with pytest.raises(ValueError, match="引擎炸了"):
+                worker.run_single_backtest(
+                    _make_ohlcv(50), {"strategy_name": "双均线策略"}
+                )

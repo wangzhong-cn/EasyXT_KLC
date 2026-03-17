@@ -229,51 +229,45 @@ class BacktestWorker(QThread):
             detailed = dict(res.get("detailed", {}) or {})
             detailed["factor_context"] = res.get("factor_context", {})
             return res.get("metrics", {}), detailed
-        if AdvancedBacktestEngine is None:
-            raise ValueError("回测引擎不可用")
-        engine_cls = cast(Any, AdvancedBacktestEngine)
-        engine = engine_cls(
-            initial_cash=params["initial_cash"], commission=params["commission"]
+
+        # ── 通过 StrategyController 执行回测 ──────────────────────────
+        from gui_app.strategy_controller import StrategyController
+
+        strategy_params = params.get("strategy_params", {}) or {}
+        if not strategy_params:
+            strategy_params = self._build_default_strategy_params(strategy_name, params)
+
+        ctrl = StrategyController()
+        result = ctrl.run_adhoc_backtest(
+            stock_data=stock_data,
+            strategy_name=strategy_name,
+            strategy_params=strategy_params,
+            initial_cash=params.get("initial_cash", 1_000_000.0),
+            commission=params.get("commission", 0.0003),
+            period=str(params.get("period", "1d")),
+            adjust=str(params.get("adjust", "none")),
         )
-        engine.add_data(stock_data)
-        if hasattr(engine, "set_data_profile"):
-            engine.set_data_profile(
-                period=str(params.get("period", "1d")),
-                adjust=str(params.get("adjust", "none")),
-            )
-        strategy_params = params.get("strategy_params", {})
+        if not result.get("ok"):
+            raise ValueError(result.get("error", "回测失败"))
+        return result["metrics"], result["detailed"]
+
+    @staticmethod
+    def _build_default_strategy_params(strategy_name: str, params: dict) -> dict:
+        """当 strategy_params 为空时，从 UI 原始参数构建策略参数。"""
         if strategy_name == "RSI策略":
-            strategy_class = RSIStrategy
-            if not strategy_params:
-                strategy_params = {"rsi_period": params["rsi_period"]}
-        elif strategy_name == "MACD策略":
-            strategy_class = MACDStrategy
-            if not strategy_params:
-                strategy_params = {
-                    "fast_period": params["short_period"],
-                    "slow_period": params["long_period"],
-                    "signal_period": params["rsi_period"],
-                }
-        elif strategy_name == "固定网格策略":
-            strategy_class = GridStrategy
-        elif strategy_name == "自适应网格策略":
-            strategy_class = AdaptiveGridStrategy
-        elif strategy_name == "ATR网格策略":
-            strategy_class = ATRGridStrategy
-        else:
-            strategy_class = DualMovingAverageStrategy
-            if not strategy_params:
-                strategy_params = {
-                    "short_period": params["short_period"],
-                    "long_period": params["long_period"],
-                    "rsi_period": params["rsi_period"],
-                }
-        if strategy_class is None:
-            raise ValueError(f"策略不可用: {strategy_name}")
-        engine.add_strategy(strategy_class, **strategy_params)
-        metrics = engine.run_backtest()
-        detailed = engine.get_detailed_results()
-        return metrics, detailed
+            return {"rsi_period": params.get("rsi_period", 14)}
+        if strategy_name == "MACD策略":
+            return {
+                "fast_period": params.get("short_period", 12),
+                "slow_period": params.get("long_period", 26),
+                "signal_period": params.get("rsi_period", 9),
+            }
+        # 双均线策略（默认）
+        return {
+            "short_period": params.get("short_period", 5),
+            "long_period": params.get("long_period", 20),
+            "rsi_period": params.get("rsi_period", 14),
+        }
 
     def aggregate_metrics(self, metrics_list):
         if not metrics_list:
