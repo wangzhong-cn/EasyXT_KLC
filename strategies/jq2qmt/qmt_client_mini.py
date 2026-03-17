@@ -1,11 +1,12 @@
+from typing import Any, Optional
+
 import requests
-from typing import Any
 
 
 class QMTClient:
     """QMT客户端最小内核版本 - 仅保留client.api核心功能"""
 
-    def __init__(self, base_url: str = "http://localhost:8000", token: str = None):
+    def __init__(self, base_url: str = "http://localhost:8000", token: Optional[str] = None):
         """初始化交易客户端
 
         Args:

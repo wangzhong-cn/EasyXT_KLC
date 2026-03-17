@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 策略基础模板
 所有策略都应该继承这个基类
 """
 
-import sys
 import os
+import sys
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any, Optional
+
 import pandas as pd
 
 # 添加项目路径
@@ -28,7 +28,7 @@ class BaseStrategy(ABC):
     - adjust='back': 后复权（历史价真实，适合长期回测）
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, params: Optional[dict[str, Any]] = None):
         """
         初始化策略
 
@@ -46,119 +46,136 @@ class BaseStrategy(ABC):
         if self.adjust not in valid_adjusts:
             raise ValueError(f"无效的复权类型 '{self.adjust}'，必须是: {valid_adjusts}")
 
-        self.positions: Dict[str, Any] = {}
+        self.positions: dict[str, Any] = {}
         self.orders: list[Any] = []
         self.is_running = False
         self.start_time: Optional[datetime] = None
-        
+
     @abstractmethod
     def initialize(self):
         """
         策略初始化 - 子类必须实现
         """
         pass
-        
+
     @abstractmethod
     def on_data(self, data):
         """
         数据处理 - 子类必须实现
-        
+
         Args:
             data: 市场数据
         """
         pass
-        
+
     def on_order(self, order):
         """
         订单状态变化处理
-        
+
         Args:
             order: 订单信息
         """
         self.orders.append(order)
         print(f"订单状态更新: {order}")
-        
+
     def buy(self, stock_code: str, quantity: int, price: Optional[float] = None):
         """
         买入股票
-        
+
         Args:
             stock_code: 股票代码
             quantity: 买入数量
             price: 买入价格，None表示市价
-            
+
         Returns:
             订单结果
         """
         try:
+            account_id = str(self.params.get("账户ID", "") or self.params.get("account_id", ""))
+            trade_api = getattr(self.api, "trade", None)
+            if trade_api is None or not account_id:
+                return None
             if price is None:
-                result = self.api.trade.buy_market(stock_code, quantity)
+                result = trade_api.buy(account_id=account_id, code=stock_code, volume=quantity, price_type='market')
                 print(f"市价买入: {stock_code} {quantity}股")
             else:
-                result = self.api.trade.buy_limit(stock_code, quantity, price)
+                result = trade_api.buy(account_id=account_id, code=stock_code, volume=quantity, price=price, price_type='limit')
                 print(f"限价买入: {stock_code} {quantity}股 @{price}")
-                
+
             return result
-            
+
         except Exception as e:
             print(f"买入失败: {str(e)}")
             return None
-            
+
     def sell(self, stock_code: str, quantity: int, price: Optional[float] = None):
         """
         卖出股票
-        
+
         Args:
             stock_code: 股票代码
             quantity: 卖出数量
             price: 卖出价格，None表示市价
-            
+
         Returns:
             订单结果
         """
         try:
+            account_id = str(self.params.get("账户ID", "") or self.params.get("account_id", ""))
+            trade_api = getattr(self.api, "trade", None)
+            if trade_api is None or not account_id:
+                return None
             if price is None:
-                result = self.api.trade.sell_market(stock_code, quantity)
+                result = trade_api.sell(account_id=account_id, code=stock_code, volume=quantity, price_type='market')
                 print(f"市价卖出: {stock_code} {quantity}股")
             else:
-                result = self.api.trade.sell_limit(stock_code, quantity, price)
+                result = trade_api.sell(account_id=account_id, code=stock_code, volume=quantity, price=price, price_type='limit')
                 print(f"限价卖出: {stock_code} {quantity}股 @{price}")
-                
+
             return result
-            
+
         except Exception as e:
             print(f"卖出失败: {str(e)}")
             return None
-            
+
     def get_position(self, stock_code: str):
         """
         获取持仓信息
-        
+
         Args:
             stock_code: 股票代码
-            
+
         Returns:
             持仓信息
         """
         try:
-            return self.api.trade.get_position(stock_code)
+            account_id = str(self.params.get("账户ID", "") or self.params.get("account_id", ""))
+            trade_api = getattr(self.api, "trade", None)
+            if trade_api is None or not account_id:
+                return None
+            positions = trade_api.get_positions(account_id, stock_code)
+            return positions.iloc[0].to_dict() if positions is not None and not positions.empty else None
         except Exception as e:
             print(f"获取持仓失败: {str(e)}")
             return None
-            
+
     def get_account_info(self):
         """
         获取账户信息
-        
+
         Returns:
             账户信息
         """
         try:
-            return self.api.trade.get_account()
+            account_id = str(self.params.get("账户ID", "") or self.params.get("account_id", ""))
+            trade_api = getattr(self.api, "trade", None)
+            if trade_api is None or not account_id:
+                return None
+            return trade_api.get_account_asset(account_id)
         except Exception as e:
             print(f"获取账户信息失败: {str(e)}")
             return None
-            
+
     def log(self, message: str):
         """
         记录日志
@@ -209,7 +226,7 @@ class BaseStrategy(ABC):
         self.is_running = True
         self.start_time = datetime.now()
         self.log(f"策略启动: {self.__class__.__name__}")
-        
+
         try:
             self.initialize()
             self.run()
@@ -217,34 +234,34 @@ class BaseStrategy(ABC):
             self.log(f"策略运行错误: {str(e)}")
         finally:
             self.stop()
-            
+
     def stop(self):
         """
         停止策略
         """
         self.is_running = False
         self.log(f"策略停止: {self.__class__.__name__}")
-        
+
     def run(self):
         """
         运行策略主循环
         """
         stock_code = self.params.get('股票代码', '000001.SZ')
-        
+
         while self.is_running:
             try:
                 # 获取数据
                 data = self.api.data.get_price(stock_code, count=100)
-                
+
                 if data is not None and not data.empty:
                     self.on_data(data)
                 else:
                     self.log("未获取到数据")
-                    
+
                 # 等待一段时间
                 import time
                 time.sleep(1)
-                
+
             except KeyboardInterrupt:
                 self.log("用户中断策略")
                 break

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 511380.SH 网格策略回测启动脚本
 """
@@ -13,6 +12,7 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "gui_app"))
 
 from PyQt5.QtWidgets import QApplication
+
 from gui_app.widgets.grid_backtest_widget import GridBacktestWidget
 
 

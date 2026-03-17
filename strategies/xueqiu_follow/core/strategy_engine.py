@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 雪球跟单策略引擎
 核心策略逻辑实现
@@ -7,48 +6,74 @@
 
 import asyncio
 import json
-from typing import Dict, List, Optional, Any, Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-import logging
+from typing import Any, Callable, Optional, cast
+
 import pandas as pd
-import os
-
-from .xueqiu_collector_real import XueqiuCollectorReal
-import sys
-import os
-
-# 添加项目根目录到路径
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
 
 from easy_xt import get_advanced_api, get_api
-from .risk_manager import RiskManager
-from .config_manager import ConfigManager
 from strategies.xueqiu_follow.utils.logger import setup_logger
+
+from .config_manager import ConfigManager
+from .risk_manager import RiskManager
+from .xueqiu_collector_real import XueqiuCollectorReal
 
 
 class StrategyEngine:
     """雪球跟单策略引擎 - 完整版本"""
-    
+
     def __init__(self, config_manager: ConfigManager):
         self.logger = setup_logger("StrategyEngine")
         self.config_manager = config_manager
-        
+
         # 核心组件
         self.collector: Optional[XueqiuCollectorReal] = None
         self.trader_api = get_advanced_api()
         self.data_api = get_api()  # 添加数据API用于获取实时价格
         self.risk_manager: Optional[RiskManager] = None
-        
+
         # 运行状态
         self.is_running = False
-        self.current_positions: Dict[str, Dict[str, Any]] = {}
-        self.callbacks: List[Callable] = []
+        self.current_positions: dict[str, dict[str, Any]] = {}
+        self.callbacks: list[Callable] = []
         self.last_export_date: Optional[str] = None  # 记录上次导出的日期
-    
+        self._rebalance_cooldown: dict[str, datetime] = {}
+        self._rebalance_daily_counter: dict[str, Any] = {"date": "", "counts": {}}
+        self._xtdata_subscribed: set[str] = set()
+        self._last_deviation_context: dict[str, Any] = {}
+        self._last_cooldown_context: dict[str, Any] = {}
+        self._last_rejected_orders: list[dict[str, Any]] = []
+        config_dir = getattr(config_manager, "config_dir", None)
+        if isinstance(config_dir, (str, Path)):
+            self.config_dir = Path(config_dir)
+        else:
+            self.config_dir = Path("strategies/xueqiu_follow/config")
+        self.monitored_portfolios: dict[str, dict[str, Any]] = {}
+
+    def _safe_str(self, value: Any, default: str = "") -> str:
+        if value is None:
+            return default
+        if isinstance(value, (dict, list, tuple, set)):
+            return default
+        return str(value)
+
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            if isinstance(value, (dict, list, tuple, set)) or value is None:
+                return float(default)
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _safe_int(self, value: Any, default: int = 0) -> int:
+        try:
+            if isinstance(value, (dict, list, tuple, set)) or value is None:
+                return int(default)
+            return int(value)
+        except Exception:
+            return int(default)
+
     def _normalize_symbol(self, symbol: str) -> str:
         """统一证券代码为后缀格式 000000.SZ/000000.SH"""
         try:
@@ -93,82 +118,84 @@ class StrategyEngine:
         """初始化策略引擎"""
         try:
             self.logger.info("初始化雪球跟单策略引擎...")
-            
+
             # 初始化各个组件
             self.collector = XueqiuCollectorReal()
             await self.collector.initialize()
-            
+
             # 初始化交易接口
             qmt_path = self.config_manager.get_setting('account.qmt_path', 'D:\\国金QMT交易端模拟\\userdata_mini')
             session_id = 'xueqiu_strategy'
-            
+            qmt_path_str = self._safe_str(qmt_path, 'D:\\国金QMT交易端模拟\\userdata_mini')
+
             # 在测试环境中跳过实际连接
             if hasattr(self.trader_api, 'connect'):
-                if not self.trader_api.connect(qmt_path, session_id):
+                if not self.trader_api.connect(qmt_path_str, session_id):
                     # 在测试环境中，如果连接失败但trader_api是Mock对象，则继续
                     if not hasattr(self.trader_api, '_mock_name'):
                         raise Exception("交易服务连接失败")
                     else:
                         self.logger.warning("测试环境：跳过交易服务连接")
-            
+
             # 添加交易账户
             account_id = self.config_manager.get_setting('account.account_id')
-            if account_id and hasattr(self.trader_api, 'add_account'):
-                if not self.trader_api.add_account(account_id):
+            account_id_str = self._safe_str(account_id)
+            if account_id_str and hasattr(self.trader_api, 'add_account'):
+                if not self.trader_api.add_account(account_id_str):
                     # 在测试环境中，如果添加账户失败但trader_api是Mock对象，则继续
                     if not hasattr(self.trader_api, '_mock_name'):
                         raise Exception(f"添加交易账户失败: {account_id}")
                     else:
                         self.logger.warning("测试环境：跳过添加交易账户")
-            
+
             # 初始化风险管理器
             self.risk_manager = RiskManager(self.config_manager)
-            
+
             # 加载当前持仓
             await self._load_current_positions()
-            
+
             self.logger.info("策略引擎初始化完成")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"策略引擎初始化失败: {e}")
             return False
-    
-    def calculate_target_positions(self, portfolio_changes: List[Dict[str, Any]], follow_ratio: float, account_value: float) -> Dict[str, Dict[str, Any]]:
+
+    def calculate_target_positions(self, portfolio_changes: list[dict[str, Any]], follow_ratio: float, account_value: float) -> dict[str, dict[str, Any]]:
         """根据组合变化计算目标仓位"""
         try:
             # 获取跟单模式设置
             follow_mode = self.config_manager.get_setting('settings.follow_mode.mode', 'smart_follow')
             self.logger.info(f"使用跟单模式: {follow_mode}")
-            
+
             if follow_mode == 'simple_follow':
                 return self._calculate_follow_mode_positions(portfolio_changes, follow_ratio, account_value)
             else:
                 return self._calculate_smart_mode_positions(portfolio_changes, follow_ratio, account_value)
-            
+
         except Exception as e:
             self.logger.error(f"计算目标仓位失败: {e}")
             return {}
-    
-    def _calculate_smart_mode_positions(self, portfolio_changes: List[Dict[str, Any]], follow_ratio: float, account_value: float) -> Dict[str, Dict[str, Any]]:
+
+    def _calculate_smart_mode_positions(self, portfolio_changes: list[dict[str, Any]], follow_ratio: float, account_value: float) -> dict[str, dict[str, Any]]:
         """智能跟投模式：基于持仓差异计算，避免重复下单"""
         try:
             target_positions = {}
-            
+
             # 确保参数类型正确
             account_value_float = float(account_value)
             follow_ratio_float = float(follow_ratio)
-            
+
             for change in portfolio_changes:
                 # 安全检查：确保change字典包含必要的字段
                 symbol = change.get('symbol')
                 target_weight = change.get('target_weight')
                 prev_weight = change.get('prev_weight')
-                
+
                 if not symbol or target_weight is None or prev_weight is None:
                     self.logger.warning(f"跳过无效的变化数据: {change}")
                     continue
-                
+
                 # 根据权重变化确定操作类型
                 if prev_weight == 0 and target_weight > 0:
                     change_type = 'add'
@@ -176,7 +203,7 @@ class StrategyEngine:
                     change_type = 'remove'
                 else:
                     change_type = 'modify'
-                
+
                 if change_type == 'add':
                     # 新增持仓
                     target_value = account_value_float * follow_ratio_float * target_weight
@@ -186,11 +213,11 @@ class StrategyEngine:
                         'weight': target_weight,
                         'reason': f'新增持仓｜目标权重 {target_weight:.2%}｜目标价值=账户市值×跟随比例×目标权重 = {account_value_float:,.2f}×{follow_ratio_float:.2%}×{target_weight:.2%} = ¥{account_value_float * follow_ratio_float * target_weight:,.2f}'
                     }
-                    
+
                 elif change_type == 'modify':
                     # 调整持仓
                     target_value = account_value_float * follow_ratio_float * target_weight
-                    
+
                     action = 'buy' if target_weight > prev_weight else 'sell'
                     target_positions[symbol] = {
                         'action': action,
@@ -199,7 +226,7 @@ class StrategyEngine:
                         'old_weight': prev_weight,
                         'reason': f'调整持仓，权重: {prev_weight:.2%} -> {target_weight:.2%}'
                     }
-                    
+
                 elif change_type == 'remove':
                     # 清仓
                     target_positions[symbol] = {
@@ -210,38 +237,38 @@ class StrategyEngine:
                     }
                 else:
                     self.logger.warning(f"未知的变化类型 {change_type}，跳过 {symbol}")
-            
+
             self.logger.info(f"智能跟投模式：计算得到 {len(target_positions)} 个目标仓位")
             return target_positions
-            
+
         except Exception as e:
             self.logger.error(f"智能跟投模式计算目标仓位失败: {e}")
             return {}
-    
-    def _calculate_follow_mode_positions(self, portfolio_changes: List[Dict[str, Any]], follow_ratio: float, account_value: float) -> Dict[str, Dict[str, Any]]:
+
+    def _calculate_follow_mode_positions(self, portfolio_changes: list[dict[str, Any]], follow_ratio: float, account_value: float) -> dict[str, dict[str, Any]]:
         """跟投模式：不考虑现有持仓，按目标权重直接计算"""
         try:
             target_positions = {}
-            
+
             # 确保参数类型正确
             account_value_float = float(account_value)
             follow_ratio_float = float(follow_ratio)
-            
+
             for change in portfolio_changes:
                 # 安全检查：确保change字典包含必要的字段
                 symbol = change.get('symbol')
                 target_weight = change.get('target_weight')
                 prev_weight = change.get('prev_weight')
-                
+
                 if not symbol or target_weight is None or prev_weight is None:
                     self.logger.warning(f"跳过无效的变化数据: {change}")
                     continue
-                
+
                 # 跟投模式逻辑：只关注目标权重，不考虑现有持仓
                 if target_weight > 0:
                     # 计算目标价值
                     target_value = account_value_float * follow_ratio_float * target_weight
-                    
+
                     # 跟投模式：只要有目标权重就生成买入指令，不考虑现有持仓
                     target_positions[symbol] = {
                         'action': 'buy',
@@ -250,7 +277,7 @@ class StrategyEngine:
                         'reason': f'跟投模式买入｜目标权重 {target_weight:.2%}｜目标价值=账户市值×跟随比例×目标权重 = {account_value_float:,.2f}×{follow_ratio_float:.2%}×{target_weight:.2%} = ¥{account_value_float * follow_ratio_float * target_weight:,.2f}'
                     }
                     self.logger.info(f"跟投模式：生成买入指令 {symbol}，目标权重 {target_weight:.2%}")
-                
+
                 elif target_weight == 0 and prev_weight > 0:
                     # 清仓逻辑
                     target_positions[symbol] = {
@@ -260,14 +287,14 @@ class StrategyEngine:
                         'reason': '跟投模式清仓｜目标权重 0%｜将卖出至完全清空'
                     }
                     self.logger.info(f"跟投模式：生成清仓指令 {symbol}")
-            
+
             self.logger.info(f"跟投模式：计算得到 {len(target_positions)} 个目标仓位")
             return target_positions
-            
+
         except Exception as e:
             self.logger.error(f"跟投模式计算目标仓位失败: {e}")
             return {}
-    
+
     def _apply_slippage(self, symbol: str, price: float, action: str) -> float:
             """
               滑点策略调整价格
@@ -287,10 +314,11 @@ class StrategyEngine:
                     or self.config_manager.get_setting('settings.slippage.value')
                     or 0.01
                 )
+                slip_value_float = self._safe_float(slip_value, 0.01)
                 if slip_type == '百分比':
-                    price = price * (1 + float(slip_value)) if action == 'buy' else price * (1 - float(slip_value))
+                    price = price * (1 + slip_value_float) if action == 'buy' else price * (1 - slip_value_float)
                 elif slip_type == '数值':
-                    price = price + float(slip_value) if action == 'buy' else price - float(slip_value)
+                    price = price + slip_value_float if action == 'buy' else price - slip_value_float
                 code6 = symbol.replace('.SH', '').replace('.SZ', '').replace('SH', '').replace('SZ', '')
                 code6 = code6[-6:] if len(code6) >= 6 else code6
                 is_bond = code6.startswith(('11', '12')) or code6.startswith(('110', '113', '123', '127', '128', '117'))
@@ -299,27 +327,27 @@ class StrategyEngine:
                 return float(price)
             except Exception:
                 return float(price)
-    def generate_trade_orders(self, target_positions: Dict[str, Dict[str, Any]], current_positions: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def generate_trade_orders(self, target_positions: dict[str, dict[str, Any]], current_positions: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         """生成具体交易指令"""
         try:
             # 获取跟单模式设置
             follow_mode = self.config_manager.get_setting('settings.follow_mode.mode', 'smart_follow')
             self.logger.info(f"生成交易指令，跟单模式: {follow_mode}")
-            
+
             if follow_mode == 'simple_follow':
                 return self._generate_follow_mode_orders(target_positions, current_positions)
             else:
                 return self._generate_smart_mode_orders(target_positions, current_positions)
-            
+
         except Exception as e:
             self.logger.error(f"生成交易指令失败: {e}")
             return []
-    
-    def _generate_smart_mode_orders(self, target_positions: Dict[str, Dict[str, Any]], current_positions: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+    def _generate_smart_mode_orders(self, target_positions: dict[str, dict[str, Any]], current_positions: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         """智能跟投模式：基于持仓差异生成交易指令"""
         try:
             orders = []
-            
+
             for symbol, target in target_positions.items():
                 # 统一代码为后缀格式，确保与 current_positions 键一致
                 symbol_norm = self._normalize_symbol(symbol)
@@ -334,7 +362,7 @@ class StrategyEngine:
                     or 0
                 )
                 target_value = target['target_value']
-                
+
                 # 获取当前价格，如果获取失败则跳过该股票
                 try:
                     current_price = self._get_current_price(symbol)
@@ -344,11 +372,13 @@ class StrategyEngine:
                 except Exception as price_error:
                     self.logger.error(f"获取 {symbol} 价格失败: {price_error}")
                     continue
-                
+
                 # 价值带宽与比例阈值 + 冷却时间防抖
                 current_value = current_volume * current_price
                 try:
-                    value_band_ratio = float(self.config_manager.get_setting('settings.order.value_band_trigger_ratio', 0.005))
+                    value_band_ratio = self._safe_float(
+                        self.config_manager.get_setting('settings.order.value_band_trigger_ratio', 0.005), 0.005
+                    )
                 except Exception:
                     value_band_ratio = 0.005
                 # 仅当相对目标价值偏差超过带宽才触发再平衡
@@ -371,11 +401,11 @@ class StrategyEngine:
 
                 # 冷却时间（每标的）
                 try:
-                    cooldown_seconds = int(self.config_manager.get_setting('settings.order.cooldown_seconds', 300))
+                    cooldown_seconds = self._safe_int(
+                        self.config_manager.get_setting('settings.order.cooldown_seconds', 300), 300
+                    )
                 except Exception:
                     cooldown_seconds = 300
-                if not hasattr(self, '_rebalance_cooldown'):
-                    self._rebalance_cooldown = {}
                 last_ts = self._rebalance_cooldown.get(symbol_norm)
                 if last_ts:
                     from datetime import datetime, timedelta
@@ -396,17 +426,20 @@ class StrategyEngine:
 
                 # 每标的每日再平衡次数上限
                 try:
-                    daily_max = int(self.config_manager.get_setting('settings.order.daily_max_rebalances_per_symbol', 1))
+                    daily_max = self._safe_int(
+                        self.config_manager.get_setting('settings.order.daily_max_rebalances_per_symbol', 1), 1
+                    )
                 except Exception:
                     daily_max = 1
                 from datetime import datetime as _dt
                 today_key = _dt.now().strftime('%Y%m%d')
-                if not hasattr(self, '_rebalance_daily_counter'):
-                    self._rebalance_daily_counter = {'date': today_key, 'counts': {}}
                 # 切日重置
                 if self._rebalance_daily_counter.get('date') != today_key:
                     self._rebalance_daily_counter = {'date': today_key, 'counts': {}}
-                symbol_counts = self._rebalance_daily_counter['counts']
+                symbol_counts = self._rebalance_daily_counter.get('counts')
+                if not isinstance(symbol_counts, dict):
+                    symbol_counts = {}
+                    self._rebalance_daily_counter['counts'] = symbol_counts
                 if symbol_counts.get(symbol_norm, 0) >= daily_max:
                     self.logger.info(f"{symbol} 达到每日再平衡上限 {daily_max} 次，跳过")
                     continue
@@ -417,13 +450,15 @@ class StrategyEngine:
 
                 # 绝对股数阈值（按手数取整后），与价值带宽需同时满足才触发再平衡
                 try:
-                    min_diff_abs_shares = int(self.config_manager.get_setting('settings.order.min_diff_abs_shares', 500))
+                    min_diff_abs_shares = self._safe_int(
+                        self.config_manager.get_setting('settings.order.min_diff_abs_shares', 500), 500
+                    )
                 except Exception:
                     min_diff_abs_shares = 500
                 if abs(volume_diff) < min_diff_abs_shares:
                     self.logger.info(f"{symbol} 股数差异 {abs(volume_diff)} 小于绝对阈值 {min_diff_abs_shares} 股，忽略")
                     continue
-                
+
                 if volume_diff > 0:
                     # 买入（应用滑点）
                     adjusted_price = self._apply_slippage(symbol_norm, current_price, 'buy')
@@ -449,7 +484,7 @@ class StrategyEngine:
                     }
                     orders.append(order)
                     self.logger.info(f"智能跟投模式：生成买入指令: {symbol} {volume_diff}股 @ {current_price:.2f}，目标市值 {target_value:.2f}")
-                    
+
                 elif volume_diff < 0:
                     # 卖出（应用滑点）
                     adjusted_price = self._apply_slippage(symbol_norm, current_price, 'sell')
@@ -482,29 +517,32 @@ class StrategyEngine:
                     self._rebalance_cooldown[symbol_norm] = _dt.now()
                     # 累加每日次数
                     today_key = _dt.now().strftime('%Y%m%d')
-                    if not hasattr(self, '_rebalance_daily_counter') or self._rebalance_daily_counter.get('date') != today_key:
+                    if self._rebalance_daily_counter.get('date') != today_key:
                         self._rebalance_daily_counter = {'date': today_key, 'counts': {}}
-                    counts = self._rebalance_daily_counter['counts']
+                    counts = self._rebalance_daily_counter.get('counts')
+                    if not isinstance(counts, dict):
+                        counts = {}
+                        self._rebalance_daily_counter['counts'] = counts
                     counts[symbol_norm] = counts.get(symbol_norm, 0) + 1
-            
+
             self.logger.info(f"智能跟投模式：生成了 {len(orders)} 个交易指令")
             return orders
-            
+
         except Exception as e:
             self.logger.error(f"智能跟投模式生成交易指令失败: {e}")
             return []
-    
-    def _generate_follow_mode_orders(self, target_positions: Dict[str, Dict[str, Any]], current_positions: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+    def _generate_follow_mode_orders(self, target_positions: dict[str, dict[str, Any]], current_positions: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         """跟投模式：不考虑现有持仓差异，直接按目标权重生成指令"""
         try:
             orders = []
-            
+
             for symbol, target in target_positions.items():
                 # 统一代码为后缀格式，确保订单代码与行情提供者一致
                 symbol_norm = self._normalize_symbol(symbol)
                 target_value = target['target_value']
                 action = target['action']
-                
+
                 # 获取当前价格，如果获取失败则跳过该股票
                 try:
                     current_price = self._get_current_price(symbol)
@@ -514,15 +552,15 @@ class StrategyEngine:
                 except Exception as price_error:
                     self.logger.error(f"获取 {symbol} 价格失败: {price_error}")
                     continue
-                
+
                 # 跟投模式：直接按目标价值计算股数，不考虑现有持仓
                 target_volume = int(target_value / current_price / 100) * 100
-                
+
                 # 最小交易单位检查（保持A股整手100股）
                 if target_volume < 100:
                     self.logger.info(f"{symbol} 目标股数 {target_volume} 小于100股，忽略")
                     continue
-                
+
                 if action == 'buy':
                     # 买入（应用滑点）
                     adjusted_price = self._apply_slippage(symbol_norm, current_price, 'buy')
@@ -536,7 +574,7 @@ class StrategyEngine:
                     }
                     orders.append(order)
                     self.logger.info(f"跟投模式：生成买入指令: {symbol} {target_volume}股 @ {current_price:.2f}，目标市值 {target_value:.2f}")
-                    
+
                 elif action == 'sell':
                     # 卖出（应用滑点）
                     adjusted_price = self._apply_slippage(symbol_norm, current_price, 'sell')
@@ -550,28 +588,27 @@ class StrategyEngine:
                     }
                     orders.append(order)
                     self.logger.info(f"跟投模式：生成卖出指令: {symbol} {target_volume}股 @ {current_price:.2f}")
-            
+
             self.logger.info(f"跟投模式：生成了 {len(orders)} 个交易指令")
             return orders
-            
+
         except Exception as e:
             self.logger.error(f"跟投模式生成交易指令失败: {e}")
             return []
-    
-    def merge_multiple_portfolios(self, portfolio_list: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+
+    def merge_multiple_portfolios(self, portfolio_list: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """合并多个组合的信号"""
         try:
-            merged_positions = {}
-            
+            merged_positions: dict[str, dict[str, Any]] = {}
+
             for portfolio_data in portfolio_list:
-                portfolio_code = portfolio_data['code']
                 follow_ratio = portfolio_data['follow_ratio']
                 changes = portfolio_data['changes']
-                
+
                 # 计算该组合的目标仓位
                 account_value = self._get_account_value()
                 positions = self.calculate_target_positions(changes, follow_ratio, account_value)
-                
+
                 # 合并到总仓位中
                 for symbol, position in positions.items():
                     if symbol in merged_positions:
@@ -581,26 +618,26 @@ class StrategyEngine:
                         merged_positions[symbol]['reason'] += f"; {position['reason']}"
                     else:
                         merged_positions[symbol] = position.copy()
-            
+
             self.logger.info(f"合并 {len(portfolio_list)} 个组合后得到 {len(merged_positions)} 个目标仓位")
             return merged_positions
-            
+
         except Exception as e:
             self.logger.error(f"合并多组合信号失败: {e}")
             return {}
-    
-    def validate_trade_orders(self, orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+    def validate_trade_orders(self, orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """验证交易指令的合法性；并记录被拒绝订单供导出"""
         try:
-            valid_orders: List[Dict[str, Any]] = []
-            self._last_rejected_orders: List[Dict[str, Any]] = []
-            
+            valid_orders: list[dict[str, Any]] = []
+            self._last_rejected_orders.clear()
+
             for order in orders:
                 symbol_raw = order['symbol']
                 action = order['action']
                 volume = order['volume']
                 symbol = self._to_broker_symbol(symbol_raw)
-                
+
                 if self.risk_manager:
                     test_orders = [{
                         'symbol': symbol,
@@ -608,7 +645,7 @@ class StrategyEngine:
                         'volume': volume,
                         'price': order.get('price', 10.0)
                     }]
-                    
+
                     account_value = self._get_account_value()
                     if account_value is None or account_value <= 0:
                         self.logger.error("无法获取账户价值，拒绝当前交易指令")
@@ -634,7 +671,7 @@ class StrategyEngine:
                     )
                     approved_orders = result.get('approved') if isinstance(result, dict) else result
                     rejected_orders = result.get('rejected', []) if isinstance(result, dict) else []
-                    
+
                     if approved_orders:
                         valid_orders.append(order)
                         self.logger.info(f"交易指令通过风险检查: {action} {symbol} {volume}")
@@ -646,19 +683,19 @@ class StrategyEngine:
                         self.logger.warning(f"交易指令被风险控制拒绝: {action} {symbol} {volume} - {rejected_orders[0].get('reason','')}")
                 else:
                     valid_orders.append(order)
-            
+
             self.logger.info(f"验证完成，{len(valid_orders)}/{len(orders)} 个指令通过检查，拒绝 {len(self._last_rejected_orders)} 个")
             return valid_orders
-            
+
         except Exception as e:
             self.logger.error(f"验证交易指令失败: {e}")
             return []
-    
-    async def execute_strategy(self, portfolio_code: str, changes: List[Dict[str, Any]]):
+
+    async def execute_strategy(self, portfolio_code: str, changes: list[dict[str, Any]]):
         """执行跟单策略"""
         try:
             self.logger.info(f"开始执行跟单策略，组合: {portfolio_code}")
-            
+
             # 获取组合配置
             portfolios = self.config_manager.get_portfolios()
             portfolio_config = None
@@ -666,23 +703,23 @@ class StrategyEngine:
                 if p['code'] == portfolio_code:
                     portfolio_config = p
                     break
-            
+
             if not portfolio_config:
                 self.logger.error(f"未找到组合配置: {portfolio_code}")
                 return
-            
+
             follow_ratio = portfolio_config.get('follow_ratio', 0.1)
             account_value = self._get_account_value()
-            
+
             # 计算目标仓位
             target_positions = self.calculate_target_positions(changes, follow_ratio, account_value)
-            
+
             # 生成交易指令
             orders = self.generate_trade_orders(target_positions, self.current_positions)
-            
+
             # 验证交易指令
             valid_orders = self.validate_trade_orders(orders)
-            
+
             # 执行交易
             if valid_orders:
                 account_id_raw = self.config_manager.get_setting('account.account_id')
@@ -706,7 +743,7 @@ class StrategyEngine:
                             'success': order_id is not None,
                             'reason': order.get('reason', '')
                         })
-                
+
                 # 导出交易明细
                 try:
                     self._export_orders_to_excel(execution_results, "orders.xlsx")
@@ -719,14 +756,14 @@ class StrategyEngine:
                     pass
                 # 更新持仓记录
                 await self._update_positions_after_trade(execution_results)
-                
+
                 self.logger.info(f"策略执行完成，执行了 {len(execution_results)} 个交易，拒绝 {len(getattr(self, '_last_rejected_orders', []))} 个")
             else:
                 self.logger.info("没有需要执行的交易指令")
-                
+
         except Exception as e:
             self.logger.error(f"执行跟单策略失败: {e}")
-    
+
     def _get_current_price(self, symbol: str) -> float:
         """获取当前价格 - 多方法尝试版本，无默认回退机制"""
         try:
@@ -744,9 +781,9 @@ class StrategyEngine:
                     return s
                 # 纯6位或其他未知，直接返回（部分行情源可能不支持）
                 return s
-            
+
             xt_symbol = convert_symbol_format(symbol)
-            
+
             # 优先方法: 直接使用 DataAPI 获取实时价格（与“基础入门”一致的路径）
             if hasattr(self.data_api, 'get_current_price'):
                 try:
@@ -766,10 +803,11 @@ class StrategyEngine:
                         self.logger.warning("DataAPI.get_current_price 返回空数据，尝试其他方法")
                 except Exception as api_error:
                     self.logger.warning(f"DataAPI获取价格失败，尝试其他方法: {api_error}")
-            
+
             # 方法1: 尝试使用xtquant.xtdata获取实时价格（初始化 + 订阅 + 获取）
             try:
                 import os as _os
+
                 import xtquant.xtdata as xtdata
 
                 # 一次性环境初始化：将 QMT 路径注入到环境，避免 xtdata 找不到数据目录
@@ -787,8 +825,6 @@ class StrategyEngine:
                     pass
 
                 # 确保已订阅该标的，部分环境未订阅时 get_full_tick 可能返回 0/空
-                if not hasattr(self, '_xtdata_subscribed'):
-                    self._xtdata_subscribed = set()
                 try:
                     if xt_symbol not in self._xtdata_subscribed:
                         from easy_xt.utils import StockCodeUtils as _Scu
@@ -845,25 +881,25 @@ class StrategyEngine:
                     except Exception:
                         pass
                 else:
-                    self.logger.warning(f"xtdata.get_full_tick返回空，尝试分钟数据")
+                    self.logger.warning("xtdata.get_full_tick返回空，尝试分钟数据")
             except Exception as xt_error:
                 self.logger.warning(f"xtdata获取实时价格失败，尝试其他方法: {xt_error}")
-            
+
             # 方法2: 尝试获取分钟级市场数据的最新收盘价
             try:
                 import xtquant.xtdata as xtdata
                 # 获取最近5分钟的数据，取最新的一条
                 market_data = xtdata.get_market_data(
-                    field_list=['close'], 
-                    stock_list=[xt_symbol], 
-                    period='1m', 
+                    field_list=['close'],
+                    stock_list=[xt_symbol],
+                    period='1m',
                     count=5
                 )
                 # 兼容不同返回：None/0/空、DataFrame、dict、list 等
                 if market_data is None or market_data == 0:
                     self.logger.warning("xtdata.get_market_data 返回 None/0，尝试其他方法")
                 else:
-                    if hasattr(market_data, 'empty'):
+                    if isinstance(market_data, pd.DataFrame):
                         # DataFrame类型
                         if not market_data.empty and 'close' in market_data.columns:
                             close_prices = market_data['close'].dropna()
@@ -902,13 +938,13 @@ class StrategyEngine:
 
             except Exception as market_error:
                 self.logger.warning(f"xtdata获取市场数据失败，尝试其他方法: {market_error}")
-            
+
             # 方法3: 尝试easy_xt提供的行情提供者
             try:
                 # 导入easy_xt的行情提供者
-                from easy_xt.realtime_data.providers.tdx_provider import TdxDataProvider
                 from easy_xt.realtime_data.providers.eastmoney_provider import EastmoneyDataProvider
-                
+                from easy_xt.realtime_data.providers.tdx_provider import TdxDataProvider
+
                 # 尝试通达信提供者
                 tdx_provider = TdxDataProvider()
                 if hasattr(tdx_provider, 'get_realtime_quotes'):
@@ -919,7 +955,7 @@ class StrategyEngine:
                         price = quotes[0]['price']
                         self.logger.info(f"TDX提供者获取到 {symbol} 实时价格: {price}")
                         return float(price)
-                
+
                 # 尝试东方财富提供者
                 em_provider = EastmoneyDataProvider()
                 if hasattr(em_provider, 'get_realtime_quotes'):
@@ -942,11 +978,11 @@ class StrategyEngine:
                         if price and price > 0:
                             self.logger.info(f"东方财富提供者获取到 {symbol} 实时价格: {price}")
                             return float(price)
-                        
+
                 self.logger.warning("easy_xt行情提供者获取价格失败，尝试其他方法")
             except Exception as easy_xt_error:
                 self.logger.warning(f"easy_xt行情提供者获取价格失败，尝试其他方法: {easy_xt_error}")
-            
+
             # 方法4: 尝试从数据API获取实时价格
             if hasattr(self.data_api, 'get_current_price'):
                 try:
@@ -956,7 +992,7 @@ class StrategyEngine:
                             self.data_api.init_data()
                         except Exception as init_error:
                             self.logger.warning(f"DataAPI初始化失败: {init_error}")
-                    
+
                     price_data = self.data_api.get_current_price([symbol])
                     if price_data is not None and not price_data.empty and len(price_data) > 0:
                         price = price_data.iloc[0]['price']
@@ -964,22 +1000,22 @@ class StrategyEngine:
                             self.logger.info(f"DataAPI获取到 {symbol} 实时价格: {price}")
                             return float(price)
                     else:
-                        self.logger.warning(f"DataAPI.get_current_price返回空数据，尝试其他方法")
+                        self.logger.warning("DataAPI.get_current_price返回空数据，尝试其他方法")
                 except Exception as api_error:
                     self.logger.warning(f"DataAPI获取价格失败，尝试其他方法: {api_error}")
-            
+
             # 如果所有方法都失败，抛出明确的错误
             error_msg = f"无法获取行情: 所有行情获取方法均失败，无法获取 {symbol} 的实时行情数据"
             self.logger.error(error_msg)
             raise Exception(error_msg)
-            
+
         except Exception as e:
             self.logger.error(f"获取 {symbol} 价格失败: {e}")
             # 直接抛出异常，不返回任何默认价格
             raise Exception(f"无法获取行情: {str(e)}")
 
 
-    
+
     def _get_account_value(self) -> float:
         """获取账户总价值"""
         try:
@@ -989,13 +1025,14 @@ class StrategyEngine:
                 self.config_manager.get_setting('account.account_id') or
                 None
             )
-            if not account_id:
+            account_id_str = self._safe_str(account_id)
+            if not account_id_str:
                 self.logger.error("未配置账户ID，无法获取账户价值，终止下单")
                 raise Exception("Missing account_id in settings")
-            
+
             # 获取账户资产信息
             if hasattr(self.trader_api, 'get_account_asset_detailed'):
-                asset_info = self.trader_api.get_account_asset_detailed(account_id)
+                asset_info = self.trader_api.get_account_asset_detailed(account_id_str)
                 if asset_info:
                     total_asset = asset_info.get('total_asset', 0)
                     # 确保转换为浮点数
@@ -1003,32 +1040,32 @@ class StrategyEngine:
                         total_asset_float = float(total_asset)
                         self.logger.info(f"获取账户总资产: {total_asset_float:,.2f}")
                         return total_asset_float
-            
+
             # 无法获取实际资产，抛错并阻止下单
             raise Exception("无法获取实际账户资产，已阻止下单")
-            
+
         except Exception as e:
             # 将异常向上抛出，调用方应终止当前交易流程
             raise Exception(f"获取账户价值失败: {e}")
-    
+
     async def _load_config(self):
         """加载配置文件"""
         try:
             # 加载组合配置
             portfolios_file = self.config_dir / "portfolios.json"
             if portfolios_file.exists():
-                with open(portfolios_file, 'r', encoding='utf-8') as f:
+                with open(portfolios_file, encoding='utf-8') as f:
                     config = json.load(f)
-                    
+
                 for portfolio in config.get('portfolios', []):
                     if portfolio.get('enabled', False):
                         self.monitored_portfolios[portfolio['code']] = portfolio
-                        
+
                 self.logger.info(f"加载了 {len(self.monitored_portfolios)} 个监控组合")
-            
+
         except Exception as e:
             self.logger.error(f"加载配置失败: {e}")
-    
+
     async def _load_current_positions(self):
         """加载当前持仓"""
         try:
@@ -1037,8 +1074,9 @@ class StrategyEngine:
                 self.config_manager.get_setting('account.account_id') or
                 None
             )
-            if account_id:
-                positions_df = self.trader_api.get_positions_detailed(account_id)
+            account_id_str = self._safe_str(account_id)
+            if account_id_str:
+                positions_df = self.trader_api.get_positions_detailed(account_id_str)
                 positions = {}
                 if not positions_df.empty:
                     for _, row in positions_df.iterrows():
@@ -1104,8 +1142,8 @@ class StrategyEngine:
                 self.logger.info(f"加载了 {len(positions)} 个当前持仓")
         except Exception as e:
             self.logger.error(f"加载当前持仓失败: {e}")
-    
-    async def _update_positions_after_trade(self, execution_results: List[Dict[str, Any]]):
+
+    async def _update_positions_after_trade(self, execution_results: list[dict[str, Any]]):
         """交易后更新持仓记录"""
         try:
             for result in execution_results:
@@ -1113,26 +1151,26 @@ class StrategyEngine:
                     symbol = result['symbol']
                     action = result['action']
                     volume = result['volume']
-                    
+
                     if symbol not in self.current_positions:
                         self.current_positions[symbol] = {'volume': 0, 'value': 0}
-                    
+
                     if action == 'buy':
                         self.current_positions[symbol]['volume'] += volume
                     elif action == 'sell':
                         self.current_positions[symbol]['volume'] -= volume
-                        
+
                     # 如果持仓为0，移除记录
                     if self.current_positions[symbol]['volume'] <= 0:
                         del self.current_positions[symbol]
-                        
+
         except Exception as e:
             self.logger.error(f"更新持仓记录失败: {e}")
-    
+
     async def _monitor_portfolio(self, portfolio_code: str):
         """监控单个组合"""
         self.logger.info(f"开始监控组合: {portfolio_code}")
-        
+
         try:
             if self.collector:
                 await self.collector.monitor_portfolio_changes(
@@ -1141,21 +1179,21 @@ class StrategyEngine:
                 )
         except Exception as e:
             self.logger.error(f"监控组合 {portfolio_code} 失败: {e}")
-    
-    async def _on_portfolio_changed(self, portfolio_code: str, changes: List[Dict[str, Any]], current_holdings: List[Dict[str, Any]]):
+
+    async def _on_portfolio_changed(self, portfolio_code: str, changes: list[dict[str, Any]], current_holdings: list[dict[str, Any]]):
         """组合变化回调"""
         self.logger.info(f"检测到组合 {portfolio_code} 发生变化:")
-        
+
         for change in changes:
             # 安全检查：确保change字典包含必要的字段
             change_type = change.get('type')
             symbol = change.get('symbol', '未知')
             name = change.get('name', '未知')
-            
+
             if not change_type:
                 self.logger.warning(f"  无效的变化数据: {change}")
                 continue
-                
+
             if change_type == 'add':
                 weight = change.get('weight', 0)
                 self.logger.info(f"  新增持仓: {symbol} {name} 权重: {weight:.2%}")
@@ -1167,34 +1205,34 @@ class StrategyEngine:
                 self.logger.info(f"  清仓: {symbol} {name}")
             else:
                 self.logger.warning(f"  未知的变化类型: {change_type}, 数据: {change}")
-        
+
         # 执行跟单策略
         await self.execute_strategy(portfolio_code, changes)
-        
+
         # 通知回调函数
         for callback in self.callbacks:
             try:
                 await callback(portfolio_code, changes, current_holdings)
             except Exception as e:
                 self.logger.error(f"回调函数执行失败: {e}")
-    
+
     # 保持原有的监控相关方法
     async def start(self):
         """启动策略"""
         if self.is_running:
             self.logger.warning("策略已在运行中")
             return
-        
+
         try:
             self.logger.info("启动雪球跟单策略...")
             self.is_running = True
-            
+
             # 获取启用的组合
             enabled_portfolios = self.config_manager.get_enabled_portfolios()
-            
+
             # 执行初始同步调仓
             await self.perform_initial_sync()
-            
+
             # 启动监控任务
             tasks = []
             for portfolio in enabled_portfolios:
@@ -1203,45 +1241,45 @@ class StrategyEngine:
                     self._monitor_portfolio(portfolio_code)
                 )
                 tasks.append(task)
-            
+
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             else:
                 self.logger.warning("没有配置监控组合")
-                
+
         except Exception as e:
             self.logger.error(f"策略运行失败: {e}")
         finally:
             self.is_running = False
-    
+
     async def stop(self):
         """停止策略"""
         self.logger.info("停止雪球跟单策略...")
         self.is_running = False
-        
+
         if self.collector:
             await self.collector.close()
-        
+
         if hasattr(self.trader_api, 'disconnect'):
             self.trader_api.disconnect()
-    
+
     def emergency_stop(self):
         """紧急停止"""
         self.logger.warning("执行紧急停止！")
         self.is_running = False
         # 这里可以添加紧急清仓逻辑
-    
+
     async def perform_initial_sync(self):
         """执行初始同步调仓 - 根据雪球组合当前持仓立即调仓"""
         try:
             self.logger.info("🔄 开始执行初始同步调仓...")
-            
+
             # 获取启用的组合
             enabled_portfolios = self.config_manager.get_enabled_portfolios()
             if not enabled_portfolios:
                 self.logger.warning("没有启用的组合，跳过初始同步")
                 return
-            
+
             # 获取账户信息（容错）
             try:
                 account_value = self._get_account_value()
@@ -1251,43 +1289,43 @@ class StrategyEngine:
             if account_value <= 0:
                 self.logger.warning("账户价值为0，跳过初始同步")
                 return
-            
+
             self.logger.info(f"💰 账户总价值: {account_value:,.2f}")
-            
+
             # 处理每个启用的组合
             all_target_positions = {}
-            
+
             for portfolio in enabled_portfolios:
                 portfolio_code = portfolio['code']
                 follow_ratio = float(portfolio.get('follow_ratio', 0.2))
-                
+
                 self.logger.info(f"📊 处理组合 {portfolio_code}，跟随比例: {follow_ratio:.1%}")
-                
+
                 # 获取雪球组合当前持仓（只获取当前持仓，忽略历史调仓记录）
                 if not self.collector:
                     self.logger.error("数据采集器未初始化")
                     continue
-                
+
                 current_holdings = await self.collector.get_portfolio_holdings(portfolio_code, use_current_only=False)
                 if not current_holdings:
                     self.logger.warning(f"无法获取组合 {portfolio_code} 的持仓数据，组合可能为空仓状态")
                     continue
-                
+
                 # 检查是否为空仓状态
                 if len(current_holdings) == 0:
                     self.logger.info(f"✅ 组合 {portfolio_code} 当前为空仓状态，跳过初始同步")
                     continue
-                
+
                 self.logger.info(f"📈 获取到 {len(current_holdings)} 个持仓:")
                 for holding in current_holdings:
                     sym_norm = self._normalize_symbol(holding.get('symbol', ''))
                     self.logger.info(f"   {sym_norm} {holding['name']}: {holding['target_weight']:.2%}")
-                
+
                 # 导出持仓数据到Excel
                 export_path = self._export_holdings_to_excel(portfolio_code, current_holdings)
                 if export_path:
                     self.logger.info(f"📊 持仓数据已导出到: {export_path}")
-                
+
                 # 将雪球持仓转换为调仓信号
                 changes = []
                 for holding in current_holdings:
@@ -1301,10 +1339,10 @@ class StrategyEngine:
                             'target_weight': target_weight,
                             'prev_weight': 0.0
                         })
-                
+
                 # 计算目标仓位
                 target_positions = self.calculate_target_positions(changes, follow_ratio, account_value)
-                
+
                 # 合并到总目标仓位
                 for symbol, position in target_positions.items():
                     if symbol in all_target_positions:
@@ -1314,15 +1352,15 @@ class StrategyEngine:
                         all_target_positions[symbol]['reason'] += f"; {position['reason']}"
                     else:
                         all_target_positions[symbol] = position.copy()
-            
+
             if not all_target_positions:
                 self.logger.warning("没有计算出目标仓位，跳过初始同步")
                 return
-            
+
             self.logger.info(f"🎯 计算出 {len(all_target_positions)} 个目标仓位:")
             for symbol, position in all_target_positions.items():
                 self.logger.info(f"   {symbol}: 目标价值 {position['target_value']:,.2f}, 权重 {position['weight']:.2%}")
-            
+
             # 导出当前持仓与目标持仓，便于对比差额
             try:
                 self._export_current_positions_to_excel()
@@ -1332,28 +1370,28 @@ class StrategyEngine:
                 self._export_target_positions_to_excel(all_target_positions)
             except Exception:
                 pass
-            
+
             # 生成交易指令
             orders = self.generate_trade_orders(all_target_positions, self.current_positions)
-            
+
             if not orders:
                 self.logger.info("✅ 当前持仓已与目标一致，无需调仓")
                 return
-            
+
             self.logger.info(f"📋 生成 {len(orders)} 个交易指令:")
             for order in orders:
                 action_text = "买入" if order['action'] == 'buy' else "卖出"
                 self.logger.info(f"   {action_text} {order['symbol']} {order['volume']}股 @ {order['price']:.2f}")
-            
+
             # 验证交易指令
             valid_orders = self.validate_trade_orders(orders)
-            
+
             if not valid_orders:
                 self.logger.warning("所有交易指令都被风险控制拒绝")
                 return
-            
+
             self.logger.info(f"✅ {len(valid_orders)}/{len(orders)} 个指令通过风险检查")
-            
+
             # 执行交易
             # 尝试多种路径获取账户ID
             account_id = (
@@ -1364,23 +1402,23 @@ class StrategyEngine:
             if not account_id:
                 self.logger.error("未配置交易账户ID")
                 return
-            
+
             execution_results = []
             for order in valid_orders:
                 try:
                     # 转换订单类型为QMT格式
                     order_type_map = {'buy': 23, 'sell': 24}  # QMT的买卖类型
                     qmt_order_type = order_type_map.get(order['action'])
-                    
+
                     if not qmt_order_type:
                         self.logger.error(f"未知的订单类型: {order['action']}")
                         continue
-                    
+
                     self.logger.info(f"🔄 执行订单: {order['action']} {order['symbol']} {order['volume']}股")
-                    
+
                     # 使用 EasyXT API 下单
                     order_id = self.trader_api.sync_order(
-                        account_id=account_id,
+                        account_id=self._safe_str(account_id),
                         code=self._to_broker_symbol(order['symbol']),
                         order_type=order['action'],
                         volume=order['volume'],
@@ -1389,7 +1427,7 @@ class StrategyEngine:
                         strategy_name='XueqiuFollow',
                         order_remark=f'初始同步_{order["symbol"]}'
                     )
-                    
+
                     if order_id and order_id > 0:
                         execution_results.append({
                             'order_id': order_id,
@@ -1410,7 +1448,7 @@ class StrategyEngine:
                             'reason': order.get('reason', '订单提交失败')
                         })
                         self.logger.error(f"❌ 订单提交失败: {order['symbol']}")
-                        
+
                 except Exception as e:
                     self.logger.error(f"❌ 执行订单失败: {order['symbol']} - {e}")
                     execution_results.append({
@@ -1421,27 +1459,27 @@ class StrategyEngine:
                         'status': 'failed',
                         'reason': order.get('reason', str(e))
                     })
-            
+
             # 统计执行结果
             successful_orders = [r for r in execution_results if r['status'] == 'success']
             failed_orders = [r for r in execution_results if r['status'] == 'failed']
-            
-            self.logger.info(f"🎉 初始同步完成！")
+
+            self.logger.info("🎉 初始同步完成！")
             self.logger.info(f"   ✅ 成功执行: {len(successful_orders)} 个订单")
             self.logger.info(f"   ❌ 执行失败: {len(failed_orders)} 个订单")
-            
+
             if successful_orders:
                 self.logger.info("成功的订单:")
                 for result in successful_orders:
                     action_text = "买入" if result['action'] == 'buy' else "卖出"
                     self.logger.info(f"   {action_text} {result['symbol']} {result['volume']}股 (ID: {result['order_id']})")
-            
+
             if failed_orders:
                 self.logger.warning("失败的订单:")
                 for result in failed_orders:
                     action_text = "买入" if result['action'] == 'buy' else "卖出"
                     self.logger.warning(f"   {action_text} {result['symbol']} {result['volume']}股 - {result['reason']}")
-            
+
             # 导出交易明细
             try:
                 self._export_orders_to_excel(execution_results, "orders.xlsx")
@@ -1449,7 +1487,7 @@ class StrategyEngine:
                 pass
             # 更新持仓记录
             await self._update_positions_after_trade(execution_results)
-            
+
         except Exception as e:
             self.logger.error(f"初始同步调仓失败: {e}")
             import traceback
@@ -1462,7 +1500,7 @@ class StrategyEngine:
             self._export_current_positions_to_excel()
         except Exception:
             pass
-    
+
     async def clear_positions(self):
         """清空所有持仓"""
         try:
@@ -1470,7 +1508,7 @@ class StrategyEngine:
             if not self.current_positions:
                 self.logger.info("当前无持仓需要清空")
                 return
-            
+
             # 生成清仓指令
             clear_orders = []
             for symbol, position in self.current_positions.items():
@@ -1487,7 +1525,7 @@ class StrategyEngine:
                             'reason': '清空持仓'
                         }
                         clear_orders.append(order)
-            
+
             if clear_orders:
                 # 统一获取账户ID并规范为字符串
                 account_id_raw = (
@@ -1505,7 +1543,7 @@ class StrategyEngine:
                             order_price = self._get_current_price(order['symbol'])
                             if order_price:
                                 order_price = self._apply_slippage(order['symbol'], order_price, 'sell')
-                        
+
                         order_id = self.trader_api.sync_order(
                             account_id=account_id,
                             code=self._to_broker_symbol(order['symbol']),
@@ -1527,11 +1565,11 @@ class StrategyEngine:
                     self.logger.error("未配置交易账户ID，无法执行清仓指令")
             else:
                 self.logger.info("无清仓指令需要执行")
-            
+
         except Exception as e:
             self.logger.error(f"清空持仓失败: {e}")
 
-    def _export_holdings_to_excel(self, portfolio_code: str, holdings: List[Dict[str, Any]]):
+    def _export_holdings_to_excel(self, portfolio_code: str, holdings: list[dict[str, Any]]):
         """将持仓数据导出到Excel（可配置开关，覆盖写同名文件以减少数量）"""
         try:
             # 导出开关：默认不导出，兼容两种键名
@@ -1545,7 +1583,7 @@ class StrategyEngine:
             if not holdings:
                 self.logger.warning(f"组合 {portfolio_code} 无持仓数据，跳过导出")
                 return None
-            
+
             # 创建DataFrame
             df_data = []
             for holding in holdings:
@@ -1561,22 +1599,22 @@ class StrategyEngine:
                     '盈亏比例': holding.get('profit_rate', 0),
                     '更新时间': holding.get('update_time', '')
                 })
-            
+
             df = pd.DataFrame(df_data)
-            
+
             # 设置导出路径
             # 改为导出到 reports 目录
             export_dir = Path(__file__).parent.parent.parent / "reports"
             export_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # 覆盖写同名文件，避免每日产生新文件
             filename = f"{portfolio_code}_持仓数据.xlsx"
             filepath = export_dir / filename
-            
+
             # 导出到Excel
             with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
                 df.to_excel(writer, sheet_name='持仓数据', index=False)
-                
+
                 # 设置列宽
                 worksheet = writer.sheets['持仓数据']
                 worksheet.column_dimensions['A'].width = 15  # 股票代码
@@ -1589,15 +1627,15 @@ class StrategyEngine:
                 worksheet.column_dimensions['H'].width = 12  # 当前价
                 worksheet.column_dimensions['I'].width = 12  # 盈亏比例
                 worksheet.column_dimensions['J'].width = 20  # 更新时间
-            
+
             self.logger.info(f"✅ 持仓数据已导出到: {filepath}")
             self.logger.info(f"📊 导出 {len(holdings)} 个持仓记录")
             return filepath
-            
+
         except Exception as e:
             self.logger.error(f"导出持仓数据到Excel失败: {e}")
             return None
-    
+
     def _export_current_positions_to_excel(self) -> Optional[Path]:
         """导出当前账户持仓到Excel（固定文件名覆盖写）"""
         try:
@@ -1634,7 +1672,7 @@ class StrategyEngine:
             self.logger.error(f"导出当前持仓失败: {e}")
             return None
 
-    def _export_target_positions_to_excel(self, target_positions: Dict[str, Dict[str, Any]]) -> Optional[Path]:
+    def _export_target_positions_to_excel(self, target_positions: dict[str, dict[str, Any]]) -> Optional[Path]:
         """导出跟投组合计算出的目标持仓到Excel（固定文件名覆盖写）"""
         try:
             export_enabled = (
@@ -1666,7 +1704,7 @@ class StrategyEngine:
             self.logger.error(f"导出目标持仓失败: {e}")
             return None
 
-    def _export_orders_to_excel(self, orders: List[Dict[str, Any]], filename: str = "orders.xlsx") -> Optional[Path]:
+    def _export_orders_to_excel(self, orders: list[dict[str, Any]], filename: str = "orders.xlsx") -> Optional[Path]:
         """导出已执行交易到Excel（同一文件追加写入，保留历史）"""
         try:
             if not orders:
@@ -1704,14 +1742,51 @@ class StrategyEngine:
             self.logger.error(f"导出交易明细失败: {e}")
             return None
 
-    def get_portfolios(self) -> List[Dict[str, Any]]:
+    def _export_rejected_orders_to_excel(self, orders: list[dict[str, Any]], filename: str = "rejected_orders.xlsx") -> Optional[Path]:
+        """导出被拒绝交易到Excel（同一文件追加写入，保留历史）"""
+        try:
+            if not orders:
+                return None
+            rows = []
+            for o in orders:
+                rows.append({
+                    '股票代码': o.get('symbol', ''),
+                    '方向': '买入' if o.get('action') == 'buy' else ('卖出' if o.get('action') == 'sell' else (o.get('action') or '')),
+                    '股数': int(o.get('volume', 0) or 0),
+                    '价格': float(o.get('price', 0) or 0),
+                    '原因': o.get('reason', ''),
+                    '策略原因': o.get('origin_reason', ''),
+                    '风险等级': o.get('risk_level', ''),
+                    '导出时间': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
+            df = pd.DataFrame(rows)
+            export_dir = Path(__file__).parent.parent.parent / "reports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            filepath = export_dir / filename
+            if filepath.exists():
+                try:
+                    existing_df = pd.read_excel(filepath, sheet_name='拒绝明细')
+                    combined_df = pd.concat([existing_df, df], ignore_index=True)
+                except Exception:
+                    combined_df = df
+            else:
+                combined_df = df
+            with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                combined_df.to_excel(writer, sheet_name='拒绝明细', index=False)
+            self.logger.info(f"✅ 拒绝交易已追加导出: {filepath}")
+            return filepath
+        except Exception as e:
+            self.logger.error(f"导出拒绝交易失败: {e}")
+            return None
+
+    def get_portfolios(self) -> list[dict[str, Any]]:
         """获取组合信息"""
         return self.config_manager.get_portfolios()
-    
-    def get_positions(self) -> Dict[str, Dict[str, Any]]:
+
+    def get_positions(self) -> dict[str, dict[str, Any]]:
         """获取持仓信息"""
         return self.current_positions
-    
+
     def get_risk_report(self) -> str:
         """获取风险报告（容错：无法获取账户资产时也返回可读报告）"""
         if not self.risk_manager:
@@ -1747,11 +1822,11 @@ class StrategyEngine:
             return json.dumps(report, ensure_ascii=False)
         except Exception:
             return str(report)
-    
+
     def add_callback(self, callback: Callable):
         """添加变化回调函数"""
         self.callbacks.append(callback)
-    
+
     def remove_callback(self, callback: Callable):
         """移除变化回调函数"""
         if callback in self.callbacks:
@@ -1760,33 +1835,33 @@ class StrategyEngine:
 
 class XueqiuFollowStrategy:
     """雪球跟单策略引擎 - 简化版本（向后兼容）"""
-    
-    def __init__(self, config_manager: ConfigManager = None):
+
+    def __init__(self, config_manager: Optional[ConfigManager] = None):
         self.logger = setup_logger("XueqiuFollowStrategy")
         self.config_manager = config_manager
         self.collector: Optional[XueqiuCollectorReal] = None
         self.is_running = False
-        self.callbacks: List[Callable] = []
-        
+        self.callbacks: list[Callable] = []
+
     async def initialize(self):
         """初始化策略引擎"""
         try:
             self.logger.info("初始化雪球跟单策略引擎...")
-            
+
             # 初始化数据采集器
             self.collector = XueqiuCollectorReal()
             await self.collector.initialize()
-            
+
             # 加载配置
             await self._load_config()
-            
+
             self.logger.info("策略引擎初始化完成")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"策略引擎初始化失败: {e}")
             return False
-    
+
     async def _load_config(self):
         """加载配置文件"""
         # 如果有配置管理器，直接使用
@@ -1799,35 +1874,35 @@ class XueqiuFollowStrategy:
                 config_dir = Path(__file__).parent.parent / "config"
                 portfolios_file = config_dir / "portfolios.json"
                 if portfolios_file.exists():
-                    with open(portfolios_file, 'r', encoding='utf-8') as f:
+                    with open(portfolios_file, encoding='utf-8') as f:
                         config = json.load(f)
-                        
+
                     enabled_portfolios = [p for p in config.get('portfolios', []) if p.get('enabled', False)]
                     self.logger.info(f"从文件加载了 {len(enabled_portfolios)} 个监控组合")
                 else:
                     enabled_portfolios = []
-                    
+
             except Exception as e:
                 self.logger.error(f"加载配置失败: {e}")
                 enabled_portfolios = []
-    
+
     async def start(self):
         """启动策略"""
         if self.is_running:
             self.logger.warning("策略已在运行中")
             return
-        
+
         try:
             self.logger.info("启动雪球跟单策略...")
             self.is_running = True
-            
+
             # 获取启用的组合
             if self.config_manager:
                 enabled_portfolios = self.config_manager.get_enabled_portfolios()
             else:
                 await self._load_config()
                 enabled_portfolios = []
-            
+
             # 启动监控任务
             tasks = []
             for portfolio in enabled_portfolios:
@@ -1836,29 +1911,29 @@ class XueqiuFollowStrategy:
                     self._monitor_portfolio(portfolio_code)
                 )
                 tasks.append(task)
-            
+
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             else:
                 self.logger.warning("没有配置监控组合")
-                
+
         except Exception as e:
             self.logger.error(f"策略运行失败: {e}")
         finally:
             self.is_running = False
-    
+
     async def stop(self):
         """停止策略"""
         self.logger.info("停止雪球跟单策略...")
         self.is_running = False
-        
+
         if self.collector:
             await self.collector.close()
-    
+
     async def _monitor_portfolio(self, portfolio_code: str):
         """监控单个组合"""
         self.logger.info(f"开始监控组合: {portfolio_code}")
-        
+
         try:
             if self.collector:
                 await self.collector.monitor_portfolio_changes(
@@ -1867,44 +1942,44 @@ class XueqiuFollowStrategy:
                 )
         except Exception as e:
             self.logger.error(f"监控组合 {portfolio_code} 失败: {e}")
-    
-    async def _on_portfolio_changed(self, portfolio_code: str, changes: List[Dict[str, Any]], current_holdings: List[Dict[str, Any]]):
+
+    async def _on_portfolio_changed(self, portfolio_code: str, changes: list[dict[str, Any]], current_holdings: list[dict[str, Any]]):
         """组合变化回调"""
         self.logger.info(f"检测到组合 {portfolio_code} 发生变化:")
-        
+
         for change in changes:
             change_type = change['type']
             symbol = change['symbol']
             name = change['name']
-            
+
             if change_type == 'add':
                 self.logger.info(f"  新增持仓: {symbol} {name} 权重: {change['weight']:.2%}")
             elif change_type == 'modify':
                 self.logger.info(f"  调整持仓: {symbol} {name} {change['old_weight']:.2%} -> {change['new_weight']:.2%}")
             elif change_type == 'remove':
                 self.logger.info(f"  清仓: {symbol} {name}")
-        
+
         # 通知回调函数
         for callback in self.callbacks:
             try:
                 await callback(portfolio_code, changes, current_holdings)
             except Exception as e:
                 self.logger.error(f"回调函数执行失败: {e}")
-    
+
     def add_callback(self, callback: Callable):
         """添加变化回调函数"""
         self.callbacks.append(callback)
-    
+
     def remove_callback(self, callback: Callable):
         """移除变化回调函数"""
         if callback in self.callbacks:
             self.callbacks.remove(callback)
-    
-    async def get_portfolio_status(self, portfolio_code: str) -> Optional[Dict[str, Any]]:
+
+    async def get_portfolio_status(self, portfolio_code: str) -> Optional[dict[str, Any]]:
         """获取组合状态"""
         if not self.collector:
             return None
-        
+
         try:
             holdings = await self.collector.get_portfolio_holdings(portfolio_code)
             if holdings:
@@ -1916,23 +1991,23 @@ class XueqiuFollowStrategy:
                 }
         except Exception as e:
             self.logger.error(f"获取组合状态失败: {e}")
-        
+
         return None
-    
-    async def get_all_portfolios_status(self) -> Dict[str, Dict[str, Any]]:
+
+    async def get_all_portfolios_status(self) -> dict[str, dict[str, Any]]:
         """获取所有监控组合状态"""
         status = {}
-        
+
         # 获取启用的组合
         if self.config_manager:
             enabled_portfolios = self.config_manager.get_enabled_portfolios()
         else:
             enabled_portfolios = []
-        
+
         for portfolio in enabled_portfolios:
             portfolio_code = portfolio['code']
             portfolio_status = await self.get_portfolio_status(portfolio_code)
             if portfolio_status:
                 status[portfolio_code] = portfolio_status
-        
+
         return status

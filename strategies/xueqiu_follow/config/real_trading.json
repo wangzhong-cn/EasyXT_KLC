@@ -1,8 +1,8 @@
 {
   "settings": {
     "account": {
-      "account_id": "39020958",
-      "qmt_path": "D:\\国金QMT交易端模拟\\userdata_mini"
+      "account_id": "test1101",
+      "qmt_path": "D:\\申万宏源策略量化交易终端\\userdata_mini"
     }
   }
 }

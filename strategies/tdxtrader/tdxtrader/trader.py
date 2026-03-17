@@ -1,10 +1,10 @@
+import random
+
+from tdxtrader.anis import BLUE, GREEN, RED, RESET, YELLOW
+from tdxtrader.logger import logger
+from tdxtrader.utils import convert_to_current_date, parse_order_type, timestamp_to_datetime_string
 from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
 from xtquant.xttype import StockAccount
-import random
-import logging
-from tdxtrader.utils import timestamp_to_datetime_string, parse_order_type, convert_to_current_date
-from tdxtrader.anis import RED, GREEN, YELLOW, BLUE, RESET
-from tdxtrader.logger import logger
 
 error_orders = []
 

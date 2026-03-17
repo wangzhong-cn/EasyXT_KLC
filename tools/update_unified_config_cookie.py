@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import json
 import os
 import shutil
@@ -14,7 +13,7 @@ def main():
         print(f'未找到配置文件: {CONFIG_PATH}')
         return 2
 
-    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+    with open(CONFIG_PATH, encoding='utf-8') as f:
         data = json.load(f)
 
     # 备份
@@ -24,9 +23,9 @@ def main():
     # 仅清空 xueqiu.cookie
     xq = data.get('xueqiu')
     if isinstance(xq, dict):
-        before = xq.get('cookie')
+        xq.get('cookie')
         xq['cookie'] = ''
-        after = xq.get('cookie')
+        xq.get('cookie')
     else:
         print('未找到 xueqiu 节点，跳过修改')
         return 3

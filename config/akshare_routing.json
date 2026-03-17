@@ -1,0 +1,26 @@
+{
+  "_comment": "AKShare 数据路由规则。修改此文件无需改代码。",
+  "_version": "1.0",
+  "index_rules": {
+    "suffix_sh_prefixes": ["000", "399", "999", "688"],
+    "suffix_sz_prefixes": ["399"],
+    "explicit_index_codes": [
+      "000300.SH",
+      "000016.SH",
+      "000905.SH",
+      "000906.SH",
+      "000852.SH",
+      "000688.SH",
+      "399001.SZ",
+      "399006.SZ",
+      "399005.SZ",
+      "399300.SZ",
+      "899050.BJ"
+    ]
+  },
+  "akshare_retry": {
+    "max_retries": 2,
+    "backoff_seconds": 5,
+    "timeout_seconds": 20
+  }
+}

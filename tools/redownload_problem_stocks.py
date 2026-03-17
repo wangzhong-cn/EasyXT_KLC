@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 重新下载有问题的股票数据
 """
 
 import sys
 from pathlib import Path
+
 import duckdb
 
 # 添加项目路径
@@ -60,11 +60,11 @@ def redownload_stock(stock_code: str, start_date: str = '2020-01-01', end_date: 
         print(f"日期范围: {start_date} ~ {end_date}")
 
         # 删除旧数据
-        print(f"删除旧数据...")
-        interface.con.execute(f"DELETE FROM stock_daily WHERE stock_code = '{stock_code}'")
+        print("删除旧数据...")
+        interface.con.execute("DELETE FROM stock_daily WHERE stock_code = ?", [stock_code])
 
         # 下载新数据
-        print(f"开始下载...")
+        print("开始下载...")
         df = interface.get_stock_data(
             stock_code=stock_code,
             start_date=start_date,
@@ -84,7 +84,7 @@ def redownload_stock(stock_code: str, start_date: str = '2020-01-01', end_date: 
                 print(f"日期范围: {df.index.min()} ~ {df.index.max()}")
             return True
         else:
-            print(f"[WARNING] 下载成功但无数据")
+            print("[WARNING] 下载成功但无数据")
             return False
 
     except Exception as e:

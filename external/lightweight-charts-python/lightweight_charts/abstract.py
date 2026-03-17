@@ -200,7 +200,12 @@ class SeriesCommon(Pane):
         self._set_interval(df)
         if not pd.api.types.is_datetime64_any_dtype(df['time']):
             df['time'] = pd.to_datetime(df['time'])
-        df['time'] = df['time'].astype('int64') // 10 ** 9
+        # For daily interval use string dates so LWC enters business-day mode which
+        # is timezone-independent (no UTC+8 "08:00" / "14:55" artefacts on x-axis).
+        if self._interval == 86400 and self.offset == 0:
+            df['time'] = df['time'].dt.strftime('%Y-%m-%d')
+        else:
+            df['time'] = df['time'].astype('int64') // 10 ** 9
         return df
 
     def _series_datetime_format(self, series: pd.Series, exclude_lowercase=None):
@@ -209,13 +214,17 @@ class SeriesCommon(Pane):
         series['time'] = self._single_datetime_format(series['time'])
         return series
 
-    def _single_datetime_format(self, arg) -> float:
+    def _single_datetime_format(self, arg):
         if isinstance(arg, (str, int, float)) or not pd.api.types.is_datetime64_any_dtype(arg):
             try:
                 arg = pd.to_datetime(arg, unit='ms')
-            except ValueError:
+            except (ValueError, TypeError):
                 arg = pd.to_datetime(arg)
-        arg = self._interval * (arg.timestamp() // self._interval)+self.offset
+        # For daily interval return a "YYYY-MM-DD" string so chart.update() stays
+        # consistent with chart.set() (both in LWC business-day mode).
+        if self._interval == 86400 and self.offset == 0:
+            return arg.strftime('%Y-%m-%d')
+        arg = self._interval * (arg.timestamp() // self._interval) + self.offset
         return arg
 
     def set(self, df: Optional[pd.DataFrame] = None, format_cols: bool = True):

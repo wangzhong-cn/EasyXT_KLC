@@ -1,33 +1,33 @@
 import time
 from datetime import datetime
-from xtquant import xtdata
-import numpy as np
+
 from qka.logger import logger
+from xtquant import xtdata
+
 
 class QMTData:
     def __init__(self, stocks=None, sector=None, indicators=None):
-        self.stocks = stocks
+        self.stocks = stocks or []
         if sector is not None:
-            self.stocks = xtdata.get_stock_list_in_sector(sector)
-        
+            self.stocks = xtdata.get_stock_list_in_sector(sector) or []
+
         self.indicators = indicators
-    
+
     def get(self, period, start_time='', end_time=''):
 
         for stock in self.stocks:
             xtdata.download_history_data(stock_code=stock, period=period, start_time=start_time, end_time=end_time, incrementally=True)
-        
+
         res = xtdata.get_local_data(stock_list=self.stocks, period=period, start_time=start_time, end_time=end_time)
 
         return res
-    
+
     def subscribe(self, callback):
 
-        delays = []
 
         def task(res):
             for code, item in res.items():
-                rate = (item['lastPrice'] - item['lastClose']) / item['lastClose']
+                _price_change = (item['lastPrice'] - item['lastClose']) / item['lastClose']
                 timetag = datetime.fromtimestamp(item['time'] / 1000)
                 current_time = datetime.fromtimestamp(time.time())
                 delay_seconds = (current_time - timetag).total_seconds()

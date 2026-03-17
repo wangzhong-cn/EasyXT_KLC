@@ -20,11 +20,15 @@
 日期：2026-02-07
 """
 
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Optional, Union
-from datetime import datetime, timedelta
 import warnings
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_SH = ZoneInfo('Asia/Shanghai')
+from typing import Any, Optional, cast
+
+import numpy as np
+import pandas as pd
 
 warnings.filterwarnings('ignore')
 
@@ -40,14 +44,15 @@ class DuckDBDataReader:
             duckdb_path: DuckDB数据库文件路径
         """
         self.duckdb_path = duckdb_path
-        self.conn = None
+        self._db = None
+        self.conn = None  # 废弃：保留避免 AttributeError
         self._connect()
 
     def _connect(self):
-        """连接DuckDB数据库"""
+        """连接DuckDB数据库（通过连接池）"""
         try:
-            import duckdb
-            self.conn = duckdb.connect(self.duckdb_path)
+            from data_manager.duckdb_connection_pool import get_db_manager
+            self._db = get_db_manager(self.duckdb_path)
             print(f"[OK] 成功连接数据库: {self.duckdb_path}")
         except ImportError:
             print("[ERROR] duckdb未安装，请运行: pip install duckdb")
@@ -56,7 +61,7 @@ class DuckDBDataReader:
             print(f"[ERROR] DuckDB连接失败: {e}")
             raise
 
-    def get_stock_list(self, limit: Optional[int] = None) -> List[str]:
+    def get_stock_list(self, limit: Optional[int] = None) -> list[str]:
         """
         获取数据库中的股票列表
 
@@ -66,7 +71,7 @@ class DuckDBDataReader:
         返回:
             List[str]: 股票代码列表
         """
-        if self.conn is None:
+        if self._db is None:
             return []
 
         try:
@@ -74,13 +79,13 @@ class DuckDBDataReader:
             if limit:
                 sql += f" LIMIT {limit}"
 
-            df = self.conn.execute(sql).fetchdf()
+            df = self._db.execute_read_query(sql)
             return df['stock_code'].tolist()
         except Exception as e:
             print(f"[ERROR] 获取股票列表失败: {e}")
             return []
 
-    def get_market_data(self, stock_list: List[str], start_date: str, end_date: Optional[str] = None) -> pd.DataFrame:
+    def get_market_data(self, stock_list: list[str], start_date: str, end_date: Optional[str] = None) -> pd.DataFrame:
         """
         批量读取市场数据
 
@@ -92,25 +97,26 @@ class DuckDBDataReader:
         返回:
             pd.DataFrame: 市场数据
         """
-        if self.conn is None:
+        if self._db is None:
             return pd.DataFrame()
 
         try:
             # 构建SQL查询
             stocks_str = "', '".join(stock_list)
-            sql = f"""
-                SELECT * FROM stock_daily
-                WHERE stock_code IN ('{stocks_str}')
-                  AND date >= '{start_date}'
-            """
+            sql = (
+                "SELECT * FROM stock_daily"
+                " WHERE stock_code IN ('" + stocks_str + "')"
+                " AND date >= ?"
+            )
 
             if end_date:
-                sql += f" AND date <= '{end_date}'"
+                sql += " AND date <= ?"
 
             sql += " ORDER BY stock_code, date"
 
             # 执行查询
-            df = self.conn.execute(sql).fetchdf()
+            params = [start_date, end_date] if end_date else [start_date]
+            df = self._db.execute_read_query(sql, tuple(params))
 
             if not df.empty:
                 # 统一列名为小写
@@ -122,7 +128,7 @@ class DuckDBDataReader:
             print(f"[ERROR] 数据查询失败: {e}")
             return pd.DataFrame()
 
-    def get_stock_info(self, stock_code: str) -> Optional[Dict]:
+    def get_stock_info(self, stock_code: str) -> Optional[dict]:
         """
         获取股票基本信息
 
@@ -132,22 +138,22 @@ class DuckDBDataReader:
         返回:
             Dict: 股票信息
         """
-        if self.conn is None:
+        if self._db is None:
             return None
 
         try:
-            sql = f"""
+            sql = """
                 SELECT
                     stock_code,
                     MIN(date) as first_date,
                     MAX(date) as last_date,
                     COUNT(*) as data_count
                 FROM stock_daily
-                WHERE stock_code = '{stock_code}'
+                WHERE stock_code = ?
                 GROUP BY stock_code
             """
 
-            result = self.conn.execute(sql).fetchdf()
+            result = self._db.execute_read_query(sql, (stock_code,))
             return result.iloc[0].to_dict() if not result.empty else None
 
         except Exception as e:
@@ -155,10 +161,9 @@ class DuckDBDataReader:
             return None
 
     def close(self):
-        """关闭数据库连接"""
-        if self.conn:
-            self.conn.close()
-            print("[INFO] 数据库连接已关闭")
+        """释放数据库管理器引用"""
+        self._db = None
+        print("[INFO] 数据库连接已释放")
 
 
 class EasyFactor:
@@ -332,7 +337,7 @@ class EasyFactor:
             pd.DataFrame: 因子数据
         """
         if end_date is None:
-            end_date = datetime.now().strftime('%Y-%m-%d')
+            end_date = datetime.now(tz=_SH).strftime('%Y-%m-%d')
 
         # 获取市场数据
         df = self.get_market_data_ex(stock_code, start_date, end_date)
@@ -388,10 +393,10 @@ class EasyFactor:
             return pd.DataFrame()
 
     def get_factor_batch(self,
-                        stock_list: List[str],
-                        factor_names: List[str],
+                        stock_list: list[str],
+                        factor_names: list[str],
                         start_date: str,
-                        end_date: Optional[str] = None) -> Dict[str, pd.DataFrame]:
+                        end_date: Optional[str] = None) -> dict[str, pd.DataFrame]:
         """
         批量获取因子
 
@@ -405,7 +410,7 @@ class EasyFactor:
             Dict[str, pd.DataFrame]: {factor_name: DataFrame}
         """
         if end_date is None:
-            end_date = datetime.now().strftime('%Y-%m-%d')
+            end_date = datetime.now(tz=_SH).strftime('%Y-%m-%d')
 
         # 批量读取所有数据（一次性读取，提高效率）
         all_data = self.duckdb_reader.get_market_data(stock_list, start_date, end_date)
@@ -485,7 +490,7 @@ class EasyFactor:
             pd.DataFrame: 所有因子数据
         """
         if end_date is None:
-            end_date = datetime.now().strftime('%Y-%m-%d')
+            end_date = datetime.now(tz=_SH).strftime('%Y-%m-%d')
 
         df_price = self.get_market_data_ex(stock_code, start_date, end_date)
 
@@ -556,10 +561,10 @@ class EasyFactor:
     # ============================================================
 
     def analyze_batch(self,
-                     stock_list: List[str],
+                     stock_list: list[str],
                      start_date: str,
                      end_date: Optional[str] = None,
-                     factor_types: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
+                     factor_types: Optional[list[str]] = None) -> dict[str, pd.DataFrame]:
         """
         批量分析多只股票（高性能优化版）
 
@@ -575,7 +580,7 @@ class EasyFactor:
             Dict[str, pd.DataFrame]: 分析结果字典
         """
         if end_date is None:
-            end_date = datetime.now().strftime('%Y-%m-%d')
+            end_date = datetime.now(tz=_SH).strftime('%Y-%m-%d')
 
         if factor_types is None:
             factor_types = ['momentum', 'volatility', 'volume_price', 'technical', 'score']
@@ -592,26 +597,26 @@ class EasyFactor:
 
         # 批量计算各类因子
         if 'momentum' in factor_types:
-            print(f"[批量计算] 动量因子...")
+            print("[批量计算] 动量因子...")
             results['momentum'] = self._batch_calc_momentum(all_data)
 
         if 'volatility' in factor_types:
-            print(f"[批量计算] 波动率因子...")
+            print("[批量计算] 波动率因子...")
             results['volatility'] = self._batch_calc_volatility(all_data)
 
         if 'volume_price' in factor_types:
-            print(f"[批量计算] 量价因子...")
+            print("[批量计算] 量价因子...")
             results['volume_price'] = self._batch_calc_volume_price(all_data)
 
         if 'technical' in factor_types:
-            print(f"[批量计算] 技术指标...")
+            print("[批量计算] 技术指标...")
             results['technical'] = self._batch_calc_technical(all_data)
 
         if 'score' in factor_types:
-            print(f"[批量计算] 综合评分...")
+            print("[批量计算] 综合评分...")
             results['score'] = self._batch_calc_score(all_data, results)
 
-        print(f"[OK] 批量分析完成！")
+        print("[OK] 批量分析完成！")
         return results
 
     # ============================================================
@@ -619,7 +624,7 @@ class EasyFactor:
     # ============================================================
 
     def get_comprehensive_score(self,
-                               stock_list: List[str],
+                               stock_list: list[str],
                                date: Optional[str] = None) -> pd.DataFrame:
         """
         获取综合评分（批量分析）
@@ -635,9 +640,9 @@ class EasyFactor:
                 - rating: 评级 (A/B/C/D)
         """
         if date is None:
-            date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            date = (datetime.now(tz=_SH) - timedelta(days=1)).strftime('%Y-%m-%d')
 
-        start_date = (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')
+        start_date = (datetime.now(tz=_SH) - timedelta(days=120)).strftime('%Y-%m-%d')
 
         # 使用批量分析（需要计算所有因子才能得出综合评分）
         results = self.analyze_batch(stock_list, start_date, date, factor_types=None)
@@ -661,7 +666,7 @@ class EasyFactor:
         stock_codes = self.duckdb_reader.get_stock_list(limit=limit)
         return pd.DataFrame({'stock_code': stock_codes})
 
-    def get_stock_info(self, stock_code: str) -> Optional[Dict]:
+    def get_stock_info(self, stock_code: str) -> Optional[dict]:
         """
         获取股票信息
 
@@ -857,8 +862,8 @@ class EasyFactor:
         close_col = 'close'
 
         high_low = data[high_col] - data[low_col]
-        high_close = np.abs(data[high_col] - data[close_col].shift())
-        low_close = np.abs(data[low_col] - data[close_col].shift())
+        high_close = (data[high_col] - data[close_col].shift()).abs()
+        low_close = (data[low_col] - data[close_col].shift()).abs()
 
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = tr.tail(period).mean()
@@ -874,7 +879,8 @@ class EasyFactor:
         close_col = 'close'
         vol_col = 'volume'
 
-        obv = (np.sign(data[close_col].diff()) * data[vol_col]).fillna(0).cumsum()
+        price_sign = data[close_col].diff().apply(np.sign)
+        obv = (price_sign * data[vol_col]).fillna(0).cumsum()
         obv_value = obv.iloc[-1]
 
         result_df = pd.DataFrame({'obv': [obv_value]}, index=[data.index[-1]])
@@ -1052,7 +1058,7 @@ class EasyFactor:
 
         return pd.DataFrame(results)
 
-    def _batch_calc_score(self, data: pd.DataFrame, factor_results: Dict) -> pd.DataFrame:
+    def _batch_calc_score(self, data: pd.DataFrame, factor_results: dict) -> pd.DataFrame:
         """批量计算综合评分"""
         scores = {}
 
@@ -1135,14 +1141,15 @@ class EasyFactor:
             return pd.DataFrame()
 
         try:
-            return self.money_flow_analyzer.get_stock_money_flow(
+            analyzer = cast(Any, self.money_flow_analyzer)
+            return analyzer.get_stock_money_flow(
                 stock_code, days, use_cache=use_cache, duckdb_reader=self.duckdb_reader
             )
         except Exception as e:
             print(f"[ERROR] 获取资金流向失败: {e}")
             return pd.DataFrame()
 
-    def get_sector_money_flow(self, sector_name: str, date: str = None) -> pd.DataFrame:
+    def get_sector_money_flow(self, sector_name: str, date: Optional[str] = None) -> pd.DataFrame:
         """
         获取板块资金流向
 
@@ -1158,12 +1165,13 @@ class EasyFactor:
             return pd.DataFrame()
 
         try:
-            return self.money_flow_analyzer.get_sector_money_flow(sector_name, date)
+            analyzer = cast(Any, self.money_flow_analyzer)
+            return analyzer.get_sector_money_flow(sector_name, date or "")
         except Exception as e:
             print(f"[ERROR] 获取板块资金流向失败: {e}")
             return pd.DataFrame()
 
-    def get_money_flow_rank(self, stock_pool: List[str] = None,
+    def get_money_flow_rank(self, stock_pool: Optional[list[str]] = None,
                            top_n: int = 10,
                            use_cache: bool = True) -> pd.DataFrame:
         """
@@ -1182,8 +1190,9 @@ class EasyFactor:
             return pd.DataFrame()
 
         try:
-            return self.money_flow_analyzer.get_flow_rank(
-                stock_pool, top_n=top_n, duckdb_reader=self.duckdb_reader, use_cache=use_cache
+            analyzer = cast(Any, self.money_flow_analyzer)
+            return analyzer.get_flow_rank(
+                stock_pool or [], top_n=top_n, duckdb_reader=self.duckdb_reader, use_cache=use_cache
             )
         except Exception as e:
             print(f"[ERROR] 获取资金流向排名失败: {e}")
@@ -1251,7 +1260,7 @@ class EasyFactor:
             print(f"[ERROR] 获取概念资金流向失败: {e}")
             return pd.DataFrame()
 
-    def update_ths_money_flow(self) -> Dict[str, int]:
+    def update_ths_money_flow(self) -> dict[str, int]:
         """
         更新同花顺行业/概念资金流向数据到DuckDB
 
@@ -1315,7 +1324,7 @@ class EasyFactor:
             print(f"[ERROR] 获取北向资金行业流向失败: {e}")
             return pd.DataFrame()
 
-    def get_north_money_stock(self, stock_code: str = None, top_n: int = 20) -> pd.DataFrame:
+    def get_north_money_stock(self, stock_code: Optional[str] = None, top_n: int = 20) -> pd.DataFrame:
         """
         获取北向资金个股流向
 
@@ -1331,12 +1340,13 @@ class EasyFactor:
             return pd.DataFrame()
 
         try:
-            return self.money_flow_analyzer.get_north_money_stock(stock_code, top_n)
+            analyzer = cast(Any, self.money_flow_analyzer)
+            return analyzer.get_north_money_stock(stock_code, top_n)
         except Exception as e:
             print(f"[ERROR] 获取北向资金个股流向失败: {e}")
             return pd.DataFrame()
 
-    def get_ths_stock_money_flow(self, stock_code: str = None, top_n: int = 20, use_cache: bool = True) -> pd.DataFrame:
+    def get_ths_stock_money_flow(self, stock_code: Optional[str] = None, top_n: int = 20, use_cache: bool = True) -> pd.DataFrame:
         """
         获取同花顺个股资金流向（全市场或指定股票）
 
@@ -1359,7 +1369,8 @@ class EasyFactor:
             return pd.DataFrame()
 
         try:
-            return self.money_flow_analyzer.get_ths_stock_money_flow(
+            analyzer = cast(Any, self.money_flow_analyzer)
+            return analyzer.get_ths_stock_money_flow(
                 stock_code, top_n, use_cache=use_cache, duckdb_reader=self.duckdb_reader
             )
         except Exception as e:
@@ -1370,7 +1381,7 @@ class EasyFactor:
     # 扩展模块：龙虎榜数据
     # ============================================================
 
-    def get_dragon_tiger_list(self, date: str = None) -> pd.DataFrame:
+    def get_dragon_tiger_list(self, date: Optional[str] = None) -> pd.DataFrame:
         """
         获取龙虎榜每日列表
 
@@ -1385,14 +1396,14 @@ class EasyFactor:
             return pd.DataFrame()
 
         try:
-            return self.dragon_tiger_analyzer.get_daily_list(date)
+            return self.dragon_tiger_analyzer.get_daily_list(date or "")
         except Exception as e:
             print(f"[ERROR] 获取龙虎榜失败: {e}")
             return pd.DataFrame()
 
     def get_stock_dragon_tiger_history(self, stock_code: str,
-                                       start_date: str = None,
-                                       end_date: str = None) -> pd.DataFrame:
+                                       start_date: Optional[str] = None,
+                                       end_date: Optional[str] = None) -> pd.DataFrame:
         """
         获取个股龙虎榜历史
 
@@ -1410,13 +1421,13 @@ class EasyFactor:
 
         try:
             return self.dragon_tiger_analyzer.get_stock_history(
-                stock_code, start_date, end_date
+                stock_code, start_date or "", end_date or ""
             )
         except Exception as e:
             print(f"[ERROR] 获取龙虎榜历史失败: {e}")
             return pd.DataFrame()
 
-    def get_institutional_detail(self, date: str = None) -> pd.DataFrame:
+    def get_institutional_detail(self, date: Optional[str] = None) -> pd.DataFrame:
         """
         获取机构龙虎榜明细
 
@@ -1431,7 +1442,7 @@ class EasyFactor:
             return pd.DataFrame()
 
         try:
-            return self.dragon_tiger_analyzer.get_institutional_detail(date)
+            return self.dragon_tiger_analyzer.get_institutional_detail(date or "")
         except Exception as e:
             print(f"[ERROR] 获取机构明细失败: {e}")
             return pd.DataFrame()
@@ -1513,7 +1524,8 @@ class EasyFactor:
             return pd.DataFrame()
 
         try:
-            return self.sector_analyzer.get_sector_rank(sector_type, top_n)
+            analyzer = cast(Any, self.sector_analyzer)
+            return analyzer.get_sector_rank(sector_type=sector_type, top_n=top_n)
         except Exception as e:
             print(f"[ERROR] 获取板块排名失败: {e}")
             return pd.DataFrame()

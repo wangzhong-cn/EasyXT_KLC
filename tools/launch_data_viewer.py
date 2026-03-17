@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 快速启动脚本 - 本地数据查看器
 """
@@ -12,7 +11,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / 'gui_app' / 'widgets'))
 
-from advanced_data_viewer import AdvancedDataViewer
+from gui_app.widgets.advanced_data_viewer import AdvancedDataViewer
 from PyQt5.QtWidgets import QApplication
 
 if __name__ == "__main__":

@@ -1,29 +1,238 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 条件单GUI组件
 提供条件单的可视化配置、管理和监控界面
 """
 
-import sys
-import os
 import importlib.util
+import os
+import sys
+import threading
 from datetime import datetime, timedelta
+from types import ModuleType
 from typing import Optional
 
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLineEdit, QPushButton, QTextEdit,
-    QTableWidget, QTableWidgetItem, QSpinBox, QDoubleSpinBox, QComboBox,
-    QSplitter, QFrame, QMessageBox,
-    QFormLayout, QScrollArea, QDateTimeEdit, QDateEdit
-)
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QDateTime
+from PyQt5.QtCore import QDateTime, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QTextCursor
+from PyQt5.QtWidgets import (
+    QComboBox,
+    QDateEdit,
+    QDateTimeEdit,
+    QDoubleSpinBox,
+    QFormLayout,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 # 添加项目路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 EASYXT_AVAILABLE = importlib.util.find_spec("easy_xt") is not None
+
+
+class _TradeInitThread(QThread):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+
+    def run(self):
+        if not EASYXT_AVAILABLE:
+            self.finished.emit({"logs": ["提示: EasyXT不可用，条件单功能受限"], "ok": False})
+            return
+        try:
+            import json
+            import easy_xt
+
+            logs = []
+            config_file = os.path.join(
+                os.path.dirname(__file__), "..", "..", "config", "unified_config.json"
+            )
+            if not os.path.exists(config_file):
+                self.finished.emit({"logs": ["提示: 未找到统一配置文件 (config/unified_config.json)"], "ok": False})
+                return
+            with open(config_file, encoding="utf-8") as f:
+                config = json.load(f)
+            settings = config.get("settings", {})
+            account_config = settings.get("account", {})
+            userdata_path = account_config.get("qmt_path", "")
+            account_id = account_config.get("account_id", "")
+            env_account_id = os.environ.get("EASYXT_ACCOUNT_ID", "").strip()
+            if env_account_id:
+                account_id = env_account_id
+            if isinstance(account_id, str) and account_id.startswith("__REPLACE_"):
+                account_id = ""
+            account_type = account_config.get("account_type", "STOCK")
+            if not userdata_path:
+                self.finished.emit({"logs": ["提示: 统一配置文件中未设置QMT路径 (settings.account.qmt_path)"], "ok": False})
+                return
+
+            logs.append("正在初始化交易连接...")
+            logs.append(f"  QMT路径: {userdata_path}")
+            logs.append(f"  账户ID: {account_id if account_id else '未设置'}")
+
+            # get_extended_api() 内部已使用 _xt_init_lock 保护，无需手动获取
+            try:
+                trade_api = easy_xt.get_extended_api()
+                if isinstance(trade_api, ModuleType) or not hasattr(trade_api, "trade_api"):
+                    from easy_xt.extended_api import ExtendedAPI
+
+                    trade_api = ExtendedAPI()
+
+                if hasattr(trade_api, "init_trade"):
+                    result = trade_api.init_trade(userdata_path)
+                    if not result:
+                        self.finished.emit({"logs": logs + ["✗ 交易服务连接失败"], "ok": False})
+                        return
+                    logs.append("✓ 交易服务连接成功")
+
+                raw_trade_api = getattr(trade_api, "trade_api", None)
+                trader = getattr(raw_trade_api, "trader", None)
+                logged_accounts = []
+                if trader and hasattr(trader, "query_account_infos"):
+                    infos = trader.query_account_infos() or []
+                    for info in infos:
+                        acc_id = getattr(info, "account_id", None)
+                        if acc_id is None:
+                            continue
+                        logged_accounts.append(
+                            {
+                                "account_id": str(acc_id),
+                                "account_type": getattr(info, "account_type", None),
+                            }
+                        )
+
+                added_ids = []
+                if logged_accounts:
+                    logs.append(f"✓ 已登录账户: {', '.join([a['account_id'] for a in logged_accounts])}")
+                    for account in logged_accounts:
+                        acc_id = account.get("account_id")
+                        acc_type = account.get("account_type", account_type)
+                        if acc_id and trade_api.add_account(acc_id, acc_type):
+                            added_ids.append(acc_id)
+                    if added_ids:
+                        if account_id and account_id in added_ids:
+                            selected_id = account_id
+                        else:
+                            selected_id = added_ids[0]
+                            if account_id:
+                                logs.append(f"⚠️ 配置账户不可用，已切换到: {selected_id}")
+                        account_id = selected_id
+                elif account_id:
+                    if trade_api.add_account(account_id, account_type):
+                        added_ids.append(account_id)
+                        logs.append(f"✓ 已添加账户: {account_id} ({account_type})")
+                    else:
+                        logs.append(f"✗ 添加账户失败: {account_id}")
+                else:
+                    logs.append("✗ 未检测到账户，无法添加")
+            finally:
+                pass
+
+            self.finished.emit(
+                {
+                    "ok": True,
+                    "logs": logs,
+                    "trade_api": trade_api,
+                    "logged_accounts": logged_accounts,
+                    "added_ids": added_ids,
+                    "account_id": account_id,
+                }
+            )
+        except Exception as e:
+            self.failed.emit(f"初始化交易连接时出错: {e}")
+
+
+class _PriceMonitorThread(QThread):
+    """后台价格采样线程：批量获取所有待监控股票的最新价，避免在 UI 主线程同步调用 xtdata"""
+
+    prices_ready = pyqtSignal(dict)  # {order_id: float or None}
+
+    def __init__(self, orders: list):
+        super().__init__()
+        # 仅保存必要数据，避免持有 widget 引用
+        self._tasks: list[tuple[str, str]] = [
+            (order["id"], order["stock_code"]) for order in orders
+        ]
+
+    def run(self):
+        if not EASYXT_AVAILABLE:
+            self.prices_ready.emit({})
+            return
+
+        results: dict[str, Optional[float]] = {}
+        try:
+            import easy_xt
+            from easy_xt.utils import StockCodeUtils
+            broker = easy_xt.get_xtquant_broker()
+        except Exception:
+            self.prices_ready.emit({})
+            return
+
+        # 归一化并去重，批量拉取
+        code_to_orders: dict[str, list[str]] = {}
+        for order_id, stock_code in self._tasks:
+            try:
+                normalized = StockCodeUtils.normalize_code(stock_code)
+            except Exception:
+                normalized = stock_code
+            code_to_orders.setdefault(normalized, []).append(order_id)
+
+        unique_codes = list(code_to_orders.keys())
+        price_map: dict[str, float] = {}
+
+        # 主路径：get_full_tick 批量拉取
+        try:
+            tick_data = broker.get_full_tick(unique_codes) or {}
+            for code, tick_info in tick_data.items():
+                if not tick_info:
+                    continue
+                if "lastPrice" in tick_info:
+                    price_map[code] = float(tick_info["lastPrice"])
+                elif "price" in tick_info:
+                    price_map[code] = float(tick_info["price"])
+        except Exception as exc:
+            print(f"[PriceMonitorThread] get_full_tick failed: {exc}")
+
+        # 兜底：对仍缺价格的 code 用 get_market_data
+        missing = [c for c in unique_codes if c not in price_map]
+        if missing:
+            try:
+                current_data = broker.get_market_data(
+                    stock_list=missing, period="tick", count=1
+                )
+                if current_data and isinstance(current_data, dict):
+                    for code, data_array in current_data.items():
+                        if hasattr(data_array, "__len__") and len(data_array) > 0:
+                            first_item = data_array[0]
+                            if hasattr(first_item, "lastPrice"):
+                                try:
+                                    price_map[code] = float(first_item["lastPrice"])
+                                except Exception:
+                                    pass
+            except Exception as exc:
+                print(f"[PriceMonitorThread] get_market_data fallback failed: {exc}")
+
+        # 将价格映射回 order_id
+        for code, order_ids in code_to_orders.items():
+            price = price_map.get(code)
+            for oid in order_ids:
+                results[oid] = price
+
+        self.prices_ready.emit(results)
 
 
 class ConditionalOrderWidget(QWidget):
@@ -38,9 +247,11 @@ class ConditionalOrderWidget(QWidget):
         self.monitored_orders = set()  # 已启动监控的条件单ID集合
         self.trade_api = None  # AdvancedTradeAPI实例
         self._trade_initialized = False  # 交易API是否已初始化
+        self._trade_init_thread: Optional[QThread] = None
+        self._price_monitor_thread: Optional[QThread] = None
         self.init_ui()
         self.setup_timer()
-        self.init_trade_connection()  # 自动初始化交易连接
+        self.init_trade_connection()  # 自动初始化交易连接（异步）
 
     def init_ui(self):
         """初始化用户界面"""
@@ -415,7 +626,7 @@ class ConditionalOrderWidget(QWidget):
         while self.condition_layout.count():
             item = self.condition_layout.takeAt(0)
             if item.widget():
-                item.widget().setParent(None)
+                item.widget().deleteLater()
 
         # 重新创建条件UI
         self.create_condition_ui(self.condition_layout)
@@ -674,212 +885,143 @@ ID: {order['id']}
 
     def setup_timer(self):
         """设置定时器"""
-        # 监控定时器
+        # 监控定时器：触发后台价格采样，不在 UI 线程同步拉取行情
         self.monitor_timer = QTimer()
-        self.monitor_timer.timeout.connect(self.monitor_orders)
+        self.monitor_timer.timeout.connect(self._start_price_monitor)
         self.monitor_timer.start(5000)  # 每5秒检查一次
 
     def init_trade_connection(self):
         """初始化交易连接"""
-        if not EASYXT_AVAILABLE:
-            self.log("提示: EasyXT不可用，条件单功能受限")
+        if self._trade_init_thread is not None and self._trade_init_thread.isRunning():
             return
+        self._trade_init_thread = _TradeInitThread()
+        self._trade_init_thread.finished.connect(self._on_trade_init_finished)
+        self._trade_init_thread.failed.connect(self._on_trade_init_failed)
+        self._trade_init_thread.start()
 
-        try:
-            import easy_xt
-            import json
-            import os
-
-            # 读取统一配置文件
-            config_file = os.path.join(
-                os.path.dirname(__file__), '..', '..', 'config', 'unified_config.json'
-            )
-            if not os.path.exists(config_file):
-                self.log("提示: 未找到统一配置文件 (config/unified_config.json)")
-                return
-
-            with open(config_file, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-
-            # 获取QMT路径和账户ID
-            settings = config.get('settings', {})
-            account_config = settings.get('account', {})
-
-            userdata_path = account_config.get('qmt_path', '')
-            account_id = account_config.get('account_id', '')
-            account_type = account_config.get('account_type', 'STOCK')
-
-            if not userdata_path:
-                self.log("提示: 统一配置文件中未设置QMT路径 (settings.account.qmt_path)")
-                return
-
-            self.log("正在初始化交易连接...")
-            self.log(f"  QMT路径: {userdata_path}")
-            if account_id:
-                self.log(f"  账户ID: {account_id}")
-            else:
-                self.log("  账户ID: 未设置")
-
-            # 获取扩展API实例
-            self.trade_api = easy_xt.get_extended_api()
-
-            # 初始化交易服务
-            if hasattr(self.trade_api, 'init_trade'):
-                result = self.trade_api.init_trade(userdata_path)
-                if result:
-                    self._trade_initialized = True
-                    self.log("✓ 交易服务连接成功")
-                else:
-                    self.log("✗ 交易服务连接失败")
-                    return
-
-            # 添加账户
-            trader = getattr(self.trade_api.trade_api, 'trader', None)
-            logged_accounts = []
-            if trader and hasattr(trader, 'query_account_infos'):
-                infos = trader.query_account_infos() or []
-                for info in infos:
-                    acc_id = getattr(info, "account_id", None)
-                    if acc_id is None:
-                        continue
-                    logged_accounts.append({
-                        "account_id": str(acc_id),
-                        "account_type": getattr(info, "account_type", None)
-                    })
-
-            added_ids = []
-            logged_map = {a["account_id"]: a for a in logged_accounts}
+    def _on_trade_init_finished(self, result: dict):
+        self._trade_init_thread = None
+        for line in result.get("logs", []):
+            self.log(line)
+        if not result.get("ok"):
+            return
+        self.trade_api = result.get("trade_api")
+        self._trade_initialized = True
+        account_id = result.get("account_id", "")
+        logged_accounts = result.get("logged_accounts", [])
+        added_ids = result.get("added_ids", [])
+        if hasattr(self, "account_combo"):
+            self.account_combo.clear()
             if logged_accounts:
-                self.log(f"✓ 已登录账户: {', '.join([a['account_id'] for a in logged_accounts])}")
                 for account in logged_accounts:
                     acc_id = account.get("account_id")
-                    acc_type = account.get("account_type", account_type)
+                    acc_type = account.get("account_type")
                     if not acc_id:
                         continue
-                    if self.trade_api.add_account(acc_id, acc_type):
-                        added_ids.append(acc_id)
-                if added_ids:
-                    if account_id and account_id in added_ids:
-                        selected_id = account_id
-                    else:
-                        selected_id = added_ids[0]
-                        if account_id:
-                            self.log(f"⚠️ 配置账户不可用，已切换到: {selected_id}")
-                    account_id = selected_id
-            elif account_id:
-                if self.trade_api.add_account(account_id, account_type):
-                    added_ids.append(account_id)
-                    self.log(f"✓ 已添加账户: {account_id} ({account_type})")
-                else:
-                    self.log(f"✗ 添加账户失败: {account_id}")
-            else:
-                self.log("✗ 未检测到账户，无法添加")
+                    label = str(acc_id)
+                    if acc_type is not None:
+                        label = f"{label} ({acc_type})"
+                    self.account_combo.addItem(label, str(acc_id))
+            elif added_ids:
+                for acc_id in added_ids:
+                    self.account_combo.addItem(str(acc_id), str(acc_id))
+            preferred_id = account_id or "1678070127"
+            idx = self.account_combo.findData(str(preferred_id))
+            if idx >= 0:
+                self.account_combo.setCurrentIndex(idx)
 
-            if account_id:
-                selected_type = account_type
-                if account_id in logged_map:
-                    selected_type = logged_map[account_id].get("account_type", selected_type)
-                account_config['account_id'] = account_id
-                if selected_type is not None:
-                    try:
-                        from xtquant import xtconstant
-                        account_config['account_type'] = xtconstant.ACCOUNT_TYPE_DICT.get(selected_type, selected_type)
-                    except Exception:
-                        account_config['account_type'] = selected_type
-                config['settings']['account'] = account_config
-                try:
-                    with open(config_file, 'w', encoding='utf-8') as f:
-                        json.dump(config, f, ensure_ascii=False, indent=2)
-                    self.log(f"✓ 已更新默认账户配置: {account_id}")
-                except Exception as e:
-                    self.log(f"✗ 更新默认账户配置失败: {e}")
+    def _on_trade_init_failed(self, message: str):
+        self._trade_init_thread = None
+        self.log(message)
 
-            if hasattr(self, "account_combo"):
-                self.account_combo.clear()
-                if logged_accounts:
-                    for account in logged_accounts:
-                        acc_id = account.get("account_id")
-                        acc_type = account.get("account_type")
-                        if not acc_id:
-                            continue
-                        label = str(acc_id)
-                        if acc_type is not None:
-                            label = f"{label} ({acc_type})"
-                        self.account_combo.addItem(label, str(acc_id))
-                elif added_ids:
-                    for acc_id in added_ids:
-                        self.account_combo.addItem(str(acc_id), str(acc_id))
-                preferred_id = account_id or "1678070127"
-                idx = self.account_combo.findData(str(preferred_id))
-                if idx >= 0:
-                    self.account_combo.setCurrentIndex(idx)
-
-        except Exception as e:
-            self.log(f"初始化交易连接时出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
-
-    def monitor_orders(self):
-        """监控条件单并自动触发"""
+    def _start_price_monitor(self):
+        """定时器回调：先做纯CPU的过期检查，再把行情拉取派到后台线程"""
         if not EASYXT_AVAILABLE:
             return
+        # 上一批尚未完成，跳过本轮（避免积压）
+        if self._price_monitor_thread is not None and self._price_monitor_thread.isRunning():
+            return
 
+        pending = []
+        updated = False
+        for order in self.orders:
+            if order["status"] not in ["等待中"]:
+                continue
+            # 过期检查（纯 CPU，主线程安全）
+            try:
+                expiry_time = datetime.strptime(order["expiry"], "%Y-%m-%d %H:%M:%S")
+                if datetime.now() > expiry_time:
+                    order["status"] = "已过期"
+                    self.log(f"条件单已过期: {order['id']}")
+                    updated = True
+                    continue
+            except Exception:
+                pass
+            pending.append(order)
+
+        if updated:
+            self.update_order_table()
+        if not pending:
+            return
+
+        self._price_monitor_thread = _PriceMonitorThread(pending)
+        self._price_monitor_thread.prices_ready.connect(self._on_prices_ready)
+        self._price_monitor_thread.start()
+
+    def _on_prices_ready(self, prices: dict):
+        """后台价格采样完成回调（UI 主线程执行，无 I/O）"""
+        self._price_monitor_thread = None
         try:
-
+            updated = False
             for order in self.orders:
-                # 跳过已触发、已禁用或已过期的条件单
-                if order['status'] not in ['等待中']:
+                if order["status"] not in ["等待中"]:
+                    continue
+                order_type = order["type"]
+                order_id = order["id"]
+
+                # 时间条件单不依赖价格
+                if "时间条件单" in order_type:
+                    if self._check_time_condition(order):
+                        self._execute_order(order, 0.0)
+                        updated = True
                     continue
 
-                # 检查是否过期
-                try:
-                    expiry_time = datetime.strptime(order['expiry'], "%Y-%m-%d %H:%M:%S")
-                    if datetime.now() > expiry_time:
-                        order['status'] = '已过期'
-                        self.log(f"条件单已过期: {order['id']}")
-                        self.update_order_table()
-                        continue
-                except Exception:
-                    pass
-
-                # 根据条件单类型进行监控
-                order_type = order['type']
-                stock_code = order['stock_code']
-
-                # 获取当前价格
-                current_price = self._get_current_price(stock_code)
+                current_price = prices.get(order_id)
                 if current_price is None or current_price <= 0:
                     continue
 
-                # 检查是否触发条件
                 triggered = False
-
                 if "价格条件单" in order_type:
                     triggered = self._check_price_condition(order, current_price)
                 elif "涨跌幅条件单" in order_type:
                     triggered = self._check_change_condition(order, current_price)
-                elif "时间条件单" in order_type:
-                    triggered = self._check_time_condition(order)
                 elif "止盈止损单" in order_type:
                     triggered = self._check_stop_condition(order, current_price)
 
-                # 如果触发条件满足，执行交易
                 if triggered:
                     self._execute_order(order, current_price)
+                    updated = True
 
+            if updated:
+                self.update_order_table()
         except Exception as e:
-            self.log(f"监控条件单时出错: {str(e)}")
+            self.log(f"处理价格监控结果时出错: {e}")
+
+    def monitor_orders(self):
+        """[已废弃] 保留供外部兼容调用，实际逻辑已迁移至 _start_price_monitor"""
+        self._start_price_monitor()
 
     def _get_current_price(self, stock_code: str) -> Optional[float]:
         """获取股票当前价格"""
         try:
-            from xtquant import xtdata
+            import easy_xt
             from easy_xt.utils import StockCodeUtils
 
             normalized_code = StockCodeUtils.normalize_code(stock_code)
+            broker = easy_xt.get_xtquant_broker()
 
             # 尝试使用get_full_tick获取实时价格
-            tick_data = xtdata.get_full_tick([normalized_code])
+            tick_data = broker.get_full_tick([normalized_code])
             if tick_data and normalized_code in tick_data:
                 tick_info = tick_data[normalized_code]
                 if tick_info and 'lastPrice' in tick_info:
@@ -888,7 +1030,7 @@ ID: {order['id']}
                     return float(tick_info['price'])
 
             # 如果失败，尝试get_market_data
-            current_data = xtdata.get_market_data(
+            current_data = broker.get_market_data(
                 stock_list=[normalized_code],
                 period='tick',
                 count=1
@@ -990,7 +1132,7 @@ ID: {order['id']}
             return False
 
     def _execute_order(self, order: dict, current_price: float):
-        """执行订单"""
+        """执行订单（校验在主线程，交易 I/O 推后台线程）"""
         try:
             # 检查交易API是否已初始化
             if self.trade_api is None or not self._trade_initialized:
@@ -1023,48 +1165,73 @@ ID: {order['id']}
                     self.add_to_history(order, current_price, "未添加交易账户")
                     return
 
-            # 确定订单类型
-            action = order['action']
-            order_type = 'buy' if action == '买入' else 'sell'
-
-            # 确定下单价格（0表示市价）
-            order_price = order['price'] if order['price'] > 0 else current_price
-            price_type = 'limit' if order['price'] > 0 else 'market'
-
-            # 执行下单
-            if order_type == 'buy':
-                order_id = self.trade_api.trade_api.buy(
-                    account_id=account_id,
-                    code=order['stock_code'],
-                    volume=order['quantity'],
-                    price=order_price,
-                    price_type=price_type
-                )
-            else:
-                order_id = self.trade_api.trade_api.sell(
-                    account_id=account_id,
-                    code=order['stock_code'],
-                    volume=order['quantity'],
-                    price=order_price,
-                    price_type=price_type
-                )
-
-            if order_id:
-                order['status'] = '已触发'
-                self.update_order_table()
-                self.log(f"✓ 条件单触发成功: {order['id']}, 委托号: {order_id}")
-
-                # 添加到触发历史
-                self.add_to_history(order, current_price, f"委托成功: {order_id}")
-            else:
-                self.log(f"✗ 条件单触发失败: {order['id']}, 下单失败")
-                self.add_to_history(order, current_price, "下单失败")
+            # 交易 I/O 在后台线程执行，避免阻塞主线程
+            threading.Thread(
+                target=self._execute_order_bg,
+                args=(order, current_price, account_id),
+                daemon=True,
+            ).start()
 
         except Exception as e:
             self.log(f"✗ 执行条件单失败: {str(e)}")
             self.add_to_history(order, current_price, f"执行异常: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def _execute_order_bg(self, order: dict, current_price: float, account_id: str):
+        """后台线程：执行交易 API 调用，结果通过 QTimer 回主线程更新 UI"""
+        try:
+            trade_api = self.trade_api
+            if trade_api is None or not hasattr(trade_api, "trade_api") or trade_api.trade_api is None:
+                QTimer.singleShot(0, lambda: self._apply_execute_error(order, current_price, "交易API未初始化"))
+                return
+            action = order['action']
+            order_type = 'buy' if action == '买入' else 'sell'
+            order_price = order['price'] if order['price'] > 0 else current_price
+            price_type = 'limit' if order['price'] > 0 else 'market'
+
+            if order_type == 'buy':
+                order_id = trade_api.trade_api.buy(
+                    account_id=account_id,
+                    code=order['stock_code'],
+                    volume=order['quantity'],
+                    price=order_price,
+                    price_type=price_type
+                )
+            else:
+                order_id = trade_api.trade_api.sell(
+                    account_id=account_id,
+                    code=order['stock_code'],
+                    volume=order['quantity'],
+                    price=order_price,
+                    price_type=price_type
+                )
+
+            # UI 更新回主线程
+            QTimer.singleShot(0, lambda: self._apply_execute_result(order, current_price, order_id))
+
+        except Exception as e:
+            err_text = str(e)
+            QTimer.singleShot(
+                0,
+                lambda err=err_text: self._apply_execute_error(order, current_price, err),
+            )
+
+    def _apply_execute_result(self, order: dict, current_price: float, order_id):
+        """主线程：应用交易结果到 UI"""
+        if order_id:
+            order['status'] = '已触发'
+            self.update_order_table()
+            self.log(f"✓ 条件单触发成功: {order['id']}, 委托号: {order_id}")
+            self.add_to_history(order, current_price, f"委托成功: {order_id}")
+        else:
+            self.log(f"✗ 条件单触发失败: {order['id']}, 下单失败")
+            self.add_to_history(order, current_price, "下单失败")
+
+    def _apply_execute_error(self, order: dict, current_price: float, error_msg: str):
+        """主线程：显示交易执行异常"""
+        self.log(f"✗ 执行条件单失败: {error_msg}")
+        self.add_to_history(order, current_price, f"执行异常: {error_msg}")
 
     def add_to_history(self, order: dict, trigger_price: float, result: str):
         """添加到触发历史"""
@@ -1089,6 +1256,21 @@ ID: {order['id']}
         log_message = f"[{timestamp}] {message}"
         self.log_text.append(log_message)
         self.log_text.moveCursor(QTextCursor.End)
+
+    def closeEvent(self, event):
+        try:
+            if hasattr(self, "monitor_timer") and self.monitor_timer is not None:
+                self.monitor_timer.stop()
+            if self._price_monitor_thread is not None and self._price_monitor_thread.isRunning():
+                self._price_monitor_thread.requestInterruption()
+                self._price_monitor_thread.quit()
+                self._price_monitor_thread.wait(1000)
+            if self._trade_init_thread is not None and self._trade_init_thread.isRunning():
+                self._trade_init_thread.requestInterruption()
+                self._trade_init_thread.quit()
+                self._trade_init_thread.wait(1000)
+        finally:
+            super().closeEvent(event)
 
 
 # 导出类

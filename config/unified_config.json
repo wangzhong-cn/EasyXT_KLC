@@ -3,7 +3,7 @@
   "version_comment": "配置版本号，用于区分不同版本的统一配置",
   "description": "基础统一配置文件 - 移除了雪球跟单相关配置",
   "description_comment": "配置文件整体说明，便于理解用途",
-  "last_updated": "2025-10-02",
+  "last_updated": "2026-03-08",
   "last_updated_comment": "最后一次更新配置的日期（YYYY-MM-DD）",
   "config_source": "unified_config.json",
   "config_source_comment": "当前配置来源文件名，用于标识配置加载来源",
@@ -33,11 +33,13 @@
     "settings_comment": "运行时的通用设置（账户、风控、监控、日志、交易参数等）",
     "account": {
       "account_comment": "交易账户配置",
-      "qmt_path": "D:\\\\申万宏源策略量化交易终端\\\\userdata_mini",
+      "qmt_path": "D:\\申万宏源策略量化交易终端\\bin.x64\\XtItClient.exe",
       "qmt_path_comment": "QMT交易端的安装/数据路径（用于连接本地交易端）",
-      "account_id": "1678070127",
-      "account_id_comment": "交易账户ID（模拟或实盘账户）",
-      "password": "test1234！",
+      "qmt_userdata_path": "D:\\申万宏源策略量化交易终端\\userdata_mini",
+      "qmt_userdata_path_comment": "QMT本地数据路径",
+      "account_id": "__REPLACE_ACCOUNT_ID__",
+      "account_id_comment": "交易账户ID，通过环境变量 EASYXT_ACCOUNT_ID 注入，勿提交明文",
+      "password": "__REPLACE_PASSWORD__",
       "password_comment": "账户密码（如无需则留空，注意安全）",
       "auto_detect_qmt": true,
       "auto_detect_qmt_comment": "是否自动检测QMT路径与状态",
@@ -87,14 +89,33 @@
     },
     "trading": {
       "trading_comment": "交易参数设置",
-      "trade_mode": "paper_trading",
-      "trade_mode_comment": "交易模式（paper_trading为仿真；real为实盘）",
+      "trade_mode": "real",
+      "trade_mode_comment": "交易模式（real=实盘；paper_trading=仿真）",
       "auto_confirm": false,
       "auto_confirm_comment": "自动确认下单与执行（谨慎开启）",
       "price_tolerance": 0.02,
       "price_tolerance_comment": "价格容忍度（用于偏差判断）",
       "min_trade_amount": 100,
       "min_trade_amount_comment": "最小交易数量（手/股）"
+    }
+  },
+  "chart": {
+    "chart_comment": "图表引擎配置（灰度发布与后端选择）",
+    "engine": {
+      "engine_comment": "后端选择策略：env var EASYXT_CHART_BACKEND > 白名单 > default_backend",
+      "default_backend": "lwc_python",
+      "default_backend_comment": "默认图表后端: lwc_python | native_lwc",
+      "native_lwc_whitelist": {
+        "whitelist_comment": "只有在白名单中的账户/策略才会启用 native_lwc",
+        "accounts": [],
+        "accounts_comment": "允许使用 native_lwc 的账户ID列表，如 [\"A001\", \"paper_test\"]",
+        "strategies": [],
+        "strategies_comment": "允许使用 native_lwc 的策略ID列表，如 [\"grid_v2\"]"
+      },
+      "freeze_during_trading": true,
+      "freeze_during_trading_comment": "true=交易时段内禁止切换图表后端（包括 09:15-15:05）",
+      "ws_handshake_timeout_s": 5.0,
+      "ws_handshake_timeout_s_comment": "原生 WebSocket 握手超时（秒），超时后自动降级 lwc_python"
     }
   }
 }

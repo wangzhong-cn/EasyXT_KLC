@@ -11,11 +11,14 @@
 5. 龙虎榜选股策略
 """
 
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Optional, Union
-from datetime import datetime, timedelta
 import warnings
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from typing import Any, Optional
+
+_SH = ZoneInfo('Asia/Shanghai')
+
+import pandas as pd
 
 warnings.filterwarnings('ignore')
 
@@ -39,11 +42,14 @@ class DragonTigerData:
             print("[WARNING] 未安装akshare，龙虎榜功能不可用")
             print("[TIPS] 运行: pip install akshare")
 
+    def _date_arg(self, date: Optional[str]) -> str:
+        return date or ""
+
     # ============================================================
     # 龙虎榜榜单
     # ============================================================
 
-    def get_daily_list(self, date: str = None) -> pd.DataFrame:
+    def get_daily_list(self, date: Optional[str] = None) -> pd.DataFrame:
         """
         获取每日龙虎榜
 
@@ -69,12 +75,15 @@ class DragonTigerData:
             raise ImportError("请先安装akshare: pip install akshare")
 
         try:
+            ak_mod = self.ak
+            if ak_mod is None:
+                return pd.DataFrame()
             # 使用东方财富龙虎榜接口（更稳定）
             if date is None:
                 # 获取最近3天的数据
-                end_date = datetime.now().strftime('%Y%m%d')
-                start_date = (datetime.now() - timedelta(days=3)).strftime('%Y%m%d')
-                df = self.ak.stock_lhb_detail_em(start_date=start_date, end_date=end_date)
+                end_date = datetime.now(tz=_SH).strftime('%Y%m%d')
+                start_date = (datetime.now(tz=_SH) - timedelta(days=3)).strftime('%Y%m%d')
+                df = ak_mod.stock_lhb_detail_em(start_date=start_date, end_date=end_date)
 
                 # 取最新一天的数据
                 if not df.empty and '上榜日' in df.columns:
@@ -86,7 +95,7 @@ class DragonTigerData:
                 start_date = (target_date - timedelta(days=3)).strftime('%Y%m%d')
                 end_date = (target_date + timedelta(days=3)).strftime('%Y%m%d')
 
-                df = self.ak.stock_lhb_detail_em(start_date=start_date, end_date=end_date)
+                df = ak_mod.stock_lhb_detail_em(start_date=start_date, end_date=end_date)
 
                 # 筛选指定日期
                 if not df.empty and '上榜日' in df.columns:
@@ -127,8 +136,8 @@ class DragonTigerData:
             return pd.DataFrame()
 
     def get_stock_history(self, stock_code: str,
-                         start_date: str = None,
-                         end_date: str = None,
+                         start_date: Optional[str] = None,
+                         end_date: Optional[str] = None,
                          count: int = 10) -> pd.DataFrame:
         """
         获取个股历史龙虎榜记录
@@ -146,17 +155,20 @@ class DragonTigerData:
             raise ImportError("请先安装akshare: pip install akshare")
 
         try:
+            ak_mod = self.ak
+            if ak_mod is None:
+                return pd.DataFrame()
             # 转换代码
             symbol = stock_code.split('.')[0]
 
             # 设置日期范围
             if start_date is None:
-                start_date = (datetime.now() - timedelta(days=90)).strftime('%Y%m%d')
+                start_date = (datetime.now(tz=_SH) - timedelta(days=90)).strftime('%Y%m%d')
             if end_date is None:
-                end_date = datetime.now().strftime('%Y%m%d')
+                end_date = datetime.now(tz=_SH).strftime('%Y%m%d')
 
             # 获取区间龙虎榜数据
-            df = self.ak.stock_lhb_detail_em(start_date=start_date, end_date=end_date)
+            df = ak_mod.stock_lhb_detail_em(start_date=start_date, end_date=end_date)
 
             if df.empty:
                 return pd.DataFrame()
@@ -209,7 +221,7 @@ class DragonTigerData:
     # 机构席位
     # ============================================================
 
-    def get_institutional_detail(self, date: str = None) -> pd.DataFrame:
+    def get_institutional_detail(self, date: Optional[str] = None) -> pd.DataFrame:
         """
         获取机构席位明细
 
@@ -223,9 +235,12 @@ class DragonTigerData:
             raise ImportError("请先安装akshare: pip install akshare")
 
         try:
+            ak_mod = self.ak
+            if ak_mod is None:
+                return pd.DataFrame()
             # 获取机构席位明细
             # 使用东方财富机构统计接口
-            df = self.ak.stock_lhb_jgzz_sina(symbol='1')  # '1' 表示全部
+            df = ak_mod.stock_lhb_jgzz_sina(symbol='1')
 
             if not df.empty and date:
                 # 如果指定了日期，筛选数据
@@ -254,7 +269,7 @@ class DragonTigerData:
             print(f"[ERROR] 获取机构席位明细失败: {e}")
             return pd.DataFrame()
 
-    def get_institutional_rank(self, date: str = None,
+    def get_institutional_rank(self, date: Optional[str] = None,
                               top_n: int = 50) -> pd.DataFrame:
         """
         获取机构净买入排行
@@ -280,7 +295,7 @@ class DragonTigerData:
     # 营业部席位
     # ============================================================
 
-    def get_broker_detail(self, date: str = None) -> pd.DataFrame:
+    def get_broker_detail(self, date: Optional[str] = None) -> pd.DataFrame:
         """
         获取营业部席位明细
 
@@ -294,9 +309,12 @@ class DragonTigerData:
             raise ImportError("请先安装akshare: pip install akshare")
 
         try:
+            ak_mod = self.ak
+            if ak_mod is None:
+                return pd.DataFrame()
             # 获取营业部席位明细
             # 使用东方财富营业部排行接口
-            df = self.ak.stock_lhb_yybph_em(symbol='1')  # '1' 表示全部
+            df = ak_mod.stock_lhb_yybph_em(symbol='1')
 
             if not df.empty and date:
                 # 如果指定了日期，筛选数据
@@ -324,7 +342,7 @@ class DragonTigerData:
             print(f"[ERROR] 获取营业部席位明细失败: {e}")
             return pd.DataFrame()
 
-    def get_broker_rank(self, date: str = None,
+    def get_broker_rank(self, date: Optional[str] = None,
                        by: str = 'net_buy_total',
                        top_n: int = 30) -> pd.DataFrame:
         """
@@ -357,7 +375,7 @@ class DragonTigerData:
     # ============================================================
 
     def analyze_stock(self, stock_code: str,
-                     days: int = 30) -> Dict:
+                     days: int = 30) -> dict:
         """
         分析个股龙虎榜统计信息
 
@@ -368,8 +386,8 @@ class DragonTigerData:
         Returns:
             Dict: 统计信息
         """
-        end_date = datetime.now().strftime('%Y%m%d')
-        start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
+        end_date = datetime.now(tz=_SH).strftime('%Y%m%d')
+        start_date = (datetime.now(tz=_SH) - timedelta(days=days)).strftime('%Y%m%d')
 
         df = self.get_stock_history(
             stock_code=stock_code,
@@ -397,8 +415,8 @@ class DragonTigerData:
 
         return result
 
-    def get_hot_seats(self, date: str = None,
-                     top_n: int = 20) -> Dict[str, pd.DataFrame]:
+    def get_hot_seats(self, date: Optional[str] = None,
+                     top_n: int = 20) -> dict[str, pd.DataFrame]:
         """
         获取热门席位（机构+营业部）
 
@@ -434,7 +452,7 @@ class DragonTigerData:
     # 选股策略
     # ============================================================
 
-    def select_by_institutional(self, date: str = None,
+    def select_by_institutional(self, date: Optional[str] = None,
                                 min_net_buy: float = 0,
                                 top_n: int = 50) -> pd.DataFrame:
         """
@@ -463,7 +481,7 @@ class DragonTigerData:
 
         return df_result
 
-    def select_by_continuous(self, stock_pool: List[str] = None,
+    def select_by_continuous(self, stock_pool: Optional[list[str]] = None,
                             min_count: int = 3,
                             days: int = 30) -> pd.DataFrame:
         """
@@ -482,12 +500,15 @@ class DragonTigerData:
         if not self.ak_available:
             raise ImportError("请先安装akshare: pip install akshare")
 
-        end_date = datetime.now().strftime('%Y%m%d')
-        start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
+        end_date = datetime.now(tz=_SH).strftime('%Y%m%d')
+        start_date = (datetime.now(tz=_SH) - timedelta(days=days)).strftime('%Y%m%d')
 
         try:
+            ak_mod = self.ak
+            if ak_mod is None:
+                return pd.DataFrame()
             # 获取期间所有龙虎榜数据
-            df = self.ak.stock_lhb_detail_em(start_date=start_date, end_date=end_date)
+            df = ak_mod.stock_lhb_detail_em(start_date=start_date, end_date=end_date)
 
             if df.empty:
                 return pd.DataFrame()
@@ -520,30 +541,30 @@ class DragonTigerData:
 # 便捷函数
 # ============================================================
 
-def get_daily_dragon_tiger(date: str = None) -> pd.DataFrame:
+def get_daily_dragon_tiger(date: Optional[str] = None) -> pd.DataFrame:
     """快捷函数：获取每日龙虎榜"""
     dt = DragonTigerData()
-    return dt.get_daily_list(date)
+    return dt.get_daily_list(dt._date_arg(date))
 
 
-def get_institutional_rank(date: str = None, top_n: int = 50) -> pd.DataFrame:
+def get_institutional_rank(date: Optional[str] = None, top_n: int = 50) -> pd.DataFrame:
     """快捷函数：获取机构净买入排行"""
     dt = DragonTigerData()
-    return dt.get_institutional_rank(date, top_n)
+    return dt.get_institutional_rank(dt._date_arg(date), top_n)
 
 
-def get_broker_rank(date: str = None, top_n: int = 30) -> pd.DataFrame:
+def get_broker_rank(date: Optional[str] = None, top_n: int = 30) -> pd.DataFrame:
     """快捷函数：获取营业部排行"""
     dt = DragonTigerData()
-    return dt.get_broker_rank(date, 'net_buy_total', top_n)
+    return dt.get_broker_rank(dt._date_arg(date), 'net_buy_total', top_n)
 
 
-def select_by_institutional(date: str = None,
+def select_by_institutional(date: Optional[str] = None,
                             min_net_buy: float = 0,
                             top_n: int = 50) -> pd.DataFrame:
     """快捷函数：基于机构席位选股"""
     dt = DragonTigerData()
-    return dt.select_by_institutional(date, min_net_buy, top_n)
+    return dt.select_by_institutional(dt._date_arg(date), min_net_buy, top_n)
 
 
 if __name__ == "__main__":

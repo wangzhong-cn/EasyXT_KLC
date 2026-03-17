@@ -2,7 +2,6 @@
 自动查找通达信安装路径
 """
 
-import sys
 from pathlib import Path
 
 print("="*70)
@@ -38,7 +37,7 @@ for tdx_path in common_paths:
             print(f"     └─ 自选股文件存在: {zxg_file}")
             found_paths.append(tdx_path)
         else:
-            print(f"     └─ [WARN] 自选股文件不存在")
+            print("     └─ [WARN] 自选股文件不存在")
     else:
         print(f"[空] {tdx_path}")
 
@@ -54,7 +53,7 @@ if found_paths:
         print(f"{i}. {path}")
 
         # 显示配置代码
-        print(f"\n   配置代码:")
+        print("\n   配置代码:")
         print(f"   tdx_path = Path(r\"{path}\")")
         print()
 
@@ -63,7 +62,7 @@ if found_paths:
     print("="*70)
     print("  [推荐配置]")
     print("="*70)
-    print(f"\n在 tools/parse_tdx_zixg.py 第74行修改为:")
+    print("\n在 tools/parse_tdx_zixg.py 第74行修改为:")
     print(f"  tdx_path = Path(r\"{recommended}\")")
 
 else:

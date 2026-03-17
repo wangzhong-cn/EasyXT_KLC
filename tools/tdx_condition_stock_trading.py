@@ -12,8 +12,8 @@
 """
 
 import sys
-from pathlib import Path
 import time
+from pathlib import Path
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent
@@ -43,13 +43,13 @@ FALLBACK_STOCKS = []
 # 尝试从文件读取自选股
 STOCK_FILE = 'my_favorites.txt'
 try:
-    with open(STOCK_FILE, 'r', encoding='utf-8') as f:
+    with open(STOCK_FILE, encoding='utf-8') as f:
         FALLBACK_STOCKS = [line.strip() for line in f if line.strip()]
     print(f"[OK] 从文件读取自选股: {len(FALLBACK_STOCKS)} 只")
 except FileNotFoundError:
     print(f"[WARN] 未找到自选股文件: {STOCK_FILE}")
-    print(f"[TIP] 运行 python tools/parse_tdx_zixg.py 提取自选股")
-    print(f"[INFO] 使用演示股票列表")
+    print("[TIP] 运行 python tools/parse_tdx_zixg.py 提取自选股")
+    print("[INFO] 使用演示股票列表")
     FALLBACK_STOCKS = [
         '605168.SH',  # 明阳智能
         '000333.SZ',  # 美的集团
@@ -102,7 +102,7 @@ try:
         )
 
         if not market_data.empty:
-            print(f"\n  实时行情:")
+            print("\n  实时行情:")
             print(f"  {'股票代码':12} {'收盘价':>10} {'涨跌幅':>10} {'成交量':>15}")
             print(f"  {'-'*12} {'-'*10} {'-'*10} {'-'*15}")
 
@@ -224,8 +224,9 @@ try:
     print("[OK] 交易模块初始化成功")
 
     # 获取账户信息
-    account = trader.get_account_asset(TRADING_CONFIG['account_id'])
-    print(f"\n  账户信息:")
+    account_raw = trader.get_account_asset(TRADING_CONFIG['account_id'])
+    account = account_raw if isinstance(account_raw, dict) else {}
+    print("\n  账户信息:")
     print(f"    总资产: {account.get('total_asset', 0):,.2f}")
     print(f"    可用资金: {account.get('cash', 0):,.2f}")
 
@@ -259,13 +260,13 @@ for i, stock in enumerate(selected_stocks[:max_stocks], 1):
 
     if quantity < 100:
         print(f"\n  [{i}/{len(selected_stocks)}] {symbol}")
-        print(f"    [SKIP] 金额不足，无法购买100股")
+        print("    [SKIP] 金额不足，无法购买100股")
         continue
 
     amount = quantity * price
 
     print(f"\n  [{i}/{len(selected_stocks)}] {symbol}")
-    print(f"    操作: 买入")
+    print("    操作: 买入")
     print(f"    数量: {quantity} 股")
     print(f"    价格: {price:.2f}")
     print(f"    金额: {amount:,.2f}")
@@ -282,7 +283,7 @@ for i, stock in enumerate(selected_stocks[:max_stocks], 1):
         )
 
         if order_id:
-            print(f"    [OK] 下单成功！")
+            print("    [OK] 下单成功！")
             print(f"    委托编号: {order_id}")
             orders_submitted.append({
                 'symbol': symbol,
@@ -292,7 +293,7 @@ for i, stock in enumerate(selected_stocks[:max_stocks], 1):
                 'order_id': order_id
             })
         else:
-            print(f"    [FAIL] 下单失败")
+            print("    [FAIL] 下单失败")
 
     except Exception as e:
         print(f"    [ERROR] 下单异常: {e}")
@@ -312,18 +313,18 @@ if orders_submitted:
     print(f"  总数量: {total_quantity} 股")
     print(f"  总金额: {total_amount:,.2f} 元")
 
-    print(f"\n  订单明细:")
+    print("\n  订单明细:")
     for order in orders_submitted:
         print(f"    - {order['symbol']}: "
               f"{order['quantity']}股 × {order['price']:.2f} = "
               f"{order['amount']:,.2f} 元 "
               f"(委托号: {order['order_id']})")
 
-    print(f"\n  [重要提醒]")
+    print("\n  [重要提醒]")
     print(f"    1. 已提交 {len(orders_submitted)} 个买入委托")
-    print(f"    2. 请在QMT的'委托查询'中查看订单状态")
-    print(f"    3. 建议设置止损止盈")
-    print(f"    4. 控制仓位，不要满仓操作")
+    print("    2. 请在QMT的'委托查询'中查看订单状态")
+    print("    3. 建议设置止损止盈")
+    print("    4. 控制仓位，不要满仓操作")
 
 else:
     print("\n  [INFO] 没有订单提交成功")

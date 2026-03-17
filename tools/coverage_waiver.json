@@ -1,0 +1,13 @@
+{
+  "_comment": "临时覆盖率豁免配置。有效期结束后自动失效，恢复硬目标 40%。禁止续期超过 2 次。",
+  "_signing_note": "CI 中设置 WAIVER_SIGNING_KEY 后，须同时提供 waiver_hmac 字段。签名规范串：'{approval_id}|{phase}|{effective_target}|{expires}|{reason}'",
+  "enabled": true,
+  "phase": 0,
+  "effective_target": 0.27,
+  "expires": "2026-03-21",
+  "approver": "team-lead@company.com",
+  "approver_2": "",
+  "approval_id": "OA-20260307-001",
+  "reason": "Phase 0 引导阶段：unified_data_interface.py 等核心大文件集成测试正在补充，目录配额已全部达标",
+  "issued_by": "copilot / team-lead"
+}

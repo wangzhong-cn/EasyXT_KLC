@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 板块股票加载器
 从QMT获取各种板块的股票列表
@@ -14,7 +13,7 @@
 - 全A股
 """
 
-from typing import List, Dict
+
 import pandas as pd
 
 
@@ -33,7 +32,7 @@ class BoardStocksLoader:
             self.xtdata = None
             print("[ERROR] QMT xtdata 不可用")
 
-    def get_board_stocks(self, board_name: str) -> List[str]:
+    def get_board_stocks(self, board_name: str) -> list[str]:
         """
         获取板块股票列表
 
@@ -105,24 +104,27 @@ class BoardStocksLoader:
             print(f"[ERROR] 获取板块股票失败: {e}")
             return []
 
-    def _get_all_a_shares(self) -> List[str]:
+    def _get_all_a_shares(self) -> list[str]:
         """获取全A股列表"""
+        xtdata = self.xtdata
+        if xtdata is None:
+            return []
         try:
             # 获取所有板块
             all_stocks = []
 
             # 上海市场
-            sh_stocks = self.xtdata.get_stock_list_in_sector('SH')
+            sh_stocks = xtdata.get_stock_list_in_sector('SH')
             if sh_stocks:
                 all_stocks.extend(sh_stocks)
 
             # 深圳市场
-            sz_stocks = self.xtdata.get_stock_list_in_sector('SZ')
+            sz_stocks = xtdata.get_stock_list_in_sector('SZ')
             if sz_stocks:
                 all_stocks.extend(sz_stocks)
 
             # 北京市场
-            bj_stocks = self.xtdata.get_stock_list_in_sector('BJ')
+            bj_stocks = xtdata.get_stock_list_in_sector('BJ')
             if bj_stocks:
                 all_stocks.extend(bj_stocks)
 
@@ -134,11 +136,14 @@ class BoardStocksLoader:
             print(f"[ERROR] 获取全A股失败: {e}")
             return []
 
-    def _get_index_stocks(self, index_code: str) -> List[str]:
+    def _get_index_stocks(self, index_code: str) -> list[str]:
         """获取指数成分股"""
+        xtdata = self.xtdata
+        if xtdata is None:
+            return []
         try:
             # 获取指数成分股
-            stocks = self.xtdata.get_stock_list_in_sector(index_code)
+            stocks = xtdata.get_stock_list_in_sector(index_code)
 
             if stocks:
                 return stocks
@@ -150,20 +155,23 @@ class BoardStocksLoader:
             print(f"[ERROR] 获取指数成分股失败: {e}")
             return []
 
-    def _get_market_board(self, board_code: str) -> List[str]:
+    def _get_market_board(self, board_code: str) -> list[str]:
         """获取市场板块股票"""
+        xtdata = self.xtdata
+        if xtdata is None:
+            return []
         try:
             # 尝试直接获取板块
-            stocks = self.xtdata.get_stock_list_in_sector(board_code)
+            stocks = xtdata.get_stock_list_in_sector(board_code)
 
             if not stocks:
                 # 尝试其他方法
                 if board_code == 'kcb':
-                    stocks = self.xtdata.get_stock_list_in_sector('SH')  # 简化处理
+                    stocks = xtdata.get_stock_list_in_sector('SH')  # 简化处理
                     # 过滤688开头（科创板）
                     stocks = [s for s in stocks if s.startswith('688')]
                 elif board_code == 'cyb':
-                    stocks = self.xtdata.get_stock_list_in_sector('SZ')  # 简化处理
+                    stocks = xtdata.get_stock_list_in_sector('SZ')  # 简化处理
                     # 过滤300开头（创业板）
                     stocks = [s for s in stocks if s.startswith('300')]
 
@@ -173,7 +181,7 @@ class BoardStocksLoader:
             print(f"[ERROR] 获取市场板块失败: {e}")
             return []
 
-    def get_available_boards(self) -> Dict[str, str]:
+    def get_available_boards(self) -> dict[str, str]:
         """获取可用的板块列表"""
         return {
             '沪深300': 'hs300',
@@ -185,7 +193,7 @@ class BoardStocksLoader:
             '全A股': 'all'
         }
 
-    def load_from_csv(self, csv_path: str) -> List[str]:
+    def load_from_csv(self, csv_path: str) -> list[str]:
         """
         从CSV文件加载股票列表
 

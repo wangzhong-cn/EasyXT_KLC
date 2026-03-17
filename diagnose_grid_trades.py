@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 网格交易策略诊断工具
 分析网格策略的买卖逻辑和盈亏情况
@@ -7,8 +6,6 @@
 
 import sys
 from pathlib import Path
-import pandas as pd
-import matplotlib.pyplot as plt
 
 # 添加项目路径
 project_root = Path(__file__).parent

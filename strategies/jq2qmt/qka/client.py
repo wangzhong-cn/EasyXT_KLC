@@ -1,9 +1,12 @@
+from typing import Any, Optional
+
 import requests
-from typing import Any, Dict
+
 from qka.logger import logger
 
+
 class QMTClient:
-    def __init__(self, base_url: str = "http://localhost:8000", token: str = None):
+    def __init__(self, base_url: str = "http://localhost:8000", token: Optional[str] = None):
         """初始化交易客户端
         Args:
             base_url: API服务器地址，默认为本地8000端口
@@ -32,10 +35,10 @@ class QMTClient:
             )
             response.raise_for_status()
             result = response.json()
-            
+
             if not result.get('success'):
                 raise Exception(f"API调用失败: {result.get('detail')}")
-            
+
             return result.get('data')
         except Exception as e:
             logger.error(f"调用 {method_name} 失败: {str(e)}")

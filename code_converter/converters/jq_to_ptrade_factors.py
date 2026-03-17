@@ -3,50 +3,50 @@
 处理因子库调用转换为自定义计算函数
 """
 import re
-from typing import Dict, List
+
 
 class JQToPtradeFactorsConverter:
     """处理因子转换的转换器"""
-    
+
     def __init__(self):
         pass
-    
+
     def convert(self, jq_code: str) -> str:
         """
         转换聚宽代码为Ptrade回测版代码，特别处理因子计算
-        
+
         Args:
             jq_code: 聚宽策略代码
-            
+
         Returns:
             str: 转换后的Ptrade回测版代码
         """
         # 使用模板方法进行转换
         template = self._get_template()
-        
+
         # 提取关键函数和逻辑
         functions = self._extract_functions(jq_code)
-        
+
         # 将提取的函数合并到模板中
         result = self._merge_functions_to_template(template, functions)
-        
+
         # 替换全局变量引用
         result = result.replace('g.', 'context.')
-        
+
         # 修复log替换错误
         result = result.replace('locontext.', 'log.')
-        
+
         # 标准化证券代码后缀
         result = self._standardize_security_code(result)
-        
+
         # 处理API转换
         result = self._convert_apis(result)
-        
+
         # 处理因子转换
         result = self._convert_factors(result)
-        
+
         return result
-    
+
     def _get_template(self) -> str:
         """获取Ptrade回测模板"""
         return '''# 自动生成的Ptrade策略代码 - 回测版本
@@ -74,7 +74,7 @@ def initialize(context):
 def before_trading_start(context, data):
     # 盘前处理
     pass
-    
+
     # 注意：不能在before_trading_start中调用run_daily
     # 定时任务应该在initialize中设置
 
@@ -86,7 +86,7 @@ def get_macd_value(context, stock):
     # 获取历史数据
     h = get_history(50, '1d', ['close'], stock_list=[stock])
     close_data = h['close'].values
-    
+
     # 计算MACD
     macd_DIF, macd_DEA, macd_hist = get_MACD(close_data, 12, 26, 9)
     macd = macd_hist[-1]
@@ -106,7 +106,7 @@ def get_MACD(close_prices, short_period=12, long_period=26, signal_period=9):
     dea = dif.ewm(span=signal_period).mean()
     # 计算MACD柱状图
     bar = (dif - dea) * 2
-    
+
     return dif.values, dea.values, bar.values
 
 def get_single_factor_list(context, stock_list, jqfactor, sort, p1, p2):
@@ -145,23 +145,23 @@ def get_stock_list(context):
     try:
         by_date = context.previous_date - datetime.timedelta(days=375)
         by_date_str = by_date.strftime('%Y-%m-%d')
-        
+
         try:
             ashare_data = get_Ashares(date=by_date_str)
             if hasattr(ashare_data, 'index'):
                 initial_list = ashare_data.index.tolist()
             else:
                 initial_list = get_index_stocks('000001.XSHG')
-        except:
+        except Exception:
             initial_list = get_index_stocks('000001.XSHG')
-        
+
         if not initial_list:
             log.warning("[get_stock_list] 无法获取股票列表，返回空列表")
             return []
-        
+
         initial_list = filter_kcb_stock(initial_list)
         initial_list = filter_st_stock(initial_list)
-        
+
         # [回测版本简化] 基本面因子选股
         # 由于回测环境可能不支持所有数据，使用简化版本
         try:
@@ -171,9 +171,9 @@ def get_stock_list(context):
                 sg_list = sorted_by_circulating_market_cap(sg_list)
             else:
                 sg_list = initial_list[:int(0.1 * len(initial_list))]
-        except:
+        except Exception:
             sg_list = initial_list[:int(0.1 * len(initial_list))]
-        
+
         # [回测版本简化] 利润增长因子
         try:
             factor_list = ['operating_revenue_growth_rate', 'total_profit_growth_rate', 'net_profit_growth_rate', 'earnings_growth']
@@ -182,15 +182,15 @@ def get_stock_list(context):
             for factor in factor_list:
                 try:
                     df[factor] = factor_values[factor].iloc[0]
-                except:
+                except (KeyError, IndexError):
                     df[factor] = 0
-            
+
             df['total_score'] = 0.1 * df['operating_revenue_growth_rate'] + 0.35 * df['total_profit_growth_rate'] + 0.15 * df['net_profit_growth_rate'] + 0.4 * df['earnings_growth']
             ms_list = df.sort_values(by=['total_score'], ascending=False).index[:int(0.1 * len(df))].tolist()
             ms_list = sorted_by_circulating_market_cap(ms_list)
-        except:
+        except Exception:
             ms_list = initial_list[:int(0.1 * len(initial_list))]
-        
+
         # [回测版本简化] PEG和周转率因子
         try:
             peg_list = get_single_factor_list(context, initial_list, 'PEG', True, 0, 0.2)
@@ -199,16 +199,16 @@ def get_stock_list(context):
                 peg_list = sorted_by_circulating_market_cap(peg_list)
             else:
                 peg_list = initial_list[:int(0.2 * len(initial_list))]
-        except:
+        except Exception:
             peg_list = initial_list[:int(0.2 * len(initial_list))]
-        
+
         # 合并因子选股结果
         union_list = list(set(sg_list).union(set(ms_list)).union(set(peg_list)))
         union_list = sorted_by_circulating_market_cap(union_list, 100)
-        
+
         print('选股结果：', union_list)
         return union_list
-        
+
     except Exception as e:
         log.error(f"[get_stock_list] 异常: {str(e)}")
         return []
@@ -220,18 +220,18 @@ def prepare_stock_list(context):
         context.history_hold_list.append(context.hold_list)
         if len(context.history_hold_list) >= context.limit_days:
             context.history_hold_list = context.history_hold_list[-context.limit_days:]
-        
+
         temp_set = set()
         for hold_list in context.history_hold_list:
             temp_set = temp_set.union(set(hold_list))
         context.not_buy_again_list = list(temp_set)
-        
+
         context.high_limit_list = []
         if context.hold_list:
             try:
                 df = get_price(context.hold_list, end_date=context.previous_date, fields=['close', 'high_limit', 'paused'], count=1)
                 context.high_limit_list = df.query('close==high_limit and paused==0')['code'].tolist()
-            except:
+            except Exception:
                 context.high_limit_list = []
     except Exception as e:
         log.error(f"[prepare_stock_list] 异常: {str(e)}")
@@ -241,7 +241,7 @@ def weekly_adjustment(context):
     # 判断是否为周一或者特定条件
     import datetime
     weekday = context.current_dt.weekday()  # 0是周一，6是周日
-    
+
     # 只在周一执行
     if weekday == 0:
         try:
@@ -249,26 +249,26 @@ def weekly_adjustment(context):
             if not target_list:
                 log.warning("[weekly_adjustment] 无目标股票")
                 return
-            
+
             target_list = filter_paused_stock(target_list)
             target_list = filter_limit_stock(context, target_list)
-            
+
             try:
                 recent_limit_up_list = get_recent_limit_up_stock(context, target_list, context.limit_days)
                 black_list = list(set(context.not_buy_again_list).intersection(set(recent_limit_up_list)))
                 target_list = [stock for stock in target_list if stock not in black_list]
-            except:
+            except Exception:
                 pass
-            
+
             if len(target_list) > 10:
                 target_list = target_list[:10]
-            
+
             # [回测版本简化] 趋势分析
             try:
                 h_ma = history(20 + 20, '1d', 'close', target_list).rolling(window=20).mean().iloc[20:]
                 X = np.arange(len(h_ma))
                 tmp_target_list = []
-                
+
                 for stock in target_list:
                     try:
                         MA_N_Arr = h_ma[stock].values
@@ -279,13 +279,13 @@ def weekly_adjustment(context):
                                 print('{}下降趋势明显，切勿开仓'.format(stock))
                                 continue
                         tmp_target_list.append(stock)
-                    except:
+                    except Exception:
                         tmp_target_list.append(stock)
-                
+
                 target_list = tmp_target_list
-            except:
+            except Exception:
                 pass
-            
+
             # 调整持仓
             for stock in context.hold_list:
                 if stock not in target_list and stock not in context.high_limit_list:
@@ -294,10 +294,10 @@ def weekly_adjustment(context):
                     close_position(position)
                 else:
                     log.info('已持有[%s]' % stock)
-            
+
             position_count = len(context.portfolio.positions)
             target_num = min(len(set(target_list).union(set(context.portfolio.positions))), context.stock_num)
-            
+
             if target_num > position_count:
                 value = target_num / context.stock_num * context.portfolio.cash / (target_num - position_count)
                 for stock in target_list:
@@ -305,7 +305,7 @@ def weekly_adjustment(context):
                         if open_position(stock, value):
                             if len(context.portfolio.positions) >= context.stock_num:
                                 break
-        
+
         except Exception as e:
             log.error(f"[weekly_adjustment] 异常: {str(e)}")
 
@@ -325,12 +325,12 @@ def filter_paused_stock(stock_list):
         # 回测版本：使用get_price判断停牌
         if not stock_list:
             return stock_list
-        
+
         try:
             df = get_price(stock_list, count=1, fields=['volume'])
             # 通过成交量判断是否停牌
             return [stock for stock in stock_list if df.loc[stock, 'volume'] > 0]
-        except:
+        except Exception:
             # 无法判断，返回原始列表
             return stock_list
     except Exception as e:
@@ -342,7 +342,7 @@ def filter_st_stock(stock_list):
     try:
         if not stock_list:
             return stock_list
-        
+
         # 回测版本：简化处理，直接返回
         # 如需过滤，可通过股票名称或其他方式实现
         return stock_list
@@ -366,7 +366,7 @@ def filter_limit_stock(context, stock_list):
     try:
         if not stock_list:
             return stock_list
-        
+
         # 回测版本：简化处理
         holdings = list(context.portfolio.positions)
         return stock_list
@@ -410,22 +410,13 @@ def after_trading_end(context, data):
     # 收盘后处理
     pass
 '''
-    
-    def _extract_functions(self, jq_code: str) -> Dict[str, str]:
+
+    def _extract_functions(self, jq_code: str) -> dict[str, str]:
         """从聚宽代码中提取函数"""
         functions = {}
-        
+
         # 定义需要提取的关键函数
-        key_functions = [
-            'initialize', 'before_trading_start', 'handle_data', 'after_trading_end',
-            'get_stock_list', 'prepare_stock_list', 'weekly_adjustment',
-            'filter_paused_stock', 'filter_st_stock', 'filter_limit_stock',
-            'get_single_factor_list', 'sorted_by_circulating_market_cap',
-            'get_recent_limit_up_stock', 'filter_kcb_stock',
-            'order_target_value_', 'open_position', 'close_position',
-            'get_macd_value', 'get_MACD'  # 特别处理因子计算函数
-        ]
-        
+
         lines = jq_code.split('\n')
         i = 0
         while i < len(lines):
@@ -459,13 +450,13 @@ def after_trading_end(context, data):
                 functions[func_name] = '\n'.join(func_lines)
             else:
                 i += 1
-        
+
         return functions
-    
-    def _merge_functions_to_template(self, template: str, functions: Dict[str, str]) -> str:
+
+    def _merge_functions_to_template(self, template: str, functions: dict[str, str]) -> str:
         """将提取的函数合并到模板中"""
         result = template
-        
+
         # 替换模板中的函数
         for func_name, func_code in functions.items():
             # 查找模板中的函数定义，使用re.escape确保安全
@@ -481,9 +472,9 @@ def after_trading_end(context, data):
             except re.error:
                 # 如果正则表达式出错，直接添加函数到末尾
                 result = result.rstrip() + '\n\n' + func_code
-        
+
         return result
-    
+
     def _standardize_security_code(self, code: str) -> str:
         """标准化证券代码后缀"""
         try:
@@ -495,15 +486,14 @@ def after_trading_end(context, data):
             # 如果正则表达式出错，跳过处理
             pass
         return code
-    
+
     def _convert_apis(self, code: str) -> str:
         """处理API转换"""
         lines = code.split('\n')
         new_lines = []
-        
+
         for line in lines:
-            original_line = line
-            
+
             # 处理set_option函数
             if 'set_option(' in line:
                 # 检查是否是order_volume_ratio参数
@@ -514,25 +504,25 @@ def after_trading_end(context, data):
                 else:
                     # 无法转换的set_option，添加注释
                     line = '# [无法转换] ' + line + '  # PTrade不支持此set_option参数'
-            
+
             # 处理set_order_cost函数 - 用set_commission替代
             if 'set_order_cost(' in line:
                 # 添加注释说明替代方案
                 line = '# [已替换] ' + line + '  # PTrade建议使用set_commission替代'
-            
+
             # 处理set_slippage函数 - 转换为set_fixed_slippage
             if 'set_slippage(' in line:
                 line = line.replace('set_slippage(', 'set_fixed_slippage(')
                 line = '# [已转换] ' + line + '  # 参数可能需要调整'
-            
+
             # 处理get_current_data函数 - 无法转换，添加警告注释
             if 'get_current_data(' in line or 'get_current_data()' in line:
                 line = '# [警告] ' + line + '  # PTrade无此函数，需要手动调整策略'
-            
+
             # 处理get_trade_days函数 - 注意日期格式
             if 'get_trade_days(' in line:
                 line = '# [注意日期格式] ' + line + '  # PTrade要求start_date、end_date必须是YYYY-MM-DD格式'
-            
+
             # 处理run_weekly和run_monthly函数 - 转换为run_daily
             if 'run_weekly(' in line and 'context,' not in line:
                 # 将run_weekly转换为run_daily，因为Ptrade不支持run_weekly
@@ -542,25 +532,25 @@ def after_trading_end(context, data):
                 # 将run_monthly转换为run_daily，因为Ptrade可能不支持run_monthly
                 line = line.replace('run_monthly(', 'run_daily(context, ')
                 line = '# [已转换] ' + line + '  # 原run_monthly已转换为run_daily'
-            
+
             # 处理run_daily函数
             if 'run_daily(' in line and 'context,' not in line:
                 line = line.replace('run_daily(', 'run_daily(context, ')
-            
+
             # 移除weekday参数
             line = re.sub(r",\s*weekday\s*=\s*\d+", "", line)
-            
+
             # 移除reference_security参数
             line = re.sub(r",\s*reference_security\s*=\s*'[^']+'", "", line)
             line = re.sub(r",\s*reference_security\s*=\s*\"[^\"]+\"", "", line)
             line = re.sub(r"reference_security\s*=\s*'[^']+'", "", line)
             line = re.sub(r"reference_security\s*=\s*\"[^\"]+\"", "", line)
-            
+
             # 清理可能的多余逗号和空格
             line = re.sub(r"\(\s*,", "(", line)
             line = re.sub(r",\s*\)", ")", line)
             line = re.sub(r",\s*,", ", ", line)
-            
+
             # 移除不支持的API调用
             unsupported_apis = [
                 'log.set_level(',
@@ -568,55 +558,55 @@ def after_trading_end(context, data):
                 'set_price_limit(',
                 'get_current_data('
             ]
-            
+
             should_remove = False
             for api in unsupported_apis:
                 if api in line:
                     should_remove = True
                     break
-            
+
             if should_remove:
                 line = '# [已移除] ' + line + '  # PTrade不支持此API'
-            
+
             new_lines.append(line)
-        
+
         code = '\n'.join(new_lines)
-        
+
         # 移除聚宽特定的导入
         code = self._remove_jq_imports(code)
-        
+
         return code
-    
+
     def _convert_factors(self, code: str) -> str:
         """处理因子转换"""
         lines = code.split('\n')
         new_lines = []
-        
+
         for line in lines:
             # 处理聚宽因子调用转换为自定义函数
             # 例如: MACD(stock, check_date=check_date) 转换为 get_macd_value(context, stock)
-            
+
             # 处理MACD因子调用
             if 'MACD(' in line and '=' in line:
                 # 匹配类似 MACD(stock, check_date=check_date) 的调用
                 # 更精确地匹配MACD调用，避免误匹配内部函数
                 line = re.sub(r'([^a-zA-Z0-9_])MACD\(([^,]+),[^)]+\)', r'\1get_macd_value(context, \2)', line)
                 line = '# [已转换] ' + line + '  # 原聚宽MACD调用已转换为自定义函数'
-            
+
             # 处理其他因子库调用（可以根据需要添加更多）
             # 例如: RSI(stock, N=14) 等
-            
+
             new_lines.append(line)
-        
+
         return '\n'.join(new_lines)
-    
+
     def _remove_jq_imports(self, code: str) -> str:
         """移除聚宽特定的导入"""
         lines = code.split('\n')
         filtered_lines = []
         for line in lines:
             # 移除聚宽特定的导入语句
-            if not (line.startswith('import jqdata') or 
+            if not (line.startswith('import jqdata') or
                    line.startswith('from jqdata import') or
                    line.startswith('import jqfactor') or
                    line.startswith('from jqfactor import')):
@@ -638,19 +628,19 @@ def initialize(context):
 def daily_check(context):
     # 获取MACD值 - 聚宽可以直接调用
     macd_value = MACD('000001.XSHE', check_date=context.previous_date)
-    
+
     # 获取RSI值
     rsi_value = RSI('000001.XSHE', N=14)
-    
+
     print(f"MACD: {macd_value}, RSI: {rsi_value}")
 
 def handle_data(context, data):
     pass
 '''
-    
+
     # 创建转换器
     converter = JQToPtradeFactorsConverter()
-    
+
     # 转换代码
     try:
         ptrade_code = converter.convert(sample_jq_code)

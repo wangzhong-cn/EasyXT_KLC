@@ -4,17 +4,17 @@
 """
 
 import asyncio
-import aiohttp
 import json
-import time
-import re
-import pandas as pd
-from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
 import logging
-
-import sys
 import os
+import re
+import sys
+import time
+from datetime import datetime
+from typing import Any, Optional
+
+import aiohttp
+import pandas as pd
 
 # 添加项目根目录到路径
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -31,15 +31,14 @@ if current_package not in sys.path:
 try:
     from ..utils.logger import setup_logger
 except ImportError:
-    import logging
-    def setup_logger(name):
+    def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
         logger = logging.getLogger(name)
         if not logger.handlers:
             handler = logging.StreamHandler()
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             logger.addHandler(handler)
-            logger.setLevel(logging.INFO)
+        logger.setLevel(getattr(logging, level.upper(), logging.INFO))
         return logger
 
 # from ..utils.rate_limiter import RateLimiter  # 暂时注释掉，使用简单的延迟
@@ -47,16 +46,16 @@ except ImportError:
 
 class XueqiuCollectorReal:
     """基于真实cookie的雪球数据采集器"""
-    
+
     def __init__(self, cookie: Optional[str] = None):
         self.logger = setup_logger("XueqiuCollectorReal")
         self.session: Optional[aiohttp.ClientSession] = None
         # self.rate_limiter = RateLimiter(max_requests=20, time_window=60)  # 暂时注释掉
-        
+
         # 雪球API配置
         self.base_url = "https://xueqiu.com"
         self.cookie = cookie if cookie else ""
-        
+
         # 请求头配置（基于雪球跟单系统）
         self.headers = {
             'Accept': '*/*',
@@ -74,22 +73,22 @@ class XueqiuCollectorReal:
             'User-Agent': 'Mozilla/5.0 (WindowsNT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
             'X-Requested-With': 'XMLHttpRequest'
         }
-        
+
     async def initialize(self):
         """初始化采集器"""
         try:
             self.logger.info("初始化真实雪球数据采集器...")
-            
+
             # 从配置文件读取cookie（如果没有提供）
             if not self.cookie:
                 self.cookie = self._load_cookie_from_config()
-            
+
             if not self.cookie:
                 raise Exception("未提供雪球cookie，请在配置中设置")
-            
+
             # 添加cookie到请求头
             self.headers['Cookie'] = self.cookie
-            
+
             # 创建HTTP会话
             connector = aiohttp.TCPConnector(
                 limit=5,
@@ -98,48 +97,48 @@ class XueqiuCollectorReal:
                 use_dns_cache=True,
                 ssl=False
             )
-            
+
             timeout = aiohttp.ClientTimeout(total=30, connect=10)
             self.session = aiohttp.ClientSession(
                 connector=connector,
                 timeout=timeout,
                 headers=self.headers
             )
-            
+
             # 测试cookie有效性
             await self._test_cookie_validity()
-            
+
             self.logger.info("真实雪球数据采集器初始化完成")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"采集器初始化失败: {e}")
             return False
-    
+
     def _load_cookie_from_config(self) -> str:
         """从配置文件加载cookie"""
         try:
             # 使用配置管理器获取cookie配置
             from .config_manager import ConfigManager
             config_manager = ConfigManager()
-            
+
             # 优先从xueqiu_settings中获取cookie
             cookie = config_manager.get_setting('xueqiu_settings.cookie')
             if isinstance(cookie, str) and cookie:
                 self.logger.info("从配置管理器加载xueqiu_settings.cookie成功")
                 return cookie
-            
+
             # 如果xueqiu_settings中没有，尝试从xueqiu配置中获取
             cookie = config_manager.get_setting('xueqiu.cookie')
             if isinstance(cookie, str) and cookie:
                 self.logger.info("从配置管理器加载xueqiu.cookie成功")
                 return cookie
-            
+
             # 如果都没有，尝试直接读取配置文件作为备用方案
             import os
             config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'unified_config.json')
             if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as f:
+                with open(config_path, encoding='utf-8') as f:
                     config_data = json.load(f)
                     if config_data and isinstance(config_data, dict):
                         # 从xueqiu_settings中获取cookie
@@ -149,21 +148,21 @@ class XueqiuCollectorReal:
                             if cookie:
                                 self.logger.info("从unified_config.json加载cookie成功")
                                 return cookie
-            
+
             # 如果unified_config.json中没有cookie，尝试从xueqiu_config.json读取
             config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'xueqiu_config.json')
             if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as f:
+                with open(config_path, encoding='utf-8') as f:
                     config_data = json.load(f)
                     if config_data and isinstance(config_data, dict):
                         cookie = config_data.get('cookie', '')
                         if cookie:
                             self.logger.info("从xueqiu_config.json加载cookie成功")
                             return cookie
-                    
+
         except Exception as e:
             self.logger.warning(f"加载cookie配置失败: {e}")
-        
+
         return ""
 
     def _get_cookie_value(self, key: str) -> str:
@@ -173,7 +172,7 @@ class XueqiuCollectorReal:
             return m.group(1) if m else ''
         except Exception:
             return ''
-    
+
     async def _test_cookie_validity(self):
         """测试cookie有效性（采用简化验证流程）"""
         try:
@@ -185,11 +184,14 @@ class XueqiuCollectorReal:
                 'count': 1,  # 只获取一条记录进行测试
                 'page': 1
             }
-            
+
             headers = self.headers.copy()
             headers['Referer'] = 'https://xueqiu.com/P/ZH3368671'
             headers['Host'] = 'xueqiu.com'
-            
+
+            if self.session is None:
+                self.logger.warning("会话未初始化，跳过cookie有效性测试")
+                return True
             async with self.session.get(url, params=params, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
@@ -204,33 +206,33 @@ class XueqiuCollectorReal:
                 elif response.status in [401, 403, 410]:
                     # 这些状态码确实表示cookie过期
                     self.logger.error(f"Cookie验证失败，状态码: {response.status}")
-                    raise Exception(f"Cookie已过期，需要重新获取")
+                    raise Exception("Cookie已过期，需要重新获取")
                 else:
                     # 其他状态码（如404）可能是API端点变更或组合不存在，不一定是cookie问题
                     # 根据用户反馈，历史记录能获取，说明cookie有效，继续尝试实际API调用
                     self.logger.warning(f"Cookie验证返回状态码: {response.status}，但将继续尝试实际API调用")
                     return True
-                    
+
         except Exception as e:
             # 根据用户反馈，历史记录能获取，说明cookie有效，不抛出异常
             self.logger.warning(f"Cookie验证遇到异常: {e}，但将继续尝试实际API调用")
             return True
-    
-    async def get_portfolio_holdings(self, portfolio_code: str, use_current_only: bool = False) -> Optional[List[Dict[str, Any]]]:
+
+    async def get_portfolio_holdings(self, portfolio_code: str, use_current_only: bool = False) -> Optional[list[dict[str, Any]]]:
         """获取组合持仓数据
-        
+
         Args:
             portfolio_code: 组合代码
             use_current_only: 是否只获取当前持仓，忽略历史调仓记录（默认False，优先使用历史调仓记录）
-            
+
         Returns:
             持仓数据列表，空列表表示空仓状态
         """
         await asyncio.sleep(0.1)  # 简单延迟
-        
+
         try:
             self.logger.info(f"获取组合 {portfolio_code} 的持仓数据...")
-            
+
             # 强制使用历史调仓接口作为唯一数据源，放弃 quote.json/detail.json
             holdings = await self._get_holdings_from_history_api(portfolio_code)
             if holdings is None:
@@ -241,17 +243,17 @@ class XueqiuCollectorReal:
             else:
                 self.logger.info("历史调仓记录为空，组合为空仓状态")
             return holdings
-            
+
         except Exception as e:
             self.logger.error(f"获取组合持仓失败: {e}")
             import traceback
             self.logger.error(f"详细错误堆栈: {traceback.format_exc()}")
             return []
-    
+
     async def _get_latest_success_rb_id(self, portfolio_code: str) -> Optional[str]:
         """获取最新一次成功调仓的 rb_id"""
         try:
-            url = f"https://xueqiu.com/cubes/rebalancing/history.json"
+            url = "https://xueqiu.com/cubes/rebalancing/history.json"
             params = {'cube_symbol': portfolio_code, 'count': 50, 'page': 1}
             headers = self.headers.copy()
             headers['Referer'] = f'https://xueqiu.com/P/{portfolio_code}'
@@ -278,7 +280,7 @@ class XueqiuCollectorReal:
             self.logger.error(f"获取最新成功调仓rb_id失败: {e}")
             return None
 
-    def _compute_holdings_by_replay(self, list_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _compute_holdings_by_replay(self, list_data: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """按时间顺序重放历史调仓，计算最新持仓"""
         try:
             # 过滤出包含调仓明细的记录
@@ -287,7 +289,7 @@ class XueqiuCollectorReal:
                 return []
             # 按时间升序排序（最早 -> 最近）
             valid_records.sort(key=lambda x: x.get('created_at', 0))
-            holdings_map: Dict[str, Dict[str, Any]] = {}
+            holdings_map: dict[str, dict[str, Any]] = {}
             for rec in valid_records:
                 histories = rec.get('rebalancing_histories', []) or []
                 for h in histories:
@@ -342,8 +344,8 @@ class XueqiuCollectorReal:
         except Exception as e:
             self.logger.error(f"顺序重放历史调仓计算持仓失败: {e}")
             return []
-    
-    async def _get_holdings_from_history_api(self, portfolio_code: str) -> Optional[List[Dict[str, Any]]]:
+
+    async def _get_holdings_from_history_api(self, portfolio_code: str) -> Optional[list[dict[str, Any]]]:
         """使用历史调仓记录API获取持仓数据（按标准流程）"""
         try:
             # 使用历史调仓API接口与参数
@@ -353,7 +355,7 @@ class XueqiuCollectorReal:
                 'count': '50',  # 记录条数
                 'page': '1'
             }
-            
+
             # 完整请求头配置
             headers = self.headers.copy()
             headers.update({
@@ -372,13 +374,13 @@ class XueqiuCollectorReal:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
                 'X-Requested-With': 'XMLHttpRequest'
             })
-            
+
             if self.session is None:
                 self.logger.error("HTTP会话未初始化")
                 return None
-                
+
             self.logger.info(f"🔗 调用历史调仓API: {url}?cube_symbol={portfolio_code}")
-            
+
             async with self.session.get(url, params=params, headers=headers) as response:
                 if response.status != 200:
                     if response.status in [400, 410]:
@@ -387,21 +389,21 @@ class XueqiuCollectorReal:
                     else:
                         self.logger.error(f"历史调仓API失败，状态码: {response.status}")
                         return None
-                    
+
                 data = await response.json()
                 self.logger.info(f"📊 历史调仓API响应: 获取到 {len(data.get('list', [])) if isinstance(data, dict) else 0} 条记录")
-                
+
                 # 解析rebalancing_histories字段
-                holdings: List[Dict[str, Any]] = []
+                holdings: list[dict[str, Any]] = []
                 list_data = data.get('list', []) if isinstance(data, dict) else []
-                
+
                 self.logger.info(f"📋 获取到 {len(list_data)} 条历史调仓记录")
-                
+
                 # 优先：按时间顺序重放历史调仓，计算最新持仓
                 replay_holdings = self._compute_holdings_by_replay(list_data)
                 if replay_holdings:
                     return replay_holdings
-                
+
                 # 调试：打印所有记录的基本信息
                 for i, record in enumerate(list_data):
                     if isinstance(record, dict):
@@ -409,12 +411,12 @@ class XueqiuCollectorReal:
                         created_at = record.get('created_at', '未知')
                         rebalancing_type = record.get('rebalancing_type', '未知')
                         self.logger.info(f"📊 记录 {i+1}: 类型={rebalancing_type}, 时间={created_at}, 持仓数量={len(rebalancing_histories)}")
-                
+
                 # 按时间倒序排序所有调仓记录
                 # 找到最新的调仓记录（按时间倒序）
                 valid_records = []
                 current_time_ms = int(time.time() * 1000)  # 当前时间戳（毫秒）
-                
+
                 for record in list_data:
                     if isinstance(record, dict):
                         # 检查是否有持仓数据
@@ -424,10 +426,10 @@ class XueqiuCollectorReal:
                             # 过滤掉未来时间戳的记录（可能是异常的）
                             if record_time <= current_time_ms:
                                 valid_records.append(record)
-                
+
                 self.logger.info(f"🔍 找到 {len(valid_records)} 条有效调仓记录")
                 self.logger.info(f"⏰ 当前时间戳: {current_time_ms}")
-                
+
                 # 显示所有有效记录的详细信息
                 for i, record in enumerate(valid_records, 1):
                     record_time = record.get('created_at', 0)
@@ -435,10 +437,10 @@ class XueqiuCollectorReal:
                     holdings_count = len(record.get('rebalancing_histories', []))
                     time_diff_days = (current_time_ms - record_time) / (1000 * 60 * 60 * 24)
                     self.logger.info(f"📊 有效记录 {i}: 类型={record_type}, 时间={record_time}, 持仓数量={holdings_count}, 距今{time_diff_days:.1f}天")
-                
+
                 # 按时间戳倒序排序（最新的记录在前面）
                 valid_records.sort(key=lambda x: x.get('created_at', 0), reverse=True)
-                
+
                 # 选择最近的“完整快照型”记录：优先近14天内且持仓数≥15，否则选持仓数最多且时间最近
                 chosen_record = None
                 best_record = None
@@ -458,32 +460,32 @@ class XueqiuCollectorReal:
                         break
                 if chosen_record is None:
                     chosen_record = best_record
-                
+
                 if not chosen_record:
                     self.logger.warning("未找到有效的调仓记录")
                     return []
-                
+
                 # 打印选定快照记录的详细信息
-                self.logger.info(f"📊 选定快照记录详情:")
+                self.logger.info("📊 选定快照记录详情:")
                 self.logger.info(f"   - 类型: {chosen_record.get('rebalancing_type', '未知')}")
                 self.logger.info(f"   - 时间: {chosen_record.get('created_at', '未知')}")
                 self.logger.info(f"   - 持仓数量: {len(chosen_record.get('rebalancing_histories', []))}")
-                
+
                 # 解析选定记录中的持仓
                 rebalancing_histories = chosen_record.get('rebalancing_histories', [])
                 holdings = []
-                
+
                 self.logger.info(f"🔍 开始解析 {len(rebalancing_histories)} 个持仓记录")
-                
+
                 for i, holding in enumerate(rebalancing_histories):
                     if isinstance(holding, dict):
                         # 使用正确的字段映射
                         symbol = holding.get('stock_symbol', '') or holding.get('symbol', '')
                         stock_name = holding.get('stock_name', '') or holding.get('name', '')
                         target_weight = holding.get('target_weight', 0) or holding.get('weight', 0)
-                        
+
                         self.logger.info(f"📊 持仓 {i+1}: symbol={symbol}, name={stock_name}, weight={target_weight}")
-                        
+
                         if symbol and target_weight is not None:
                             # 安全处理数值转换
                             target_weight_float = 0.0
@@ -503,7 +505,7 @@ class XueqiuCollectorReal:
                                     original_weight = float(target_weight) if target_weight is not None else 0.0
                                 except Exception:
                                     original_weight = 0.0
-                            
+
                             # 放宽条件：只要不是None，都保留（包括0权重）
                             if target_weight_float >= 0:
                                 holdings.append({
@@ -516,19 +518,19 @@ class XueqiuCollectorReal:
                                 self.logger.info(f"❌ 跳过持仓: {symbol} {stock_name}, 权重={target_weight_float}")
                         else:
                             self.logger.info(f"❌ 无效持仓: symbol={symbol}, weight={target_weight}")
-                
+
                 self.logger.info(f"📈 解析到 {len(holdings)} 个持仓")
-                
+
                 if holdings:
                     self.logger.info("📊 持仓详情:")
                     for i, holding in enumerate(holdings, 1):
                         self.logger.info(f"   {i:2d}. {holding['symbol']} {holding['name']}: {holding['target_weight']:.2%}")
-                    
+
                     total_weight = sum(h['target_weight'] for h in holdings)
-                    self.logger.info(f"📈 持仓统计:")
+                    self.logger.info("📈 持仓统计:")
                     self.logger.info(f"   - 总持仓数量: {len(holdings)}")
                     self.logger.info(f"   - 总权重: {total_weight:.2%}")
-                    
+
                     # 检查权重是否合理（应该在100%左右）
                     if total_weight > 1.5:  # 超过150%明显错误
                         self.logger.warning(f"总权重异常: {total_weight:.2%}，可能数据解析有误")
@@ -541,23 +543,23 @@ class XueqiuCollectorReal:
                                 'name': holding['name'],
                                 'target_weight': normalized_weight
                             })
-                        
+
                         normalized_total = sum(h['target_weight'] for h in normalized_holdings)
                         self.logger.info(f"📊 权重归一化后: {normalized_total:.2%}")
                         return normalized_holdings
-                    
+
                     return holdings
                 else:
                     self.logger.warning("未解析到任何持仓数据，组合可能为空仓状态")
                     return []
-                    
+
         except Exception as e:
             self.logger.error(f"获取历史调仓持仓失败: {e}")
             import traceback
             self.logger.error(f"详细错误堆栈: {traceback.format_exc()}")
             return []
 
-    async def _get_holdings_from_current_api(self, portfolio_code: str) -> Optional[List[Dict[str, Any]]]:
+    async def _get_holdings_from_current_api(self, portfolio_code: str) -> Optional[list[dict[str, Any]]]:
         """使用真正的当前持仓API获取当前实际持仓"""
         try:
             # 先尝试股票服务接口，获取页面展示的实时持仓权重
@@ -572,7 +574,7 @@ class XueqiuCollectorReal:
                 '_': int(time.time() * 1000)
             }
             self.logger.info(f"使用股票服务当前持仓API: {stock_url}?cube_symbol={portfolio_code}")
-            
+
             headers = self.headers.copy()
             headers['Referer'] = f'https://xueqiu.com/P/{portfolio_code}'
             headers['Origin'] = 'https://xueqiu.com'
@@ -580,24 +582,24 @@ class XueqiuCollectorReal:
             headers['Host'] = 'stock.xueqiu.com'
             # 采用简化的请求方式
             # 避免复杂的token验证，直接使用cookie进行请求
-            
+
             if self.session is None:
                 self.logger.error("HTTP会话未初始化")
                 return None
-            
+
             holdings = []
             async with self.session.get(stock_url, params=stock_params, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
                     self.logger.info(f"股票服务API返回状态: {response.status}")
                     self.logger.info(f"股票服务API返回数据: {json.dumps(data, ensure_ascii=False)[:500]}...")
-                    
+
                     # 解析 data.data.stocks
                     stocks_root = data.get('data', {}) if isinstance(data, dict) else {}
                     stocks = stocks_root.get('stocks', []) if isinstance(stocks_root, dict) else []
                     if not isinstance(stocks, list):
                         stocks = []
-                    
+
                     for item in stocks:
                         if not isinstance(item, dict):
                             continue
@@ -606,7 +608,7 @@ class XueqiuCollectorReal:
                         weight = item.get('weight', 0)
                         if weight is None:
                             weight = 0
-                        
+
                         # 统一权重格式：转换为小数形式
                         if isinstance(weight, (int, float)):
                             # 如果权重值大于1，说明是百分比形式，需要除以100
@@ -615,7 +617,7 @@ class XueqiuCollectorReal:
                             # 如果权重值小于等于1，直接使用（已经是小数形式）
                         else:
                             weight = 0
-                        
+
                         if symbol and weight > 0:
                             holdings.append({
                                 'symbol': symbol,
@@ -625,7 +627,7 @@ class XueqiuCollectorReal:
                                 'change_weight': 0,
                                 'update_time': datetime.now().isoformat()
                             })
-                    
+
                     holdings.sort(key=lambda x: x['target_weight'], reverse=True)
                     if holdings:
                         self.logger.info(f"✅ 从股票服务API成功获取 {len(holdings)} 个当前持仓")
@@ -640,55 +642,55 @@ class XueqiuCollectorReal:
                     # 采用简化的cookie过期判断
                     # 根据反馈，历史记录能获取即继续尝试其他API
                     self.logger.warning(f"股票服务API返回状态码: {response.status}，将继续尝试备用API")
-            
+
             # 备用：使用雪球 quote.json（可能不含持仓细节）
-            url = f"https://xueqiu.com/cubes/quote.json"
+            url = "https://xueqiu.com/cubes/quote.json"
             params = {
                 'code': portfolio_code,
                 '_': int(time.time() * 1000)
             }
             self.logger.info(f"使用当前持仓API: {url}?code={portfolio_code}")
-            
+
             headers = self.headers.copy()
             headers['Referer'] = f'https://xueqiu.com/P/{portfolio_code}'
             headers['Host'] = 'xueqiu.com'
-            
+
             async with self.session.get(url, params=params, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
                     self.logger.info(f"当前持仓API返回状态: {response.status}")
                     self.logger.info(f"当前持仓API返回数据: {json.dumps(data, ensure_ascii=False)[:500]}...")
-                    
+
                     holdings = []
-                    
+
                     # 解析当前持仓数据
                     if isinstance(data, dict):
                         # 获取组合数据
                         portfolio_data = data.get(portfolio_code, {})
                         if not isinstance(portfolio_data, dict):
                             portfolio_data = {}
-                        
+
                         # 获取持仓权重数据
                         weight_data = portfolio_data.get('weight', {})
                         if not isinstance(weight_data, dict):
                             weight_data = {}
-                        
+
                         # 获取持仓列表
                         holdings_list = portfolio_data.get('holdings', [])
                         if not isinstance(holdings_list, list):
                             holdings_list = []
-                        
+
                         # 解析当前持仓数据
                         for holding_item in holdings_list:
                             if isinstance(holding_item, dict):
                                 symbol = holding_item.get('symbol', '')
                                 name = holding_item.get('name', '')
-                                
+
                                 # 从权重数据中获取该股票的当前权重
                                 weight = weight_data.get(symbol, 0)
                                 if weight is None:
                                     weight = 0
-                                
+
                                 # 统一权重格式：转换为小数形式
                                 if isinstance(weight, (int, float)):
                                     # 如果权重值大于1，说明是百分比形式，需要除以100
@@ -697,7 +699,7 @@ class XueqiuCollectorReal:
                                     # 如果权重值小于等于1，直接使用（已经是小数形式）
                                 else:
                                     weight = 0
-                                
+
                                 # 只保留当前权重大于0的持仓
                                 if symbol and weight > 0:
                                     holding = {
@@ -709,24 +711,24 @@ class XueqiuCollectorReal:
                                         'update_time': datetime.now().isoformat()
                                     }
                                     holdings.append(holding)
-                        
+
                         # 按权重排序
                         holdings.sort(key=lambda x: x['target_weight'], reverse=True)
-                        
+
                         if holdings:
                             self.logger.info(f"✅ 从当前持仓API成功获取 {len(holdings)} 个当前持仓")
-                            
+
                             # 详细打印当前持仓信息
                             self.logger.info("📊 当前持仓信息:")
                             for i, holding in enumerate(holdings, 1):
                                 self.logger.info(f"   {i:2d}. {holding['symbol']} {holding['name']}: {holding['target_weight']:.2%}")
-                            
+
                             # 计算总权重
                             total_weight = sum(h['target_weight'] for h in holdings)
-                            self.logger.info(f"📈 持仓统计:")
+                            self.logger.info("📈 持仓统计:")
                             self.logger.info(f"   - 总持仓数量: {len(holdings)}")
                             self.logger.info(f"   - 总权重: {total_weight:.2%}")
-                            
+
                             # 生成Excel文件
                             await self._generate_excel_file(portfolio_code, holdings)
                         else:
@@ -741,63 +743,63 @@ class XueqiuCollectorReal:
                     self.logger.warning(f"当前持仓API返回状态码: {response.status}，将继续尝试其他API")
                     # API失败时返回空列表表示空仓状态
                     return []
-                    
+
         except Exception as e:
             self.logger.error(f"获取当前持仓失败: {e}")
             # 发生异常时返回空列表表示空仓状态
             return []
 
-    async def _get_holdings_from_detail_api(self, portfolio_code: str) -> Optional[List[Dict[str, Any]]]:
+    async def _get_holdings_from_detail_api(self, portfolio_code: str) -> Optional[list[dict[str, Any]]]:
         """使用详细持仓API作为备用方案获取当前持仓数据"""
         try:
             self.logger.info(f"尝试使用详细持仓API获取组合 {portfolio_code} 的当前持仓数据...")
-            
+
             # 使用组合详情API获取当前持仓，而不是历史调仓记录
-            url = f"https://xueqiu.com/cubes/detail.json"
+            url = "https://xueqiu.com/cubes/detail.json"
             params = {
                 'symbol': portfolio_code,
                 '_': int(time.time() * 1000)
             }
-            
+
             # 为当前请求动态设置Referer
             headers = self.headers.copy()
             headers['Referer'] = f'https://xueqiu.com/P/{portfolio_code}'
             headers['Host'] = 'xueqiu.com'
-            
+
             if self.session is None:
                 self.logger.error("HTTP会话未初始化")
                 return None
-                
+
             async with self.session.get(url, params=params, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
                     self.logger.info(f"详细持仓API返回数据: {json.dumps(data, ensure_ascii=False)[:500]}...")
-                    
+
                     holdings = []
-                    
+
                     # 解析组合详情API返回的当前持仓数据
                     if isinstance(data, dict) and data is not None:
                         # 获取组合详情数据
                         cube = data.get('cube', {})
                         if cube is None or not isinstance(cube, dict):
                             cube = {}
-                        
+
                         # 获取当前持仓列表
                         holdings_list = cube.get('holdings', [])
                         if not isinstance(holdings_list, list):
                             holdings_list = []
-                        
+
                         # 解析每个当前持仓
                         for holding_data in holdings_list:
                             if isinstance(holding_data, dict):
                                 stock_symbol = holding_data.get('stock_symbol', '')
                                 stock_name = holding_data.get('stock_name', '')
                                 weight = holding_data.get('weight', 0)
-                                
+
                                 # 确保权重值不为None
                                 if weight is None:
                                     weight = 0
-                                
+
                                 # 只保留权重大于0的当前持仓
                                 if stock_symbol and weight > 0:
                                     # 添加当前持仓
@@ -810,10 +812,10 @@ class XueqiuCollectorReal:
                                         'update_time': datetime.now().isoformat()
                                     }
                                     holdings.append(holding)
-                        
+
                         # 按权重排序
                         holdings.sort(key=lambda x: x['target_weight'], reverse=True)
-                        
+
                         if holdings:
                             self.logger.info(f"✅ 从详细持仓API成功获取 {len(holdings)} 个持仓")
                         else:
@@ -833,62 +835,62 @@ class XueqiuCollectorReal:
             self.logger.error(f"获取详细持仓失败: {e}")
             return None
 
-    async def _get_holdings_from_portfolio_detail_api(self, portfolio_code: str) -> Optional[List[Dict[str, Any]]]:
+    async def _get_holdings_from_portfolio_detail_api(self, portfolio_code: str) -> Optional[list[dict[str, Any]]]:
         """使用组合详情API作为最终备用方案获取持仓数据"""
         try:
             self.logger.info(f"尝试使用组合详情API获取组合 {portfolio_code} 的持仓数据...")
-            
+
             # 使用成功版本的API端点 - 组合详情API
             url = "https://xueqiu.com/cubes/quote.json"
             params = {
                 'code': portfolio_code,
                 '_': int(time.time() * 1000)
             }
-            
+
             # 为当前请求动态设置Referer
             headers = self.headers.copy()
             headers['Referer'] = f'https://xueqiu.com/P/{portfolio_code}'
             headers['Host'] = 'xueqiu.com'
-            
+
             if self.session is None:
                 self.logger.error("HTTP会话未初始化")
                 return []
-                
+
             async with self.session.get(url, params=params, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
                     self.logger.info(f"组合详情API返回数据: {json.dumps(data, ensure_ascii=False)[:500]}...")
-                    
+
                     holdings = []
-                    
+
                     # 解析组合详情数据
                     if isinstance(data, dict) and data is not None:
                         # 获取组合数据
                         portfolio_data = data.get(portfolio_code, {})
                         if portfolio_data is None or not isinstance(portfolio_data, dict):
                             portfolio_data = {}
-                        
+
                         # 获取持仓权重数据
                         weight_data = portfolio_data.get('weight', {})
                         if not isinstance(weight_data, dict):
                             weight_data = {}
-                        
+
                         # 获取持仓列表
                         holdings_list = portfolio_data.get('holdings', [])
                         if not isinstance(holdings_list, list):
                             holdings_list = []
-                        
+
                         # 解析持仓数据
                         for holding_item in holdings_list:
                             if isinstance(holding_item, dict):
                                 symbol = holding_item.get('symbol', '')
                                 name = holding_item.get('name', '')
-                                
+
                                 # 从权重数据中获取该股票的权重
                                 weight = weight_data.get(symbol, 0)
                                 if weight is None:
                                     weight = 0
-                                
+
                                 if symbol and weight > 0:
                                     holding = {
                                         'symbol': symbol,
@@ -899,10 +901,10 @@ class XueqiuCollectorReal:
                                         'update_time': datetime.now().isoformat()
                                     }
                                     holdings.append(holding)
-                        
+
                         # 按权重排序
                         holdings.sort(key=lambda x: x['target_weight'], reverse=True)
-                        
+
                         if holdings:
                             self.logger.info(f"✅ 从组合详情API成功获取 {len(holdings)} 个持仓")
                             return holdings
@@ -924,23 +926,26 @@ class XueqiuCollectorReal:
         except Exception as e:
             self.logger.error(f"获取组合详情失败: {e}")
             return []
-    
-    async def _get_rebalancing_details(self, rb_id: str, portfolio_code: str) -> Optional[List[Dict[str, Any]]]:
+
+    async def _get_rebalancing_details(self, rb_id: str, portfolio_code: str) -> Optional[list[dict[str, Any]]]:
         """获取调仓详细信息"""
         try:
+            if self.session is None:
+                self.logger.error("请求会话未初始化")
+                return None
             url = f"{self.base_url}/cubes/rebalancing/show_origin.json"
             params = {
                 'rb_id': rb_id,
                 'cube_symbol': portfolio_code
             }
-            
+
             async with self.session.get(url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
-                    
+
                     rebalancing_data = data.get('rebalancing') if data else None
                     rebalancing = rebalancing_data if isinstance(rebalancing_data, dict) else {}
-                    
+
                     status = rebalancing.get('status', '') if rebalancing else ''
                     if status == 'success':
                         self.logger.info("获取调仓详细信息成功")
@@ -958,15 +963,13 @@ class XueqiuCollectorReal:
                     else:
                         self.logger.error(f"获取调仓详情失败，状态码: {response.status}")
                         return None
-                    
+
         except Exception as e:
             self.logger.error(f"获取调仓详情失败: {e}")
             return None
-    
-    def _parse_holdings_from_history(self, rebalancing_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+
+    def _parse_holdings_from_history(self, rebalancing_data: dict[str, Any]) -> list[dict[str, Any]]:
         """从调仓历史解析持仓"""
-        holdings = []
-        
         try:
             if not rebalancing_data or not isinstance(rebalancing_data, dict):
                 return []
@@ -974,34 +977,34 @@ class XueqiuCollectorReal:
             if not isinstance(histories, list):
                 histories = []
             return self._parse_holdings_from_histories(histories)
-            
+
         except Exception as e:
             self.logger.error(f"解析持仓数据失败: {e}")
             return []
-    
-    def _parse_holdings_from_histories(self, histories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+    def _parse_holdings_from_histories(self, histories: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """从调仓历史列表解析持仓"""
         holdings = []
-        
+
         try:
             if not histories:
                 return []
-                
+
             for history in histories:
                 if not history:
                     continue
-                    
+
                 stock_symbol = history.get('stock_symbol', '')
                 stock_name = history.get('stock_name', '')
                 target_weight = history.get('target_weight', 0)
                 prev_weight = history.get('prev_weight', 0)
-                
+
                 # 确保权重值不为None
                 if target_weight is None:
                     target_weight = 0
                 if prev_weight is None:
                     prev_weight = 0
-                
+
                 # 只保留目标权重大于0的持仓
                 if target_weight > 0:
                     holding = {
@@ -1013,25 +1016,25 @@ class XueqiuCollectorReal:
                         'update_time': datetime.now().isoformat()
                     }
                     holdings.append(holding)
-            
+
             # 按权重排序
             holdings.sort(key=lambda x: x['target_weight'], reverse=True)
-            
+
             self.logger.info(f"✅ 成功解析 {len(holdings)} 个持仓")
             for holding in holdings:
                 self.logger.info(f"   {holding['symbol']} {holding['name']}: {holding['target_weight']:.2%}")
-            
+
             return holdings
-            
+
         except Exception as e:
             self.logger.error(f"解析持仓历史失败: {e}")
             return []
-    
-    async def get_portfolio_info(self, portfolio_code: str) -> Optional[Dict[str, Any]]:
+
+    async def get_portfolio_info(self, portfolio_code: str) -> Optional[dict[str, Any]]:
         """获取组合基本信息"""
         # await self.rate_limiter.acquire()  # 暂时注释掉
         await asyncio.sleep(0.1)  # 简单延迟
-        
+
         try:
             # 这里可以添加获取组合基本信息的API调用
             # 暂时返回基本信息
@@ -1040,44 +1043,44 @@ class XueqiuCollectorReal:
                 'name': f'雪球组合_{portfolio_code}',
                 'update_time': datetime.now().isoformat()
             }
-            
+
         except Exception as e:
             self.logger.error(f"获取组合信息失败: {e}")
             return None
-    
+
     async def monitor_portfolio_changes(self, portfolio_code: str, callback=None):
         """监控组合变化
-        
+
         Args:
             portfolio_code: 组合代码
             callback: 变化回调函数
         """
         self.logger.info(f"开始监控组合 {portfolio_code} 的变化...")
-        
+
         last_holdings = None
-        
+
         while True:
             try:
                 # 获取当前持仓
                 current_holdings = await self.get_portfolio_holdings(portfolio_code)
-                
+
                 # 检查是否有变化
                 if last_holdings is not None and current_holdings != last_holdings:
                     self.logger.info(f"检测到组合 {portfolio_code} 发生变化")
-                    
+
                     if callback:
                         await callback(portfolio_code, current_holdings, last_holdings)
-                
+
                 last_holdings = current_holdings
-                
+
                 # 等待下次检查（每30秒检查一次）
                 await asyncio.sleep(30)
-                
+
             except Exception as e:
                 self.logger.error(f"监控组合变化时发生错误: {e}")
                 await asyncio.sleep(60)  # 出错时等待更长时间
 
-    async def _generate_excel_file(self, portfolio_code: str, holdings: List[Dict[str, Any]]) -> None:
+    async def _generate_excel_file(self, portfolio_code: str, holdings: list[dict[str, Any]]) -> None:
         """生成持仓Excel文件（统一为固定文件名覆盖写，受配置开关控制）"""
         try:
             if not holdings:
@@ -1095,7 +1098,8 @@ class XueqiuCollectorReal:
                     cm.get_setting('导出持仓') or
                     False
                 )
-                export_dir_name = cm.get_setting('settings.export_dir') or "reports"
+                export_dir_setting = cm.get_setting('settings.export_dir')
+                export_dir_name = str(export_dir_setting) if export_dir_setting else "reports"
             except Exception:
                 pass
 

@@ -5,6 +5,7 @@
 """
 
 import sys
+
 import numpy as np
 import pandas as pd
 
@@ -88,7 +89,7 @@ def test_factor_correlation():
 
         # 测试分析器
         analyzer = FactorCorrelationAnalyzer(factor_dict)
-        corr_matrix = analyzer.calculate_correlation(method='spearman')
+        analyzer.calculate_correlation(method='spearman')
 
         high_corr_pairs = analyzer.find_high_correlation_pairs(threshold=0.7)
 

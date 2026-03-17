@@ -1,17 +1,21 @@
 # 导入函数库
-import time
-import requests
 from datetime import datetime as dt
+import importlib
+import importlib.util
+from typing import Any
+
+import requests
+
 
 # 简化的QMT客户端，通过中转服务发送信号
 class QMTClient:
     """QMT客户端 - 通过中转服务发送信号"""
-    
+
     def __init__(self, base_url="http://www.ptqmt.com:8080", token="test_token"):
         self.base_url = base_url.rstrip('/')
         self.token = token
         self.headers = {"Authorization": f"Bearer {self.token}"}
-    
+
     def send_signal(self, strategy_name, stock_code, order_type, order_volume, price_type, price):
         """发送交易信号到中转服务"""
         # 处理股票代码格式 - 确保使用QMT支持的格式
@@ -21,7 +25,7 @@ class QMTClient:
         elif stock_code.endswith('.XSHG'):
             # 转换聚宽格式到QMT格式
             stock_code = stock_code.replace('.XSHG', '.SH')
-        
+
         payload = {
             "strategy_name": strategy_name,
             "stock_code": stock_code,
@@ -30,7 +34,7 @@ class QMTClient:
             "price_type": price_type,
             "price": price
         }
-        
+
         try:
             response = requests.post(
                 f"{self.base_url}/api/send_signal",
@@ -38,7 +42,7 @@ class QMTClient:
                 headers=self.headers,
                 timeout=10
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
                 if result.get('success'):
@@ -53,11 +57,13 @@ class QMTClient:
             print(f"❌ 异常: {e}")
             return None
 
-try:
-    from jqdata import *
-except ImportError:
+if importlib.util.find_spec("jqdata") is not None:
+    _jqdata_module = importlib.import_module("jqdata")
+    _jqdata_exports = {name: getattr(_jqdata_module, name) for name in dir(_jqdata_module) if not name.startswith("_")}
+    globals().update(_jqdata_exports)
+else:
     # 在非聚宽环境中提供模拟函数
-    
+
     def get_current_data():
         class MockCurrentData:
             def __getitem__(self, key):
@@ -69,14 +75,14 @@ except ImportError:
                         self.low_limit = 9.0
                 return MockStockData()
         return MockCurrentData()
-    
+
     class SecurityNotExist(Exception):
         pass
-    
+
     class OrderCost:
         def __init__(self, close_tax=0.001, open_commission=0.0003, close_commission=0.0003, min_commission=5):
             pass
-    
+
     class MockContext:
         def __init__(self):
             self.current_dt = dt.now()
@@ -93,35 +99,35 @@ except ImportError:
                 def __getattr__(self, name):
                     return getattr(self, name, 0)
             self.portfolio = Portfolio()
-        
+
         def __getattr__(self, name):
             return getattr(self, name, None)
-    
+
     context = MockContext()
-    
+
     def set_benchmark(security):
         pass
-    
+
     def set_option(key, value):
         pass
-    
+
     def set_order_cost(cost, type='stock'):
         pass
-    
+
     def run_daily(func, time='09:30', reference_security='000300.XSHG'):
         pass
-    
+
     def get_bars(security, count=5, unit='1d', fields=['close'], include_now=True):
-        import pandas as pd
         import numpy as np
+        import pandas as pd
         data = {
             'close': np.random.rand(count) * 10 + 5
         }
         return pd.DataFrame(data)
-    
+
     def get_trades():
         return {}
-    
+
     def order(security, amount):
         class MockOrderResult:
             def __init__(self):
@@ -138,7 +144,7 @@ except ImportError:
                 self.action = 'open'
                 self.commission = 0.0
         return MockOrderResult()
-    
+
     def order_target(security, amount):
         class MockOrderResult:
             def __init__(self):
@@ -155,7 +161,7 @@ except ImportError:
                 self.action = 'open'
                 self.commission = 0.0
         return MockOrderResult()
-    
+
     def order_value(security, value):
         class MockOrderResult:
             def __init__(self):
@@ -172,7 +178,7 @@ except ImportError:
                 self.action = 'open'
                 self.commission = 0.0
         return MockOrderResult()
-    
+
     def order_target_value(security, value):
         class MockOrderResult:
             def __init__(self):
@@ -191,21 +197,17 @@ except ImportError:
         return MockOrderResult()
 
 # 添加模拟日志函数
-try:
-    # 尝试使用聚宽的log函数
-    from jqdata import log
-except (ImportError, NameError):
-    # 如果不存在，创建模拟log函数
+if "log" not in globals():
     class MockLogger:
         def info(self, *args):
             print("INFO:", *args)
-        
+
         def warning(self, *args):
             print("WARNING:", *args)
-        
+
         def error(self, *args):
             print("ERROR:", *args)
-    
+
     log = MockLogger()
 
 # 初始化客户端（使用中转服务地址）
@@ -227,14 +229,14 @@ PRICE_TYPE_MARKET_MINE = 45      # 本方最优价格委托 (MARKET_MINE_PRICE_F
 def send_limit_order(security, adjustment, strategy_name, price=None, current_data=None):
     """
     发送限价单的通用函数（通过中转服务）
-    
+
     参数:
     security: 股票代码（聚宽格式，如 000001.XSHE）
     adjustment: 调整数量（正数为买入，负数为卖出）
     strategy_name: 策略名称
     price: 订单价格（可选，不提供则使用当前价格微调）
     current_data: 当前数据对象，可选
-    
+
     返回:
     str: 信号ID或None（失败）
     """
@@ -307,11 +309,10 @@ def send_limit_order(security, adjustment, strategy_name, price=None, current_da
             return None
 
         # 发送限价单信号到中转服务
-        current_time_ms = dt.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # 精确到毫秒
-        order_remark = f"{strategy_name}_{current_time_ms}"  # 格式为：策略名称_时间
-        
+        dt.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # 精确到毫秒
+
         log.info(f"[限价单] {strategy_name} 发送: 股票={stock_code}, 类型={'买入' if order_type == ORDER_TYPE_BUY else '卖出'}, 数量={abs(adjustment)}, 价格={adjusted_price}")
-        
+
         signal_id = client.send_signal(
             strategy_name=strategy_name,
             stock_code=stock_code,
@@ -325,9 +326,9 @@ def send_limit_order(security, adjustment, strategy_name, price=None, current_da
             log.info(f"[限价单] {strategy_name} 发送成功，信号ID: {signal_id}")
         else:
             log.error(f"[限价单] {strategy_name} 发送失败")
-        
+
         return signal_id
-        
+
     except Exception as e:
         log.error(f"[{strategy_name}] 发送限价单失败: {str(e)}")
         return None
@@ -335,13 +336,13 @@ def send_limit_order(security, adjustment, strategy_name, price=None, current_da
 def send_market_order(security, adjustment, strategy_name, current_data=None):
     """
     发送市价单的通用函数（通过中转服务）
-    
+
     参数:
     security: 股票代码（聚宽格式，如 000001.XSHE）
     adjustment: 调整数量（正数为买入，负数为卖出）
     strategy_name: 策略名称
     current_data: 当前数据对象，可选
-    
+
     返回:
     str: 信号ID或None（失败）
     """
@@ -389,11 +390,10 @@ def send_market_order(security, adjustment, strategy_name, current_data=None):
             return None
 
         # 发送市价单信号到中转服务
-        current_time_ms = dt.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # 精确到毫秒
-        order_remark = f"{strategy_name}_market_{current_time_ms}"  # 格式为：策略名称_market_时间
-        
+        dt.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # 精确到毫秒
+
         log.info(f"[市价单] {strategy_name} 发送: 股票={stock_code}, 类型={'买入' if order_type == ORDER_TYPE_BUY else '卖出'}, 数量={abs(adjustment)}, 当前价格={current_price}")
-        
+
         signal_id = client.send_signal(
             strategy_name=strategy_name,
             stock_code=stock_code,
@@ -407,17 +407,21 @@ def send_market_order(security, adjustment, strategy_name, current_data=None):
             log.info(f"[市价单] {strategy_name} 发送成功，信号ID: {signal_id}")
         else:
             log.error(f"[市价单] {strategy_name} 发送失败")
-        
+
         return signal_id
-        
+
     except Exception as e:
         log.error(f"[{strategy_name}] 发送市价单失败: {str(e)}")
         return None
 
+class G:
+    stock_pool: list[str]
+    security: str
+
+
 # 股票池 - 增加更多股票（20只以上）
-g = type('G', (), {})()  # 创建一个全局对象g
-# 为g对象添加stock_pool属性
-setattr(g, 'stock_pool', [
+g = G()
+g.stock_pool = [
     '000001.XSHE',  # 平安银行
     '000002.XSHE',  # 万科A
     '000651.XSHE',  # 格力电器
@@ -447,7 +451,7 @@ setattr(g, 'stock_pool', [
     '600309.XSHG',    # 万华化学
     '600436.XSHG',    # 片仔癀
     '600703.XSHG',    # 三安光电
-])
+]
 
 # 初始化函数，设定基准等等
 def initialize(context):
@@ -492,132 +496,140 @@ def before_market_open(context):
             # 尝试获取股票信息来验证是否存在
             get_current_data()[stock]
             available_stocks.append(stock)
-        except:
-            log.info('股票 %s 不存在或无法获取数据，跳过' % stock)
+        except (KeyError, ValueError, RuntimeError):
+            log.info(f'股票 {stock} 不存在或无法获取数据，跳过')
             continue
-    
+
     if available_stocks:
         g.security = random.choice(available_stocks)
-        log.info('今日交易标的: %s (从%d只可用股票中随机选择)' % (g.security, len(available_stocks)))
+        log.info(f"今日交易标的: {g.security} (从{len(available_stocks)}只可用股票中随机选择)")
     else:
         # 如果没有可用股票，默认使用平安银行
         g.security = '000001.XSHE'
-        log.info('没有可用股票，使用默认股票: %s' % g.security)
+        log.info(f'没有可用股票，使用默认股票: {g.security}')
 
 ## 开盘时运行函数（测试限价单和市价单）
 def market_open(context):
     log.info('函数运行时间(market_open):'+str(context.current_dt.time()))
     security = g.security
-    
+
     try:
         # 获取股票的当前价格
         current_data = get_current_data()
         current_price = current_data[security].last_price
-        
+
         # 检查价格是否有效
         if current_price <= 0:
-            log.info('股票 %s 当前价格无效: %.2f，跳过交易' % (security, current_price))
+            log.info(f'股票 {security} 当前价格无效: {current_price:.2f}，跳过交易')
             return
-            
+
         # 获取过去3根1分钟K线的数据
         close_data = get_bars(security, count=3, unit='1m', fields=['close'])
-        
+
         if len(close_data) >= 2:
             # 计算短期价格变化率
             price_change = (current_price - close_data['close'][-2]) / close_data['close'][-2]
-            
+
             # 取得当前的现金
             cash = context.portfolio.available_cash
             # 安全获取持仓数量
             try:
                 position_amount = context.portfolio.positions[security].total_amount
-            except:
+            except (KeyError, AttributeError):
                 position_amount = 0
-            
+
             # 更敏感的交易条件（0.2%的价格波动就触发交易）
             # 价格上涨0.2%以上且有资金则测试买入
             if price_change > 0.002 and cash > 1000:
                 log.info("=" * 70)
-                log.info("【测试】价格上涨 %.2f%%, 测试买入 %s" % (price_change*100, security))
+                log.info(f"【测试】价格上涨 {price_change*100:.2f}%, 测试买入 {security}")
                 log.info("=" * 70)
-                log.info("当前可用资金: ¥%.2f, 持仓数量: %d" % (cash, position_amount))
-                
+                log.info(f"当前可用资金: ¥{cash:.2f}, 持仓数量: {position_amount}")
+
                 # 计算交易数量（确保是100的整数倍）
                 volume = 100  # 固定100股用于测试
                 test_price = current_price * 1.01
-                
+
                 if volume > 0:
                     # ========== 测试限价单 ==========
                     log.info("\n【测试限价单】")
-                    log.info("下单参数: 股票=%s, 类型=买入(23), 数量=%d股, 价格=%s, 价格类型=限价(11)" % (security, volume, test_price))
+                    log.info(
+                        f"下单参数: 股票={security}, 类型=买入(23), 数量={volume}股, 价格={test_price}, 价格类型=限价(11)"
+                    )
                     limit_result = send_limit_order(security, volume, 'LimitOrder_BUY', price=test_price, current_data=current_data)
-                    
+
                     if limit_result is None:
                         log.error("限价单发送失败")
                     else:
-                        log.info("限价单成功，信号ID: %s" % str(limit_result))
-                    
+                        log.info(f"限价单成功，信号ID: {str(limit_result)}")
+
                     # ========== 测试市价单 ==========
                     log.info("\n【测试市价单】")
-                    log.info("下单参数: 股票=%s, 类型=买入(23), 数量=%d股, 价格类型=市价(44)" % (security, volume))
+                    log.info(
+                        f"下单参数: 股票={security}, 类型=买入(23), 数量={volume}股, 价格类型=市价(44)"
+                    )
                     market_result = send_market_order(security, volume, 'MarketOrder_BUY', current_data=current_data)
-                    
+
                     if market_result is None:
                         log.error("市价单发送失败")
                     else:
-                        log.info("市价单成功，信号ID: %s" % str(market_result))
-                    
+                        log.info(f"市价单成功，信号ID: {str(market_result)}")
+
                     log.info("\n【测试总结】")
-                    log.info("限价单结果: %s | 市价单结果: %s" % (limit_result, market_result))
+                    log.info(f"限价单结果: {limit_result} | 市价单结果: {market_result}")
                     log.info("=" * 70)
-                
+
             # 价格下跌0.2%以上且有持仓则测试卖出
             elif price_change < -0.002 and position_amount > 0:
                 log.info("=" * 70)
-                log.info("【测试】价格下跌 %.2f%%, 测试卖出 %s" % (abs(price_change)*100, security))
+                log.info(f"【测试】价格下跌 {abs(price_change)*100:.2f}%, 测试卖出 {security}")
                 log.info("=" * 70)
-                log.info("当前持仓数量: %d" % position_amount)
-                
+                log.info(f"当前持仓数量: {position_amount}")
+
                 # 计算交易数量（确保是100的整数倍）
                 volume = 100  # 固定100股用于测试
                 test_price = current_price * 0.99
-                
+
                 if volume > 0:
                     # ========== 测试限价单卖出 ==========
                     log.info("\n【测试限价单卖出】")
-                    log.info("下单参数: 股票=%s, 类型=卖出(24), 数量=%d股, 价格=%s, 价格类型=限价(11)" % (security, volume, test_price))
+                    log.info(
+                        f"下单参数: 股票={security}, 类型=卖出(24), 数量={volume}股, 价格={test_price}, 价格类型=限价(11)"
+                    )
                     limit_result = send_limit_order(security, -volume, 'LimitOrder_SELL', price=test_price, current_data=current_data)
-                    
+
                     if limit_result is None:
                         log.error("限价单发送失败")
                     else:
-                        log.info("限价单成功，信号ID: %s" % str(limit_result))
-                    
+                        log.info(f"限价单成功，信号ID: {str(limit_result)}")
+
                     # ========== 测试市价单卖出 ==========
                     log.info("\n【测试市价单卖出】")
-                    log.info("下单参数: 股票=%s, 类型=卖出(24), 数量=%d股, 价格类型=市价(44)" % (security, volume))
+                    log.info(
+                        f"下单参数: 股票={security}, 类型=卖出(24), 数量={volume}股, 价格类型=市价(44)"
+                    )
                     market_result = send_market_order(security, -volume, 'MarketOrder_SELL', current_data=current_data)
-                    
+
                     if market_result is None:
                         log.error("市价单发送失败")
                     else:
-                        log.info("市价单成功，信号ID: %s" % str(market_result))
-                    
+                        log.info(f"市价单成功，信号ID: {str(market_result)}")
+
                     log.info("\n【测试总结】")
-                    log.info("限价单结果: %s | 市价单结果: %s" % (limit_result, market_result))
+                    log.info(f"限价单结果: {limit_result} | 市价单结果: {market_result}")
                     log.info("=" * 70)
             else:
-                log.info("价格波动较小 %.2f%%, 不触发交易" % (price_change*100))
+                log.info(f"价格波动较小 {price_change * 100:.2f}%, 不触发交易")
         else:
             log.info("数据不足，跳过本次交易检查")
     except SecurityNotExist as e:
-        log.error("股票 %s 不存在: %s" % (security, str(e)))
+        log.error(f"股票 {security} 不存在: {str(e)}")
         # 从股票池中移除不存在的股票
         if hasattr(g, 'stock_pool') and security in g.stock_pool:
             g.stock_pool.remove(security)
-            log.info("已从股票池中移除 %s" % security)
+            log.info(f"已从股票池中移除 {security}")
     except Exception as e:
-        log.error("获取股票数据时发生错误: %s" % str(e))
+        log.error(f"获取股票数据时发生错误: {str(e)}")
 
 ## 收盘后运行函数
 def after_market_close(context):

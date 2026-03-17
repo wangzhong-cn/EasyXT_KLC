@@ -8,11 +8,11 @@ IR (Information Ratio) - 信息比率：IC均值与IC标准差的比值，衡量
 作者：EasyXT团队
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional, Union
-from datetime import datetime
-import warnings
+
 warnings.filterwarnings('ignore')
 
 
@@ -88,7 +88,7 @@ class ICIRAnalyzer:
             self.forward_returns = self.price_data.pct_change(periods).shift(-periods)
         elif return_type == 'log':
             # 对数收益率: log(P_t+n) - log(P_t)
-            self.forward_returns = np.log(self.price_data).diff(periods).shift(-periods)
+            self.forward_returns = (self.price_data / self.price_data.shift(periods)).apply(np.log).shift(-periods)
         else:
             raise ValueError(f"未知的收益率类型: {return_type}")
 
@@ -126,12 +126,15 @@ class ICIRAnalyzer:
             self.calculate_forward_returns(periods=periods, return_type=return_type)
 
         # 计算每日IC
+        forward_returns = self.forward_returns
+        if forward_returns is None:
+            raise ValueError("未来收益率为空")
         ic_list = []
         dates = []
 
         for date in self.factor_data.index:
             factor_values = self.factor_data.loc[date]
-            return_values = self.forward_returns.loc[date]
+            return_values = forward_returns.loc[date]
 
             # 移除NaN值
             valid_mask = ~(factor_values.isna() | return_values.isna())
@@ -156,7 +159,7 @@ class ICIRAnalyzer:
 
         return self.ic_series
 
-    def calculate_ic_stats(self) -> Dict[str, float]:
+    def calculate_ic_stats(self) -> dict[str, float]:
         """
         计算IC统计指标
 
@@ -258,6 +261,9 @@ class ICIRAnalyzer:
         """
         if self.ic_stats is None:
             self.calculate_ic_stats()
+        stats = self.ic_stats
+        if stats is None:
+            raise ValueError("IC统计结果为空")
 
         # 创建报告DataFrame
         report_data = {
@@ -273,15 +279,15 @@ class ICIRAnalyzer:
                 'IC样本数'
             ],
             '数值': [
-                f"{self.ic_stats['ic_mean']:.4f}",
-                f"{self.ic_stats['ic_std']:.4f}",
-                f"{self.ic_stats['ir']:.4f}",
-                f"{self.ic_stats['ic_skew']:.4f}",
-                f"{self.ic_stats['ic_kurt']:.4f}",
-                f"{self.ic_stats['t_stat']:.4f}",
-                f"{self.ic_stats['positive_ic_ratio']:.2%}",
-                f"{self.ic_stats['abs_ic_mean']:.4f}",
-                f"{self.ic_stats['ic_count']:.0f}"
+                f"{stats['ic_mean']:.4f}",
+                f"{stats['ic_std']:.4f}",
+                f"{stats['ir']:.4f}",
+                f"{stats['ic_skew']:.4f}",
+                f"{stats['ic_kurt']:.4f}",
+                f"{stats['t_stat']:.4f}",
+                f"{stats['positive_ic_ratio']:.2%}",
+                f"{stats['abs_ic_mean']:.4f}",
+                f"{stats['ic_count']:.0f}"
             ],
             '说明': [
                 'IC均值越大，因子预测能力越强',
@@ -304,6 +310,9 @@ class ICIRAnalyzer:
         """打印IC/IR分析报告"""
         if self.ic_stats is None:
             self.calculate_ic_stats()
+        stats = self.ic_stats
+        if stats is None:
+            raise ValueError("IC统计结果为空")
 
         print("=" * 80)
         print("IC/IR分析报告")
@@ -324,7 +333,7 @@ class ICIRAnalyzer:
         }
 
         for key, (name, desc) in report_map.items():
-            value = self.ic_stats[key]
+            value = stats[key]
             if key == 'positive_ic_ratio':
                 value_str = f"{value:.2%}"
             elif key == 'ic_count':
@@ -336,8 +345,8 @@ class ICIRAnalyzer:
         print("=" * 80)
 
         # 因子评级
-        ir = self.ic_stats['ir']
-        ic_mean = self.ic_stats['ic_mean']
+        ir = stats['ir']
+        ic_mean = stats['ic_mean']
 
         print("\n因子评级：", end="")
         if abs(ir) >= 1.0 and abs(ic_mean) >= 0.05:

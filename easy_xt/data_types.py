@@ -2,11 +2,12 @@
 EasyXT类型定义模块
 定义所有API接口的类型注解和数据结构
 """
-from typing import Union, List, Optional, Dict, Any, Literal, TypedDict, Protocol
 from dataclasses import dataclass
-from enum import Enum
-import pandas as pd
 from datetime import datetime
+from enum import Enum
+from typing import Any, Literal, Optional, Protocol, TypedDict, Union
+
+import pandas as pd
 
 # ==================== 基础类型定义 ====================
 
@@ -154,10 +155,10 @@ class OrderState(Enum):
 
 class DataProvider(Protocol):
     """数据提供者协议"""
-    
+
     def get_price_data(
-        self, 
-        codes: Union[StockCode, List[StockCode]], 
+        self,
+        codes: Union[StockCode, list[StockCode]],
         period: PeriodType,
         start: Optional[str] = None,
         end: Optional[str] = None,
@@ -165,17 +166,17 @@ class DataProvider(Protocol):
     ) -> pd.DataFrame:
         """获取价格数据"""
         ...
-    
+
     def get_realtime_quote(
-        self, 
-        codes: Union[StockCode, List[StockCode]]
-    ) -> List[QuoteData]:
+        self,
+        codes: Union[StockCode, list[StockCode]]
+    ) -> list[QuoteData]:
         """获取实时行情"""
         ...
 
 class TradeProvider(Protocol):
     """交易提供者协议"""
-    
+
     def place_order(
         self,
         account_id: AccountId,
@@ -187,7 +188,7 @@ class TradeProvider(Protocol):
     ) -> Optional[OrderId]:
         """下单"""
         ...
-    
+
     def cancel_order(
         self,
         account_id: AccountId,
@@ -327,24 +328,24 @@ def is_valid_price(price: float) -> bool:
 
 class Constants:
     """常量定义"""
-    
+
     # 最小交易单位
     MIN_TRADE_UNIT = 100
-    
+
     # 价格精度
     PRICE_PRECISION = 2
-    
+
     # 默认超时时间
     DEFAULT_TIMEOUT = 30
-    
+
     # 最大重试次数
     MAX_RETRY_COUNT = 3
-    
+
     # 支持的市场
     SUPPORTED_MARKETS = ['SH', 'SZ', 'BJ']
-    
+
     # 支持的周期
     SUPPORTED_PERIODS = ['1m', '5m', '15m', '30m', '1h', '1d', '1w', '1M']
-    
+
     # 默认字段
     DEFAULT_PRICE_FIELDS = ['open', 'high', 'low', 'close', 'volume']

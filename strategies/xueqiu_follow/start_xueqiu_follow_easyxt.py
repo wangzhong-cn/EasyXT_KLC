@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 雪球跟单策略启动脚本 - 使用 easy_xt 模块
 配置信息：
@@ -8,13 +7,13 @@
 - 跟单组合: https://xueqiu.com/P/ZHXXXXXX
 """
 
+import asyncio
+import importlib.util
+import json
 import os
 import sys
-import json
-import asyncio
-import time
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any, Optional
 
 # 添加项目根目录到 Python 路径
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,23 +37,16 @@ for p in (easy_xt_path, easyxt_main_path, xtquant_path):
 def check_dependencies():
     """检查依赖模块"""
     missing_deps = []
-    
-    try:
-        import requests
-    except ImportError:
+
+    if importlib.util.find_spec('requests') is None:
         missing_deps.append('requests')
-    
-    try:
-        import bs4
-    except ImportError:
+
+    if importlib.util.find_spec('bs4') is None:
         missing_deps.append('beautifulsoup4')
-    
-    try:
-        from easy_xt.config import config
-        from easy_xt import get_advanced_api
-    except ImportError:
+
+    if importlib.util.find_spec('easy_xt') is None:
         missing_deps.append('easy_xt (QMT交易模块)')
-    
+
     if missing_deps:
         print("❌ 缺少以下依赖模块:")
         for dep in missing_deps:
@@ -66,17 +58,17 @@ def check_dependencies():
             elif dep != 'easy_xt (QMT交易模块)':
                 print(f"   pip install {dep}")
         return False
-    
+
     return True
 
 # 导入项目模块
 qmt_available = False
-qmt_config = None
-get_advanced_api = None
+qmt_config: Any = None
+get_advanced_api: Any = None
 
 try:
-    from easy_xt.config import config as qmt_config
     from easy_xt import get_advanced_api
+    from easy_xt.config import config as qmt_config
     qmt_available = True
 except ImportError as e:
     print(f"⚠️ QMT模块导入失败: {e}")
@@ -88,22 +80,22 @@ try:
     xueqiu_follow_path = os.path.join(project_root, 'strategies', 'xueqiu_follow')
     if xueqiu_follow_path not in sys.path:
         sys.path.insert(0, xueqiu_follow_path)
-    
+
     # 添加utils目录到路径
     utils_path = os.path.join(xueqiu_follow_path, 'utils')
     if utils_path not in sys.path:
         sys.path.insert(0, utils_path)
-    
+
     # 添加core目录到路径
     core_path = os.path.join(xueqiu_follow_path, 'core')
     if core_path not in sys.path:
         sys.path.insert(0, core_path)
-    
-    from core.config_manager import ConfigManager
-    from core.xueqiu_collector_real import XueqiuCollectorReal
-    from core.trade_executor import TradeExecutor
-    from core.risk_manager import RiskManager
-    from core.strategy_engine import StrategyEngine
+
+    from strategies.xueqiu_follow.core.config_manager import ConfigManager
+    from strategies.xueqiu_follow.core.risk_manager import RiskManager
+    from strategies.xueqiu_follow.core.strategy_engine import StrategyEngine
+    from strategies.xueqiu_follow.core.trade_executor import TradeExecutor
+    from strategies.xueqiu_follow.core.xueqiu_collector_real import XueqiuCollectorReal
     print("✅ 模块导入成功")
 except ImportError as e:
     print(f"❌ 模块导入失败: {e}")
@@ -116,7 +108,7 @@ def print_banner():
     print("=" * 70)
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     try:
-        from core.config_manager import ConfigManager as _Cfg
+        from strategies.xueqiu_follow.core.config_manager import ConfigManager as _Cfg
         _cfg = _Cfg()
         portfolios = _cfg.get_portfolios()
         enabled_names = [str(p.get('name') or p.get('code')) for p in portfolios if p.get('enabled', False)]
@@ -125,7 +117,7 @@ def print_banner():
         combo_str = '未配置'
     print(f"📊 跟单组合: {combo_str}")
     try:
-        from core.config_manager import ConfigManager as _Cfg2
+        from strategies.xueqiu_follow.core.config_manager import ConfigManager as _Cfg2
         _cfg2 = _Cfg2()
         account_id = _cfg2.get_setting('settings.account.account_id')
         account_str = str(account_id) if account_id else '未配置'
@@ -137,39 +129,43 @@ def print_banner():
 
 def check_qmt_config(config_file_path: str) -> bool:
     """检查 QMT 配置（优先使用配置文件路径，兜底自动检测）
-    
+
     Args:
         config_file_path: 配置文件中的 QMT 路径
     """
     print("\n🔍 检查 QMT 配置...")
-    
-    if not qmt_available:
+
+    if not qmt_available or qmt_config is None:
         print("❌ QMT 模块不可用")
         return False
-    
+
     try:
         # 第一优先级：使用配置文件中的路径
         if config_file_path:
             print(f"📁 尝试使用配置文件中的 QMT 路径: {config_file_path}")
-            
+
             # 处理可能的 userdata_mini 后缀
             if config_file_path.endswith('/userdata_mini') or config_file_path.endswith('\\userdata_mini'):
                 qmt_base_path = os.path.dirname(config_file_path)
             else:
                 qmt_base_path = config_file_path
-            
+
             # 验证配置文件路径
-            if qmt_config.set_qmt_path(qmt_base_path):
+            if qmt_config and qmt_config.set_qmt_path(qmt_base_path):
                 print("✅ 配置文件中的 QMT 路径设置成功")
                 return True
             else:
                 print(f"❌ 配置文件中的 QMT 路径无效: {qmt_base_path}")
-        
+
         # 第二优先级：自动检测路径（兜底）
         print("🔧 尝试自动检测 QMT 路径...")
-        qmt_config.print_qmt_status()
-        
+        if qmt_config:
+            qmt_config.print_qmt_status()
+
         # 验证自动检测的配置
+        if not qmt_config:
+            print("❌ QMT 配置未初始化")
+            return False
         is_valid, msg = qmt_config.validate_qmt_setup()
         if is_valid:
             print(f"✅ 自动检测 QMT 路径成功: {msg}")
@@ -177,7 +173,7 @@ def check_qmt_config(config_file_path: str) -> bool:
         else:
             print(f"❌ 自动检测 QMT 路径失败: {msg}")
             return False
-            
+
     except Exception as e:
         print(f"❌ QMT 配置检查异常: {e}")
         return False
@@ -185,38 +181,41 @@ def check_qmt_config(config_file_path: str) -> bool:
 def test_qmt_connection() -> bool:
     """测试 QMT 连接"""
     print("\n🔗 测试 QMT 连接...")
-    
-    if not qmt_available:
+
+    if not qmt_available or qmt_config is None:
         print("❌ QMT 模块不可用")
         return False
-    
+
     try:
         # 获取 API
+        if not get_advanced_api:
+            print("❌ 交易API不可用")
+            return False
         api = get_advanced_api()
-        
+
         # 获取连接参数
-        userdata_path = qmt_config.get_userdata_path()
+        userdata_path = qmt_config.get_userdata_path() if qmt_config else None
         if not userdata_path:
             print("❌ 无法获取 userdata 路径")
             return False
-        
+
         print(f"📁 userdata 路径: {userdata_path}")
-        
+
         # 连接测试
         print("🔌 正在连接交易服务...")
         success = api.connect(userdata_path, session_id="xueqiu_test")
-        
+
         if success:
             print("✅ 交易服务连接成功")
-            
+
             # 测试账户
             account_id = "39020958"
             print(f"👤 测试账户: {account_id}")
-            
+
             account_success = api.add_account(account_id, "STOCK")
             if account_success:
                 print("✅ 账户添加成功")
-                
+
                 # 简单查询测试
                 try:
                     asset = api.get_account_asset_detailed(account_id)
@@ -228,7 +227,7 @@ def test_qmt_connection() -> bool:
                     print(f"⚠️ 账户查询失败: {e}")
             else:
                 print("❌ 账户添加失败")
-            
+
             # 断开连接
             api.disconnect()
             print("✅ 连接测试完成")
@@ -236,70 +235,70 @@ def test_qmt_connection() -> bool:
         else:
             print("❌ 交易服务连接失败")
             return False
-            
+
     except Exception as e:
         print(f"❌ 连接测试异常: {e}")
         return False
 
-def load_config() -> Optional[Dict[str, Any]]:
+def load_config() -> Optional[dict[str, Any]]:
     """加载配置"""
     # 尝试加载统一配置文件
     config_path = os.path.join(current_dir, 'config', 'unified_config.json')
-    
+
     if not os.path.exists(config_path):
         # 如果统一配置文件不存在，尝试其他配置文件
         config_path = os.path.join(current_dir, 'config', 'portfolios.json')
         if not os.path.exists(config_path):
             print("❌ 未找到配置文件")
             return None
-    
+
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
+        with open(config_path, encoding='utf-8') as f:
             config_data = json.load(f)
-        
+
         print("✅ 配置文件加载成功")
-        
+
         # 显示关键配置
         account_id = config_data.get('settings', {}).get('account', {}).get('account_id', '未配置')
         trade_mode = config_data.get('settings', {}).get('trading', {}).get('trade_mode', 'paper_trading')
-        
+
         # 获取组合信息
         portfolios = config_data.get('portfolios', {}).get('portfolios', [])
         portfolio_names = [p.get('name', '未知') for p in portfolios if p.get('enabled', False)]
-        
+
         # 检查雪球cookie配置
         xueqiu_cookie = config_data.get('xueqiu_settings', {}).get('cookie', '')
         if xueqiu_cookie:
             print("✅ 雪球cookie配置已加载")
         else:
             print("⚠️ 雪球cookie未配置，可能无法获取真实持仓数据")
-        
+
         print(f"🏦 交易账号: {account_id}")
         print(f"💼 交易模式: {trade_mode}")
         if portfolio_names:
             print(f"📊 跟单组合: {', '.join(portfolio_names)}")
         else:
             print("📊 跟单组合: 未配置")
-        
+
         return config_data
-        
+
     except Exception as e:
         print(f"❌ 配置文件加载失败: {e}")
         return None
 
-def update_config_with_qmt(config_data: Dict[str, Any]) -> Dict[str, Any]:
+def update_config_with_qmt(config_data: dict[str, Any]) -> dict[str, Any]:
     """使用 QMT 配置更新系统配置"""
     try:
         # 获取 QMT 路径
-        userdata_path = qmt_config.get_userdata_path()
+        userdata_path = qmt_config.get_userdata_path() if qmt_config else None
         if userdata_path:
             config_data['settings']['account']['qmt_path'] = userdata_path
             print(f"✅ 更新 QMT 路径: {userdata_path}")
-        
+
         # 添加 QMT 特定配置
         if 'qmt' not in config_data['settings']:
             config_data['settings']['qmt'] = {}
-        
+
         config_data['settings']['qmt'].update({
             'session_id': 'xueqiu_follow',
             'api_type': 'advanced',
@@ -307,31 +306,31 @@ def update_config_with_qmt(config_data: Dict[str, Any]) -> Dict[str, Any]:
             'retry_count': 3,
             'timeout': 30
         })
-        
+
         print("✅ QMT 配置更新完成")
         return config_data
-        
+
     except Exception as e:
         print(f"❌ QMT 配置更新失败: {e}")
         return config_data
 
 class XueqiuFollowSystem:
     """雪球跟单策略主类"""
-    
-    def __init__(self, config_data: Dict[str, Any]):
+
+    def __init__(self, config_data: dict[str, Any]):
         self.config_data = config_data
-        self.config_manager = None
-        self.collector = None
-        self.executor = None
-        self.risk_manager = None
-        self.strategy_engine = None
+        self.config_manager: Optional[ConfigManager] = None
+        self.collector: Optional[XueqiuCollectorReal] = None
+        self.executor: Optional[TradeExecutor] = None
+        self.risk_manager: Optional[RiskManager] = None
+        self.strategy_engine: Optional[StrategyEngine] = None
         self.running = False
-        
+
     async def initialize(self) -> bool:
         """初始化系统"""
         try:
             print("\n🔧 初始化雪球跟单策略...")
-            
+
             # 初始化配置管理器
             self.config_manager = ConfigManager()
             # 强制启用智能差额跟投，避免重复买入
@@ -352,17 +351,17 @@ class XueqiuFollowSystem:
                     for key, value in self.config_data['xueqiu_settings'].items():
                         self.config_manager.set_setting(f'xueqiu.{key}', value, save=False)
             print("✅ 配置管理器初始化完成")
-            
+
             # 初始化雪球数据收集器（使用真实采集器）
             self.collector = XueqiuCollectorReal()
             # 传递雪球cookie配置
-            if hasattr(self.config_manager, '_xueqiu_settings'):
-                xueqiu_cookie = self.config_manager._xueqiu_settings.get('cookie', '')
-                if xueqiu_cookie:
+            if self.config_manager:
+                xueqiu_cookie = self.config_manager.get_setting('xueqiu.cookie', '')
+                if isinstance(xueqiu_cookie, str) and xueqiu_cookie:
                     print("✅ 使用配置的雪球cookie初始化数据收集器")
             await self.collector.initialize()
             print("✅ 雪球数据收集器初始化完成")
-            
+
             # 启动前主动获取并打印当前持仓（优先历史调仓记录）
             try:
                 portfolios_cfg = getattr(self.config_manager, "_portfolios", {}) or {}
@@ -387,7 +386,7 @@ class XueqiuFollowSystem:
                             if fallback:
                                 holdings = fallback
                                 total_count = len(holdings or [])
-                        
+
                         if holdings:
                             print(f"📊 组合 {code} 当前持仓（基于历史调仓权重）:")
                             for h in holdings:
@@ -407,13 +406,13 @@ class XueqiuFollowSystem:
                     print("ℹ️ 未配置启用的跟单组合，跳过持仓预检")
             except Exception as e:
                 print(f"⚠️ 持仓预检异常: {e}")
-            
+
             # 初始化交易执行器（使用 QMT 配置）
             userdata_path = qmt_config.get_userdata_path() if qmt_config else None
             if not userdata_path:
                 # 如果qmt_config不可用，尝试从配置中获取
                 userdata_path = self.config_data['settings']['account'].get('qmt_path', '')
-            
+
             qmt_config_dict = {
                 'userdata_path': userdata_path,
                 'account_id': self.config_data['settings']['account']['account_id'],
@@ -423,89 +422,96 @@ class XueqiuFollowSystem:
                 'retry_times': 3,
                 'retry_delay': 1
             }
-            
+
             self.executor = TradeExecutor(qmt_config_dict)
             if not await self.executor.initialize():
                 raise Exception("交易执行器初始化失败")
             print("✅ 交易执行器初始化完成")
-            
+
             # 初始化风险管理器
             self.risk_manager = RiskManager(self.config_manager)
             print("✅ 风险管理器初始化完成")
-            
+
             # 初始化策略引擎
             self.strategy_engine = StrategyEngine(self.config_manager)
             await self.strategy_engine.initialize()
             print("✅ 策略引擎初始化完成")
-            
+
             print("🎉 系统初始化完成！")
             return True
-            
+
         except Exception as e:
             print(f"❌ 系统初始化失败: {e}")
             return False
-    
+
     async def start(self):
         """启动系统"""
         try:
             print("\n🚀 启动雪球跟单策略...")
-            
+
             self.running = True
-            
+
             # 启动前先同步一次账户持仓，确保智能差额使用最新持仓
             try:
-                await self.strategy_engine.sync_positions()
+                strategy_engine = self.strategy_engine
+                if strategy_engine is not None:
+                    await strategy_engine.sync_positions()
             except Exception:
                 pass
             # 启动策略引擎
-            await self.strategy_engine.start()
-            
+            strategy_engine = self.strategy_engine
+            if strategy_engine is None:
+                raise RuntimeError("策略引擎未初始化")
+            await strategy_engine.start()
+
             print("✅ 系统启动成功！")
             print("\n📊 系统状态:")
             print("   - 雪球数据收集: 运行中")
             print("   - 交易执行: 就绪")
             print("   - 风险管理: 激活")
             print("   - 策略引擎: 运行中")
-            
+
             # 主循环
             while self.running:
                 try:
                     # 系统状态检查
                     await self._check_system_health()
-                    
+
                     # 等待
                     await asyncio.sleep(10)
-                    
+
                 except KeyboardInterrupt:
                     print("\n⚠️ 收到停止信号...")
                     break
                 except Exception as e:
                     print(f"❌ 系统运行异常: {e}")
                     await asyncio.sleep(5)
-            
+
         except Exception as e:
             print(f"❌ 系统启动失败: {e}")
         finally:
             await self.stop()
-    
+
     async def _check_system_health(self):
         """检查系统健康状态"""
         try:
             # 检查各组件状态
-            if self.collector and hasattr(self.collector, 'health_check'):
-                if not self.collector.health_check():
+            collector = self.collector
+            health_check = getattr(collector, "health_check", None) if collector is not None else None
+            if callable(health_check):
+                if not health_check():
                     print("⚠️ 数据收集器状态异常")
-            
+
             if self.executor and hasattr(self.executor, 'get_execution_stats'):
                 stats = self.executor.get_execution_stats()
                 if stats['total_orders'] > 0:
                     success_rate = stats['success_rate']
                     if success_rate < 0.8:  # 成功率低于80%
                         print(f"⚠️ 交易成功率较低: {success_rate:.2%}")
-            
+
         except Exception as e:
             print(f"⚠️ 健康检查异常: {e}")
-    
+
     async def _fallback_fetch_full_snapshot(self, portfolio_code: str) -> Optional[list]:
         """
         兜底：当默认解析得到的持仓过少时，主动抓取历史调仓数据，选最近的“完整快照型”记录来解析持仓。
@@ -523,33 +529,35 @@ class XueqiuFollowSystem:
             # 从配置管理器拿 cookie（此前已通过 set_setting('xueqiu.cookie', ...) 注入）
             cookie = ""
             try:
-                if hasattr(self.config_manager, "_xueqiu_settings"):
-                    cookie = self.config_manager._xueqiu_settings.get("cookie", "") or ""
+                if self.config_manager:
+                    raw_cookie = self.config_manager.get_setting("xueqiu.cookie", "") or ""
+                    cookie = str(raw_cookie)
             except Exception:
                 pass
             if cookie:
                 headers["Cookie"] = cookie
-            
+
             url = "https://xueqiu.com/cubes/rebalancing/history.json"
-            params = {"cube_symbol": portfolio_code, "count": max_records, "page": 1}
+            params: dict[str, Any] = {"cube_symbol": portfolio_code, "count": max_records, "page": 1}
             resp = requests.get(url, headers=headers, params=params, timeout=10)
             if resp.status_code != 200:
                 print(f"⚠️ 兜底历史API状态码异常: {resp.status_code}")
                 return None
             data = resp.json() if resp.content else {}
             # 常见结构为 {'list': [record,...]}
-            records = []
+            records: list[dict[str, Any]] = []
             if isinstance(data, dict):
                 if isinstance(data.get("list"), list):
                     records = data.get("list") or []
                 elif isinstance(data.get("rebalancings"), list):
                     records = data.get("rebalancings") or []
-            
+
             if not records:
                 return None
-            
+
             # 选取最近满足条件的快照
-            import math, time as _t
+            import math
+            import time as _t
             now_ms = int(_t.time() * 1000)
             chosen = None
             best = None  # 保存持仓数量最多且时间最近的记录
@@ -569,13 +577,15 @@ class XueqiuFollowSystem:
                     break
             if chosen is None:
                 chosen = best
-            
+
+            if chosen is None:
+                return None
             histories = chosen.get("rebalancing_histories", []) or []
             if not histories:
                 return None
-            
+
             # 解析为 holdings
-            parsed = []
+            parsed: list[dict[str, Any]] = []
             for h in histories:
                 if not isinstance(h, dict):
                     continue
@@ -607,12 +617,14 @@ class XueqiuFollowSystem:
           - 将最新权重 > 0 的持仓输出为列表（包含 symbol/name/target_weight）
         """
         try:
-            import requests, math, time as _t
+
+            import requests
             headers = { "User-Agent": "Mozilla/5.0" }
             # 从配置管理器拿 cookie
             try:
-                if hasattr(self.config_manager, "_xueqiu_settings"):
-                    cookie = self.config_manager._xueqiu_settings.get("cookie", "") or ""
+                if self.config_manager:
+                    raw_cookie = self.config_manager.get_setting("xueqiu.cookie", "") or ""
+                    cookie = str(raw_cookie)
                     if cookie:
                         headers["Cookie"] = cookie
             except Exception:
@@ -624,13 +636,13 @@ class XueqiuFollowSystem:
             max_pages = 5
             page_size = 50
             for page in range(1, max_pages + 1):
-                params = {"cube_symbol": portfolio_code, "count": page_size, "page": page}
+                params: dict[str, Any] = {"cube_symbol": portfolio_code, "count": page_size, "page": page}
                 resp = requests.get(url, headers=headers, params=params, timeout=10)
                 if resp.status_code != 200:
                     # 如果某页失败，停止进一步分页
                     break
                 data = resp.json() if resp.content else {}
-                records = []
+                records: list[dict[str, Any]] = []
                 if isinstance(data, dict):
                     if isinstance(data.get("list"), list):
                         records = data.get("list") or []
@@ -647,8 +659,8 @@ class XueqiuFollowSystem:
             # 按时间升序回放
             all_records.sort(key=lambda r: (r.get("created_at") or 0))
 
-            weights = {}  # symbol -> 最终权重(0-1)
-            names = {}    # symbol -> 最新名称
+            weights: dict[str, float] = {}
+            names: dict[str, str] = {}
             for r in all_records:
                 histories = r.get("rebalancing_histories", []) or []
                 if not isinstance(histories, list):
@@ -689,80 +701,80 @@ class XueqiuFollowSystem:
         except Exception as e:
             print(f"⚠️ 重放解析异常: {e}")
             return None
-    
+
     async def stop(self):
         """停止系统"""
         try:
             print("\n🛑 停止雪球跟单策略...")
-            
+
             self.running = False
-            
+
             # 停止各组件
             if self.strategy_engine:
                 await self.strategy_engine.stop()
                 print("✅ 策略引擎已停止")
-            
+
             if self.executor:
                 await self.executor.close()
                 print("✅ 交易执行器已关闭")
-            
+
             if self.collector:
                 await self.collector.close()
                 print("✅ 数据收集器已关闭")
-            
+
             print("✅ 系统已安全停止")
-            
+
         except Exception as e:
             print(f"❌ 系统停止异常: {e}")
 
 async def main():
     """主函数"""
     print_banner()
-    
+
     # 1. 检查依赖
     if not check_dependencies():
         return
-    
+
     # 2. 加载配置
     config_data = load_config()
     if not config_data:
         return
-    
+
     # 3. 获取配置文件中的 QMT 路径
     config_file_qmt_path = config_data.get('settings', {}).get('account', {}).get('qmt_path', '')
-    
+
     # 4. 检查 QMT 配置（优先使用配置文件路径，兜底自动检测）
     if not check_qmt_config(config_file_qmt_path):
         print("\n❌ QMT 配置检查失败，请运行测试脚本:")
         print("   python test_qmt_connection.py")
         return
-    
+
     # 5. 测试 QMT 连接
     if not test_qmt_connection():
         print("\n❌ QMT 连接测试失败")
         return
-    
+
     # 6. 更新配置
     config_data = update_config_with_qmt(config_data)
-    
+
     # 7. 安全确认
     if config_data['settings']['trading']['trade_mode'] == 'real':
         print("\n⚠️ 警告：当前配置为真实交易模式！")
         print("   这将执行真实的买卖操作，可能造成资金损失")
-        
+
         if not config_data.get('safety', {}).get('auto_confirm', False):
             confirm = input("\n请输入 'YES' 确认启动真实交易: ")
             if confirm != 'YES':
                 print("❌ 用户取消启动")
                 return
-        
+
         print("✅ 真实交易模式确认")
     else:
         print("✅ 模拟交易模式")
-    
+
     # 8. 启动系统
     system = XueqiuFollowSystem(config_data)
-    
+
     if await system.initialize():
         try:
             await system.start()

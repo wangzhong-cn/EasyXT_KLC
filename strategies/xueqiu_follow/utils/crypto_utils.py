@@ -2,30 +2,30 @@
 加密工具模块
 """
 
+import base64
 import hashlib
 import hmac
-import base64
 import time
-import os
-from typing import Dict, Any
+from typing import Any
+
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 
-def generate_signature(data: Dict[str, Any], secret_key: str) -> str:
+def generate_signature(data: dict[str, Any], secret_key: str) -> str:
     """生成请求签名"""
-    
+
     # 对参数进行排序
     sorted_params = sorted(data.items())
-    
+
     # 构建签名字符串
     sign_string = "&".join([f"{k}={v}" for k, v in sorted_params])
     sign_string += f"&key={secret_key}"
-    
+
     # 生成MD5签名
     signature = hashlib.md5(sign_string.encode('utf-8')).hexdigest()
-    
+
     return signature.upper()
 
 
@@ -51,7 +51,7 @@ def generate_hmac_sha256(data: str, key: str) -> str:
         data.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
-    
+
     return signature
 
 
@@ -61,7 +61,7 @@ def _get_encryption_key() -> bytes:
     # 在实际生产环境中，应该使用更安全的密钥管理方式
     password = b"xueqiu_follow_strategy_2024"
     salt = b"xueqiu_salt_2024"
-    
+
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -75,16 +75,16 @@ def _get_encryption_key() -> bytes:
 def encrypt_password(password: str) -> str:
     """
     加密密码
-    
+
     Args:
         password: 明文密码
-        
+
     Returns:
         加密后的密码（Base64编码）
     """
     if not password:
         return ""
-    
+
     try:
         key = _get_encryption_key()
         f = Fernet(key)
@@ -97,16 +97,16 @@ def encrypt_password(password: str) -> str:
 def decrypt_password(encrypted_password: str) -> str:
     """
     解密密码
-    
+
     Args:
         encrypted_password: 加密的密码（Base64编码）
-        
+
     Returns:
         明文密码
     """
     if not encrypted_password:
         return ""
-    
+
     try:
         key = _get_encryption_key()
         f = Fernet(key)
@@ -120,10 +120,10 @@ def decrypt_password(encrypted_password: str) -> str:
 def hash_password(password: str) -> str:
     """
     对密码进行哈希处理（用于验证）
-    
+
     Args:
         password: 明文密码
-        
+
     Returns:
         哈希后的密码
     """
@@ -133,11 +133,11 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed_password: str) -> bool:
     """
     验证密码
-    
+
     Args:
         password: 明文密码
         hashed_password: 哈希后的密码
-        
+
     Returns:
         验证结果
     """

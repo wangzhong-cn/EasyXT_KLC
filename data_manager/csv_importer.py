@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 CSV导入工具
 支持从CSV文件导入股票列表和自定义数据
 """
 
+from typing import Optional
+
 import pandas as pd
-from typing import List, Dict, Optional
-from pathlib import Path
 
 
 class CSVImporter:
@@ -17,7 +16,7 @@ class CSVImporter:
         """初始化CSV导入器"""
         pass
 
-    def load_stock_list(self, csv_path: str) -> List[str]:
+    def load_stock_list(self, csv_path: str) -> list[str]:
         """
         从CSV加载股票列表
 
@@ -39,7 +38,7 @@ class CSVImporter:
             code_col = self._find_code_column(df)
 
             if code_col is None:
-                print(f"[ERROR] CSV中未找到股票代码列")
+                print("[ERROR] CSV中未找到股票代码列")
                 print(f"  可用列: {list(df.columns)}")
                 return []
 
@@ -73,7 +72,7 @@ class CSVImporter:
         # 如果没找到，使用第一列
         return df.columns[0] if len(df.columns) > 0 else None
 
-    def _normalize_stock_codes(self, stocks: List[str]) -> List[str]:
+    def _normalize_stock_codes(self, stocks: list[str]) -> list[str]:
         """标准化股票代码"""
         normalized = []
 
@@ -199,7 +198,7 @@ class CSVImporter:
 
         return None
 
-    def export_stock_list(self, stocks: List[str], csv_path: str):
+    def export_stock_list(self, stocks: list[str], csv_path: str):
         """
         导出股票列表到CSV
 

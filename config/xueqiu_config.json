@@ -4,6 +4,8 @@
     "follow_ratio": 0.38,
     "max_position": 10000,
     "trade_mode": "real",
-    "qmt_path": "D:/国金QMT交易端模拟/userdata_mini",
-    "account_id": "39020958"
+    "qmt_path": "D:/申万宏源策略量化交易终端/bin.x64/XtItClient.exe",
+    "qmt_userdata_path": "D:/申万宏源策略量化交易终端/userdata_mini",
+    "account_id": "__REPLACE_ACCOUNT_ID__",
+    "password": "__REPLACE_PASSWORD__"
 }

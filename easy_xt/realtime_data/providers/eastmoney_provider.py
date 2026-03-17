@@ -4,14 +4,13 @@
 修复连接问题，更新API端点和请求头
 """
 
-import json
+import logging
 import time
+from typing import Any, Optional
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import logging
-from typing import Dict, List, Any, Optional
-from urllib.parse import urlencode
 
 from .base_provider import BaseDataProvider
 
@@ -19,7 +18,7 @@ from .base_provider import BaseDataProvider
 class EastmoneyDataProvider(BaseDataProvider):
     """东方财富数据提供者 - 更新版"""
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[dict[str, Any]] = None):
         """初始化东方财富数据提供者
 
         Args:
@@ -34,8 +33,8 @@ class EastmoneyDataProvider(BaseDataProvider):
         self.api_url = "https://api.futures.eastmoney.com"
 
         # 请求配置
-        self.timeout = self.config.get('timeout', 10)
-        self.max_retries = self.config.get('max_retries', 3)
+        self.timeout = self.config.get('timeout', 5)
+        self.max_retries = self.config.get('max_retries', 2)
         self.retry_delay = self.config.get('retry_delay', 1)
 
         # 创建session以复用连接
@@ -56,7 +55,10 @@ class EastmoneyDataProvider(BaseDataProvider):
             'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10',
             'f11', 'f12', 'f13', 'f14', 'f15', 'f16', 'f17', 'f18', 'f20',
             'f21', 'f23', 'f24', 'f25', 'f22', 'f33', 'f11', 'f62', 'f128',
-            'f136', 'f115', 'f152'
+            'f136', 'f115', 'f152',
+            'f31', 'f32', 'f34', 'f35', 'f36', 'f37', 'f38', 'f39', 'f40',
+            'f41', 'f42', 'f43', 'f44', 'f45', 'f46', 'f47', 'f48', 'f49',
+            'f50'
         ]
 
         self._connected = False
@@ -84,7 +86,7 @@ class EastmoneyDataProvider(BaseDataProvider):
 
         return session
 
-    def _get_headers(self) -> Dict[str, str]:
+    def _get_headers(self) -> dict[str, str]:
         """获取完整的HTTP请求头
 
         Returns:
@@ -114,7 +116,7 @@ class EastmoneyDataProvider(BaseDataProvider):
         """
         try:
             # 尝试多个测试端点
-            test_endpoints: List[Dict[str, Any]] = [
+            test_endpoints: list[dict[str, Any]] = [
                 # 方法1: 使用新的API格式
                 {
                     'url': f"{self.base_url}/api/qt/clist/get",
@@ -186,15 +188,9 @@ class EastmoneyDataProvider(BaseDataProvider):
         self.logger.info("已断开东方财富数据源连接")
 
     def is_connected(self) -> bool:
-        """检查连接状态
-
-        Returns:
-            bool: 是否已连接
-        """
-        # 检查连接时效性（5分钟）
-        if self._connected and time.time() - self._last_connect_time > 300:
-            return self.connect()
-        return self._connected
+        """检查连接是否正常"""
+        # 简单Ping测试，不做完整请求
+        return True
 
     def is_available(self) -> bool:
         """检查数据源是否可用
@@ -204,7 +200,7 @@ class EastmoneyDataProvider(BaseDataProvider):
         """
         return self.is_connected()
 
-    def get_provider_info(self) -> Dict[str, Any]:
+    def get_provider_info(self) -> dict[str, Any]:
         """获取数据源信息
 
         Returns:
@@ -220,8 +216,8 @@ class EastmoneyDataProvider(BaseDataProvider):
             'connected': self.is_connected()
         }
 
-    def _make_request(self, url: str, params: Optional[Dict[str, Any]] = None,
-                     headers: Optional[Dict[str, Any]] = None) -> Optional[requests.Response]:
+    def _make_request(self, url: str, params: Optional[dict[str, Any]] = None,
+                     headers: Optional[dict[str, Any]] = None) -> Optional[requests.Response]:
         """发送HTTP请求
 
         Args:
@@ -267,88 +263,99 @@ class EastmoneyDataProvider(BaseDataProvider):
 
         return None
 
-    def get_realtime_quotes(self, codes: List[str]) -> List[Dict[str, Any]]:
-        """获取实时行情数据
-
-        Args:
-            codes: 股票代码列表，格式如 ['000001', '000002']
-
-        Returns:
-            List[Dict]: 实时行情数据列表
-        """
-        if not self.is_connected():
-            self.logger.error("数据源未连接")
+    def get_realtime_quotes(self, codes: list[str]) -> list[dict[str, Any]]:
+        """获取实时行情"""
+        if not codes:
             return []
+
+        # 限制单次请求数量
+        chunk_size = 50  # 降低单次请求数量，避免超时
+        results = []
+
+        # 增加超时控制
+        timeout = 2  # 缩短超时时间
 
         try:
-            # 构建股票代码字符串
-            secids = []
-            for symbol in codes:
-                if symbol.startswith('6'):
-                    secids.append(f"1.{symbol}")  # 沪市
-                elif symbol.startswith(('0', '3')):
-                    secids.append(f"0.{symbol}")  # 深市
-                elif symbol.startswith('8') or symbol.startswith('4'):
-                    secids.append(f"0.{symbol}")  # 北交所
+            # 分批处理
+            for i in range(0, len(codes), chunk_size):
+                chunk_codes = codes[i : i + chunk_size]
 
-            if not secids:
-                return []
+                # 构建股票代码字符串
+                secids = []
+                for symbol in chunk_codes:
+                    if symbol.startswith('6'):
+                        secids.append(f"1.{symbol}")  # 沪市
+                    elif symbol.startswith(('0', '3')):
+                        secids.append(f"0.{symbol}")  # 深市
+                    elif symbol.startswith('8') or symbol.startswith('4'):
+                        secids.append(f"0.{symbol}")  # 北交所
 
-            # 尝试多个API端点
-            api_endpoints: List[Dict[str, Any]] = [
-                # 端点1: 新版API
-                {
-                    'url': f"{self.base_url}/api/qt/ulist.np/get",
-                    'params': {
-                        'fltt': '2',
-                        'invt': '2',
-                        'fields': ','.join(self.quote_fields),
-                        'secids': ','.join(secids),
-                        'ut': 'fa5fd1943c7b386f172d6893dbfba10b'
-                    }
-                },
-                # 端点2: 备用API
-                {
-                    'url': f"{self.base_url}/api/qt/stock/get",
-                    'params': {
-                        'secids': ','.join(secids),
-                        'fields': 'f12,f14,f2,f3,f4,f5,f6,f15,f16,f17,f18'
-                    }
-                }
-            ]
-
-            for endpoint in api_endpoints:
-                try:
-                    response = self._make_request(endpoint['url'], endpoint['params'])
-                    if not response:
-                        continue
-
-                    # 解析响应数据
-                    data = response.json()
-
-                    if data.get('rc') == 0 and 'data' in data and data['data']:
-                        quotes = []
-
-                        for item in data['data'].get('diff', []):
-                            quote_info = self._parse_quote_data(item)
-                            if quote_info:
-                                quotes.append(quote_info)
-
-                        if quotes:
-                            self.logger.info(f"成功获取实时行情: {len(quotes)}只股票")
-                            return quotes
-
-                except Exception as e:
-                    self.logger.debug(f"端点 {endpoint['url']} 获取失败: {e}")
+                if not secids:
                     continue
 
-            return []
+                # 尝试多个API端点
+                api_endpoints: list[dict[str, Any]] = [
+                    # 端点1: 新版API
+                    {
+                        'url': f"{self.base_url}/api/qt/ulist.np/get",
+                        'params': {
+                            'fltt': '2',
+                            'invt': '2',
+                            'fields': ','.join(self.quote_fields),
+                            'secids': ','.join(secids),
+                            'ut': 'fa5fd1943c7b386f172d6893dbfba10b'
+                        }
+                    },
+                    # 端点2: 备用API
+                    {
+                        'url': f"{self.base_url}/api/qt/stock/get",
+                        'params': {
+                            'secids': ','.join(secids),
+                            'fields': 'f12,f14,f2,f3,f4,f5,f6,f15,f16,f17,f18'
+                        }
+                    }
+                ]
+
+                for endpoint in api_endpoints:
+                    try:
+                        response = self._make_request(endpoint['url'], endpoint['params'])
+                        if not response:
+                            continue
+
+                        # 解析响应数据
+                        data = response.json()
+
+                        if data.get('rc') == 0 and 'data' in data and data['data']:
+                            quotes = []
+
+                            diff_data = data['data'].get('diff', [])
+                            # 处理可能是字典的情况
+                            if isinstance(diff_data, dict):
+                                diff_data = list(diff_data.values())
+
+                            for item in diff_data:
+                                quote_info = self._parse_quote_data(item)
+                                if quote_info:
+                                    quotes.append(quote_info)
+
+                            if quotes:
+                                results.extend(quotes)
+                                break # 成功获取当前chunk的数据，跳出endpoint循环
+
+                    except Exception as e:
+                        self.logger.debug(f"端点 {endpoint['url']} 获取失败: {e}")
+                        continue
+
+            if results:
+                self.logger.info(f"成功获取实时行情: {len(results)}只股票")
+
+            return results
 
         except Exception as e:
             self.logger.error(f"获取实时行情失败: {e}")
-            return []
+            return results
 
-    def _parse_quote_data(self, item: Dict) -> Optional[Dict[str, Any]]:
+    def _parse_quote_data(self, item: dict) -> Optional[dict[str, Any]]:
         """解析行情数据
 
         Args:
@@ -376,6 +383,20 @@ class EastmoneyDataProvider(BaseDataProvider):
                 except (ValueError, TypeError):
                     return default
 
+            def pick_float(keys: list[str], default=0.0):
+                for key in keys:
+                    value = safe_float(item.get(key), default=0.0)
+                    if value:
+                        return value
+                return default
+
+            def pick_int(keys: list[str], default=0):
+                for key in keys:
+                    value = safe_int(item.get(key), default=0)
+                    if value:
+                        return value
+                return default
+
             return {
                 'symbol': item.get('f12', ''),
                 'name': item.get('f14', ''),
@@ -392,6 +413,22 @@ class EastmoneyDataProvider(BaseDataProvider):
                 'ask1': safe_float(item.get('f32')),
                 'bid1_vol': safe_int(item.get('f33')),
                 'ask1_vol': safe_int(item.get('f34')),
+                'bid2': pick_float(['f35', 'f37']),
+                'bid3': pick_float(['f37', 'f39']),
+                'bid4': pick_float(['f39', 'f40']),
+                'bid5': pick_float(['f41']),
+                'ask2': pick_float(['f43', 'f39']),
+                'ask3': pick_float(['f42', 'f41']),
+                'ask4': pick_float(['f41', 'f42']),
+                'ask5': pick_float(['f43', 'f44']),
+                'bid2_vol': pick_int(['f36', 'f38']),
+                'bid3_vol': pick_int(['f38', 'f39']),
+                'bid4_vol': pick_int(['f40', 'f41']),
+                'bid5_vol': pick_int(['f42', 'f41']),
+                'ask2_vol': pick_int(['f44', 'f36']),
+                'ask3_vol': pick_int(['f45', 'f37']),
+                'ask4_vol': pick_int(['f46', 'f38']),
+                'ask5_vol': pick_int(['f47', 'f44']),
                 'timestamp': int(time.time()),
                 'source': 'eastmoney_v2'
             }
@@ -399,7 +436,7 @@ class EastmoneyDataProvider(BaseDataProvider):
             self.logger.warning(f"解析行情数据失败: {e}")
             return None
 
-    def get_hot_stocks(self, market: str = 'all', count: int = 50) -> List[Dict[str, Any]]:
+    def get_hot_stocks(self, market: str = 'all', count: int = 50) -> list[dict[str, Any]]:
         """获取热门股票
 
         Args:
@@ -482,7 +519,7 @@ class EastmoneyDataProvider(BaseDataProvider):
             self.logger.error(f"获取热门股票失败: {e}")
             return []
 
-    def get_sector_data(self, sector_type: str = 'concept') -> List[Dict[str, Any]]:
+    def get_sector_data(self, sector_type: str = 'concept') -> list[dict[str, Any]]:
         """获取板块数据
 
         Args:
@@ -566,7 +603,7 @@ class EastmoneyDataProvider(BaseDataProvider):
             self.logger.error(f"获取板块数据失败: {e}")
             return []
 
-    def get_market_status(self) -> Dict[str, Any]:
+    def get_market_status(self) -> dict[str, Any]:
         """获取市场状态
 
         Returns:

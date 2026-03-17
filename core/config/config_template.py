@@ -2,16 +2,17 @@
 配置文件模板
 请复制此文件为 config.py 并修改相应配置
 """
+import os
 
 # =============================================================================
 # QMT客户端配置
 # =============================================================================
 
 # 迅投QMT客户端userdata路径（必须修改）
-USERDATA_PATH = r'D:\国金QMT交易端模拟\userdata_mini'
+USERDATA_PATH = r'D:\申万宏源策略量化交易终端\userdata_mini'
 
-# 资金账号（必须修改）
-ACCOUNT_ID = "39020958"
+# 资金账号（必须修改，通过环境变量 EASYXT_ACCOUNT_ID 注入）
+ACCOUNT_ID = os.environ.get("EASYXT_ACCOUNT_ID", "")
 
 # 会话ID（可选，用于区分不同的交易会话）
 SESSION_ID = "miniqmt_session"

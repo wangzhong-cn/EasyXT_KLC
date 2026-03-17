@@ -1,7 +1,8 @@
-import pandas as pd
-from tdxtrader.logger import logger
-from tdxtrader.anis import RED, GREEN, YELLOW, BLUE, RESET
 import os
+
+import pandas as pd
+
+from tdxtrader.logger import logger
 
 # 定义列名
 COLUMNS = ['code', 'name', 'date', 'time', 'price', 'rate', 'value', 'sign']
@@ -45,11 +46,11 @@ def read_file(file_path):
     读取文件并处理错误，支持多种编码格式。
     """
     encodings = ['gbk', 'gb2312', 'utf-8']
-    
+
     for encoding in encodings:
         try:
             # 检查文件是否为空
-            with open(file_path, 'r', encoding=encoding, errors='ignore') as file:
+            with open(file_path, encoding=encoding, errors='ignore') as file:
                 first_line = file.readline()
                 if not first_line:  # 文件为空
                     # 创建空的DataFrame
@@ -58,7 +59,7 @@ def read_file(file_path):
 
             # 逐行读取文件并处理
             rows = []
-            with open(file_path, 'r', encoding=encoding, errors='ignore') as file:
+            with open(file_path, encoding=encoding, errors='ignore') as file:
                 for line in file:
                     processed_line = process_line(line)  # 处理每一行
                     if processed_line:  # 如果处理成功
@@ -83,7 +84,7 @@ def read_file(file_path):
         except Exception as e:
             logger.error(f"读取文件时发生错误: {e}")
             continue
-    
+
     logger.error("所有编码尝试均失败")
     return None
 
@@ -94,7 +95,7 @@ def clear_file_content(file_path):
             # 写入表头
             # header = ' '.join(COLUMNS) + '\n'
             # file.write(header)
-        logger.info(f"【重置文件】内容已清空")
+        logger.info("【重置文件】内容已清空")
     except Exception as e:
         logger.error(f"清空文件内容时发生错误: {e}")
 
@@ -110,19 +111,19 @@ def read_block_file(block_file_path):
         if not os.path.exists(block_file_path):
             logger.warning(f"板块文件不存在: {block_file_path}")
             return stocks
-            
+
         # 检查文件是否为空
         if os.path.getsize(block_file_path) == 0:
             logger.info(f"板块文件为空: {block_file_path}")
             return stocks
-            
+
         # 通达信板块文件使用GBK编码
         encodings = ['gbk', 'gb2312', 'utf-8']
-        
+
         for encoding in encodings:
             try:
                 stocks = []
-                with open(block_file_path, 'r', encoding=encoding, errors='ignore') as file:
+                with open(block_file_path, encoding=encoding, errors='ignore') as file:
                     for line in file:
                         line = line.strip()
                         # 跳过空行
@@ -137,7 +138,7 @@ def read_block_file(block_file_path):
                         # 处理带市场后缀的代码（如000001.SZ）
                         elif '.' in line and len(line.split('.')[0]) == 6 and line.split('.')[0].isdigit():
                             stocks.append(line.split('.')[0])
-                
+
                 if stocks:
                     logger.info(f"从板块文件 {os.path.basename(block_file_path)} 读取到 {len(stocks)} 只股票: {stocks}")
                     return stocks
@@ -149,7 +150,7 @@ def read_block_file(block_file_path):
             except Exception as e:
                 logger.error(f"使用编码 {encoding} 读取板块文件时发生错误: {e}")
                 continue
-                
+
         logger.warning(f"无法使用任何编码读取板块文件: {block_file_path}")
         return stocks
     except Exception as e:

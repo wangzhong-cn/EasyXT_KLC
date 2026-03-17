@@ -1,0 +1,16 @@
+{
+  "symbols": [
+    "000001.SZ",
+    "000300.SH",
+    "510300.SH",
+    "600519.SH"
+  ],
+  "start_date": "2024-01-01",
+  "end_date": "2024-12-31",
+  "period": "1d",
+  "thresholds": {
+    "close_rel_p95_max": 0.02,
+    "volume_rel_p95_max": 0.35,
+    "overlap_ratio_min": 0.9
+  }
+}

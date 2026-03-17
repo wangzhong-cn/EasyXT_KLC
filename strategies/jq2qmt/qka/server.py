@@ -1,14 +1,17 @@
-from fastapi import FastAPI, HTTPException, Header, Depends
-from pydantic import BaseModel
-import inspect
-from typing import Any, Dict
-from qka.trade import create_trader
-import uvicorn
-import uuid
 import hashlib
+import inspect
+import uuid
+from typing import Any, Optional
+
+import uvicorn
+from fastapi import Depends, FastAPI, Header, HTTPException
+from pydantic import BaseModel
+
+from qka.trade import create_trader
+
 
 class QMTServer:
-    def __init__(self, account_id: str, mini_qmt_path: str, host: str = "0.0.0.0", port: int = 8000, token: str = None):
+    def __init__(self, account_id: str, mini_qmt_path: str, host: str = "0.0.0.0", port: int = 8000, token: Optional[str] = None):
         """初始化交易服务器
         Args:
             account_id: 账户ID
@@ -62,8 +65,8 @@ class QMTServer:
         elif hasattr(obj, '__dir__'):
             attrs = obj.__dir__()
             # 过滤掉内部属性和方法
-            public_attrs = {attr: getattr(obj, attr) 
-                           for attr in attrs 
+            public_attrs = {attr: getattr(obj, attr)
+                           for attr in attrs
                            if not attr.startswith('_') and not callable(getattr(obj, attr))}
             return public_attrs
         # 其他类型直接返回
@@ -73,12 +76,12 @@ class QMTServer:
         """将 XtQuantTrader 方法转换为 FastAPI 端点"""
         sig = inspect.signature(method)
         param_names = list(sig.parameters.keys())
-        
+
         # 创建动态的请求模型
-        class_fields = {
+        class_fields: dict[str, Any] = {
             '__annotations__': {}  # 添加类型注解字典
         }
-        
+
         for param in param_names:
             if param in ['self', 'account']:
                 continue
@@ -103,13 +106,13 @@ class QMTServer:
     def setup_routes(self):
         """设置所有路由"""
         trader_methods = inspect.getmembers(
-            self.trader.__class__, 
+            self.trader.__class__,
             predicate=lambda x: inspect.isfunction(x) or inspect.ismethod(x)
         )
-        
+
         excluded_methods = {'__init__', '__del__', 'register_callback', 'start', 'stop',
                           'connect', 'sleep', 'run_forever', 'set_relaxed_response_order_enabled'}
-        
+
         for method_name, method in trader_methods:
             if not method_name.startswith('_') and method_name not in excluded_methods:
                 self.convert_method_to_endpoint(method_name, method)
@@ -120,7 +123,7 @@ class QMTServer:
         self.setup_routes()
         uvicorn.run(self.app, host=self.host, port=self.port)
 
-def qmt_server(account_id: str, mini_qmt_path: str, host: str = "0.0.0.0", port: int = 8000, token: str = None):
+def qmt_server(account_id: str, mini_qmt_path: str, host: str = "0.0.0.0", port: int = 8000, token: Optional[str] = None):
     """快速创建并启动服务器的便捷函数"""
     server = QMTServer(account_id, mini_qmt_path, host, port, token)
     server.start()

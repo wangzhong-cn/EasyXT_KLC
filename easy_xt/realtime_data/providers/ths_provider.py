@@ -5,13 +5,14 @@
 参考综合自定义交易系统v5.5.7.6.5项目的成熟实现。
 """
 
-import requests
 import json
-import time
-import random
-from typing import List, Dict, Any, Optional
 import logging
-from urllib.parse import urlencode
+import random
+import time
+from typing import Any, Optional
+
+import requests
+
 from .base_provider import BaseDataProvider
 
 logger = logging.getLogger(__name__)
@@ -19,13 +20,13 @@ logger = logging.getLogger(__name__)
 
 class ThsDataProvider(BaseDataProvider):
     """同花顺数据提供者
-    
+
     提供同花顺热度排行、概念数据等接口。
     """
-    
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+
+    def __init__(self, config: Optional[dict[str, Any]] = None):
         """初始化同花顺数据提供者
-        
+
         Args:
             config: 配置字典，包含URL、请求头等设置
         """
@@ -33,9 +34,9 @@ class ThsDataProvider(BaseDataProvider):
         self.config = config or {}
         self.session = requests.Session()
         self.base_url = self.config.get('base_url', 'http://data.10jqka.com.cn')
-        self.timeout = self.config.get('timeout', 15)
+        self.timeout = self.config.get('timeout', 5)
         self.retry_count = self.config.get('retry_count', 2)
-        
+
         # 设置请求头
         headers = self.config.get('headers', {})
         default_headers = {
@@ -49,7 +50,7 @@ class ThsDataProvider(BaseDataProvider):
         }
         default_headers.update(headers)
         self.session.headers.update(default_headers)
-        
+
         # 热度数据类型映射（基于参考项目）
         self.hot_data_types = {
             '大家都在看': 'normal',
@@ -58,10 +59,10 @@ class ThsDataProvider(BaseDataProvider):
             '价值投资派': 'value',
             '趋势投资派': 'trend'
         }
-    
+
     def connect(self) -> bool:
         """连接到同花顺服务
-        
+
         Returns:
             bool: 连接是否成功
         """
@@ -71,7 +72,7 @@ class ThsDataProvider(BaseDataProvider):
                 f"{self.base_url}/",
                 timeout=self.timeout
             )
-            
+
             if response.status_code == 200:
                 self.connected = True
                 self.logger.info("同花顺服务连接成功")
@@ -79,11 +80,11 @@ class ThsDataProvider(BaseDataProvider):
             else:
                 self.logger.error(f"同花顺服务连接失败，状态码: {response.status_code}")
                 return False
-                
+
         except Exception as e:
             self.logger.error(f"同花顺服务连接异常: {e}")
             return False
-    
+
     def disconnect(self) -> None:
         """断开连接"""
         try:
@@ -92,16 +93,16 @@ class ThsDataProvider(BaseDataProvider):
             self.logger.info("同花顺服务连接已断开")
         except Exception as e:
             self.logger.error(f"断开同花顺服务连接异常: {e}")
-    
-    def _make_request(self, url: str, params: Optional[Dict] = None, 
+
+    def _make_request(self, url: str, params: Optional[dict] = None,
                      method: str = 'GET') -> Optional[requests.Response]:
         """发起HTTP请求
-        
+
         Args:
             url: 请求URL
             params: 请求参数
             method: 请求方法
-            
+
         Returns:
             Response对象或None
         """
@@ -110,38 +111,38 @@ class ThsDataProvider(BaseDataProvider):
                 # 添加随机延迟，避免被限流
                 if attempt > 0:
                     time.sleep(random.uniform(1, 3))
-                
+
                 if method.upper() == 'GET':
                     response = self.session.get(
-                        url, 
-                        params=params, 
+                        url,
+                        params=params,
                         timeout=self.timeout
                     )
                 else:
                     response = self.session.post(
-                        url, 
-                        data=params, 
+                        url,
+                        data=params,
                         timeout=self.timeout
                     )
-                
+
                 if response.status_code == 200:
                     return response
                 else:
                     self.logger.warning(f"请求失败，状态码: {response.status_code}")
-                    
+
             except Exception as e:
                 self.logger.error(f"请求异常 (尝试 {attempt + 1}/{self.retry_count}): {e}")
-                
+
         return None
-    
-    def get_hot_stock_rank(self, data_type: str = '大家都在看', 
-                          count: int = 50) -> List[Dict[str, Any]]:
+
+    def get_hot_stock_rank(self, data_type: str = '大家都在看',
+                          count: int = 50) -> list[dict[str, Any]]:
         """获取热股排行
-        
+
         Args:
             data_type: 数据类型 ('大家都在看', '快速飙升中', '技术交易派', '价值投资派', '趋势投资派')
             count: 获取数量
-            
+
         Returns:
             List[Dict]: 热股排行数据
         """
@@ -154,36 +155,36 @@ class ThsDataProvider(BaseDataProvider):
                 '价值投资派': 'value',
                 '趋势投资派': 'trend'
             }
-            
+
             list_type = data_dict.get(data_type, 'normal')
-            
+
             # 根据类型确定时间参数
             if list_type in ['normal', 'skyrocket']:
                 time_type = 'hour'
             else:
                 time_type = 'day'
-            
+
             # 构建请求URL（使用参考项目的实际API）
             url = 'https://dq.10jqka.com.cn/fuyao/hot_list_data/out/hot_list/v1/stock'
-            
+
             params = {
                 'stock_type': 'a',
                 'type': time_type,
                 'list_type': list_type,
                 'data_type': '1'
             }
-            
+
             response = self._make_request(url, params)
             if not response:
                 return []
-            
+
             # 解析JSON响应
             data = response.json()
-            
+
             if data.get('status_code') == 0 and 'data' in data:
                 stocks = []
                 items = data['data'].get('stock_list', [])[:count]
-                
+
                 for i, item in enumerate(items):
                     stock_info = {
                         'rank': i + 1,
@@ -197,44 +198,44 @@ class ThsDataProvider(BaseDataProvider):
                         'source': 'ths'
                     }
                     stocks.append(stock_info)
-                
+
                 self.logger.info(f"成功获取{data_type}排行数据: {len(stocks)}条")
                 return stocks
-            
+
             return []
-            
+
         except Exception as e:
             self.logger.error(f"获取热股排行失败: {e}")
             return []
-    
-    def get_concept_rank(self, count: int = 50) -> List[Dict[str, Any]]:
+
+    def get_concept_rank(self, count: int = 50) -> list[dict[str, Any]]:
         """获取概念热度排行
-        
+
         Args:
             count: 获取数量
-            
+
         Returns:
             List[Dict]: 概念排行数据
         """
         try:
             # 使用同花顺板块API（基于参考项目）
             url = 'https://dq.10jqka.com.cn/fuyao/hot_list_data/out/hot_list/v1/plate'
-            
+
             params = {
                 'type': 'concept'
             }
-            
+
             response = self._make_request(url, params)
             if not response:
                 return []
-            
+
             # 解析JSON响应
             data = response.json()
-            
+
             if data.get('status_code') == 0 and 'data' in data:
                 concepts = []
                 items = data['data'].get('plate_list', [])[:count]
-                
+
                 for i, item in enumerate(items):
                     concept_info = {
                         'rank': i + 1,
@@ -247,57 +248,57 @@ class ThsDataProvider(BaseDataProvider):
                         'source': 'ths'
                     }
                     concepts.append(concept_info)
-                
+
                 self.logger.info(f"成功获取概念热度排行: {len(concepts)}条")
                 return concepts
-            
+
             return []
-            
+
         except Exception as e:
             self.logger.error(f"获取概念排行失败: {e}")
             return []
-    
-    def get_realtime_quotes(self, codes: List[str]) -> List[Dict[str, Any]]:
+
+    def get_realtime_quotes(self, codes: list[str]) -> list[dict[str, Any]]:
         """获取实时行情数据（同花顺不是主要行情源，返回空列表）
-        
+
         Args:
             codes: 股票代码列表
-            
+
         Returns:
             List[Dict]: 空列表（同花顺主要用于热度数据）
         """
         self.logger.info("同花顺数据源主要用于热度数据，不提供实时行情")
         return []
-    
-    def get_sector_stocks(self, sector_name: str, count: int = 50) -> List[Dict[str, Any]]:
+
+    def get_sector_stocks(self, sector_name: str, count: int = 50) -> list[dict[str, Any]]:
         """获取板块成分股
-        
+
         Args:
             sector_name: 板块名称
             count: 获取数量
-            
+
         Returns:
             List[Dict]: 板块成分股数据
         """
         try:
             # 构建板块查询URL
             url = f"{self.base_url}/v2/line/bk_{sector_name}/last.js"
-            
+
             response = self._make_request(url)
             if not response:
                 return []
-            
+
             text = response.text
-            
+
             # 解析JSONP响应
             if 'last(' in text and text.endswith(')'):
                 json_str = text[text.find('(') + 1:-1]
                 data = json.loads(json_str)
-                
+
                 if 'data' in data and data['data']:
                     stocks = []
                     items = data['data'][:count]
-                    
+
                     for item in items:
                         if isinstance(item, str):
                             parts = item.split(',')
@@ -310,19 +311,19 @@ class ThsDataProvider(BaseDataProvider):
                                     'source': 'ths'
                                 }
                                 stocks.append(stock_info)
-                    
+
                     self.logger.info(f"成功获取板块{sector_name}成分股: {len(stocks)}只")
                     return stocks
-            
+
             return []
-            
+
         except Exception as e:
             self.logger.error(f"获取板块成分股失败: {e}")
             return []
-    
-    def get_market_sentiment(self) -> Dict[str, Any]:
+
+    def get_market_sentiment(self) -> dict[str, Any]:
         """获取市场情绪数据
-        
+
         Returns:
             Dict: 市场情绪指标
         """
@@ -330,10 +331,10 @@ class ThsDataProvider(BaseDataProvider):
             # 获取多个热度数据来分析市场情绪
             hot_stocks = self.get_hot_stock_rank('实时热度', 20)
             concept_rank = self.get_concept_rank(10)
-            
+
             if not hot_stocks and not concept_rank:
                 return {}
-            
+
             # 计算市场情绪指标
             sentiment = {
                 'hot_stock_count': len(hot_stocks),
@@ -343,12 +344,12 @@ class ThsDataProvider(BaseDataProvider):
                 'timestamp': int(time.time()),
                 'source': 'ths'
             }
-            
+
             # 计算平均热度值
             if hot_stocks:
                 total_hot = sum(stock.get('hot_value', 0) for stock in hot_stocks)
                 sentiment['avg_hot_value'] = round(total_hot / len(hot_stocks), 2)
-            
+
             # 获取热门概念
             if concept_rank:
                 sentiment['top_concepts'] = [
@@ -358,16 +359,16 @@ class ThsDataProvider(BaseDataProvider):
                     }
                     for concept in concept_rank[:5]
                 ]
-            
+
             return sentiment
-            
+
         except Exception as e:
             self.logger.error(f"获取市场情绪数据失败: {e}")
             return {}
-    
+
     def is_available(self) -> bool:
         """检查数据源是否可用
-        
+
         Returns:
             bool: 数据源是否可用
         """
@@ -377,10 +378,10 @@ class ThsDataProvider(BaseDataProvider):
             return len(test_data) > 0
         except Exception:
             return False
-    
-    def get_provider_info(self) -> Dict[str, Any]:
+
+    def get_provider_info(self) -> dict[str, Any]:
         """获取数据提供者信息
-        
+
         Returns:
             Dict: 提供者信息
         """

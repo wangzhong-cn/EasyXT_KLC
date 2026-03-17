@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 数据完整性检查模块
 提供全面的数据质量检查和验证功能
@@ -9,18 +8,19 @@
 你只需指定时间段，系统就能精确揪出缺失的每一个交易日，并在界面上高亮提示。
 """
 
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Tuple, Optional
-from datetime import datetime, date, timedelta
-import duckdb
+import logging
 import sys
 from pathlib import Path
+from typing import Optional
+
+import pandas as pd
 
 # 添加父目录到路径
 sys.path.insert(0, str(Path(__file__).parent))
 
 from smart_data_detector import SmartDataDetector, TradingCalendar
+
+log = logging.getLogger(__name__)
 
 
 class DataQualityReport:
@@ -46,13 +46,13 @@ class DataQualityReport:
     def has_warnings(self) -> bool:
         return len(self.warnings) > 0
 
-    def get_summary(self) -> Dict:
+    def get_summary(self) -> dict:
         return {
             'errors': len(self.issues),
             'warnings': len(self.warnings),
             'info': len(self.info),
             'issues': self.issues,
-            'warnings': self.warnings
+            'warning_messages': self.warnings
         }
 
 
@@ -67,27 +67,36 @@ class DataIntegrityChecker:
     4. 生成完整性报告
     """
 
-    def __init__(self, duckdb_path: str = r'D:/StockData/stock_data.ddb'):
+    def __init__(self, duckdb_path: Optional[str] = None):
         """
         初始化检查器
 
         Args:
             duckdb_path: DuckDB 数据库路径
         """
-        self.duckdb_path = duckdb_path
+        from data_manager.duckdb_connection_pool import resolve_duckdb_path
+
+        self.duckdb_path = resolve_duckdb_path(duckdb_path)
         self.con = None
-        self.detector = SmartDataDetector(duckdb_path)
+        self.detector = SmartDataDetector(self.duckdb_path)
         self.calendar = TradingCalendar()
 
     def connect(self):
         """连接数据库"""
         return self.detector.connect()
 
+    def _query_df(self, query: str, params: list[str]) -> pd.DataFrame:
+        if self.detector._manager is None:
+            if not self.connect() or self.detector._manager is None:
+                return pd.DataFrame()
+        with self.detector._manager.get_read_connection() as con:
+            return con.execute(query, params).df()
+
     def check_integrity(self,
                        stock_code: str,
                        start_date: str,
                        end_date: str,
-                       detailed: bool = True) -> Dict:
+                       detailed: bool = True) -> dict:
         """
         执行完整的数据完整性检查
 
@@ -103,7 +112,7 @@ class DataIntegrityChecker:
         report = DataQualityReport()
 
         # 1. 检查缺失交易日
-        print(f"[1/5] 检查缺失交易日...")
+        log.debug("[1/5] 检查缺失交易日...")
         missing_report = self.detector.detect_missing_data(stock_code, start_date, end_date)
 
         if missing_report['missing_count'] > 0:
@@ -115,21 +124,21 @@ class DataIntegrityChecker:
             report.add_issue('INFO', "交易日数据完整")
 
         # 2. 检查数据质量
-        print(f"[2/5] 检查数据质量...")
+        log.debug("[2/5] 检查数据质量...")
         quality_issues = self._check_data_quality(stock_code, start_date, end_date)
 
         for issue in quality_issues:
             report.add_issue(issue['level'], issue['message'])
 
         # 3. 检查价格关系
-        print(f"[3/5] 检查价格关系...")
+        log.debug("[3/5] 检查价格关系...")
         price_issues = self._check_price_relations(stock_code, start_date, end_date)
 
         for issue in price_issues:
             report.add_issue(issue['level'], issue['message'])
 
         # 4. 检查异常值
-        print(f"[4/5] 检查异常值...")
+        log.debug("[4/5] 检查异常值...")
         outlier_issues = self._check_outliers(stock_code, start_date, end_date)
 
         for issue in outlier_issues:
@@ -137,7 +146,7 @@ class DataIntegrityChecker:
 
         # 5. 检查成交量异常
         if detailed:
-            print(f"[5/5] 检查成交量...")
+            log.debug("[5/5] 检查成交量...")
             volume_issues = self._check_volume_anomalies(stock_code, start_date, end_date)
 
             for issue in volume_issues:
@@ -155,21 +164,21 @@ class DataIntegrityChecker:
 
         return summary
 
-    def _check_data_quality(self, stock_code: str, start_date: str, end_date: str) -> List[Dict]:
+    def _check_data_quality(self, stock_code: str, start_date: str, end_date: str) -> list[dict]:
         """检查数据质量"""
         issues = []
 
-        query = f"""
+        query = """
             SELECT date, open, high, low, close, volume
             FROM stock_daily
-            WHERE stock_code = '{stock_code}'
-              AND date >= '{start_date}'
-              AND date <= '{end_date}'
+            WHERE stock_code = ?
+              AND date >= ?
+              AND date <= ?
             ORDER BY date
         """
 
         try:
-            df = self.detector.con.execute(query).df()
+            df = self._query_df(query, [stock_code, start_date, end_date])
 
             if df.empty:
                 return [{'level': 'ERROR', 'message': '数据库中无数据'}]
@@ -201,21 +210,21 @@ class DataIntegrityChecker:
 
         return issues
 
-    def _check_price_relations(self, stock_code: str, start_date: str, end_date: str) -> List[Dict]:
+    def _check_price_relations(self, stock_code: str, start_date: str, end_date: str) -> list[dict]:
         """检查价格关系合理性"""
         issues = []
 
-        query = f"""
+        query = """
             SELECT date, open, high, low, close
             FROM stock_daily
-            WHERE stock_code = '{stock_code}'
-              AND date >= '{start_date}'
-              AND date <= '{end_date}'
+            WHERE stock_code = ?
+              AND date >= ?
+              AND date <= ?
             ORDER BY date
         """
 
         try:
-            df = self.detector.con.execute(query).df()
+            df = self._query_df(query, [stock_code, start_date, end_date])
 
             if df.empty or len(df) == 0:
                 return []
@@ -244,21 +253,21 @@ class DataIntegrityChecker:
 
         return issues
 
-    def _check_outliers(self, stock_code: str, start_date: str, end_date: str) -> List[Dict]:
+    def _check_outliers(self, stock_code: str, start_date: str, end_date: str) -> list[dict]:
         """检查异常值"""
         issues = []
 
-        query = f"""
+        query = """
             SELECT date, close, volume
             FROM stock_daily
-            WHERE stock_code = '{stock_code}'
-              AND date >= '{start_date}'
-              AND date <= '{end_date}'
+            WHERE stock_code = ?
+              AND date >= ?
+              AND date <= ?
             ORDER BY date
         """
 
         try:
-            df = self.detector.con.execute(query).df()
+            df = self._query_df(query, [stock_code, start_date, end_date])
 
             if df.empty or len(df) < 2:
                 return []
@@ -282,22 +291,22 @@ class DataIntegrityChecker:
 
         return issues
 
-    def _check_volume_anomalies(self, stock_code: str, start_date: str, end_date: str) -> List[Dict]:
+    def _check_volume_anomalies(self, stock_code: str, start_date: str, end_date: str) -> list[dict]:
         """检查成交量异常"""
         issues = []
 
-        query = f"""
+        query = """
             SELECT date, volume
             FROM stock_daily
-            WHERE stock_code = '{stock_code}'
-              AND date >= '{start_date}'
-              AND date <= '{end_date}'
+            WHERE stock_code = ?
+              AND date >= ?
+              AND date <= ?
               AND volume > 0
             ORDER BY date
         """
 
         try:
-            df = self.detector.con.execute(query).df()
+            df = self._query_df(query, [stock_code, start_date, end_date])
 
             if df.empty or len(df) < 10:
                 return []
@@ -323,9 +332,9 @@ class DataIntegrityChecker:
         return issues
 
     def batch_check_integrity(self,
-                              stock_codes: List[str],
+                              stock_codes: list[str],
                               start_date: str,
-                              end_date: str) -> Dict[str, Dict]:
+                              end_date: str) -> dict[str, dict]:
         """
         批量检查多只股票的数据完整性
 
@@ -347,7 +356,7 @@ class DataIntegrityChecker:
 
         return reports
 
-    def generate_integrity_report(self, reports: Dict[str, Dict]) -> str:
+    def generate_integrity_report(self, reports: dict[str, dict]) -> str:
         """
         生成完整性检查报告
 

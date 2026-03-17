@@ -1,25 +1,41 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 网格交易GUI组件
 提供网格交易策略的可视化配置、监控和管理界面
 """
 
-import sys
-import os
-import json
 import importlib.util
+import json
+import os
+import sys
+import time
 from datetime import datetime
 
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QLineEdit, QPushButton, QTextEdit,
-    QTableWidget, QTableWidgetItem, QTabWidget,
-    QCheckBox, QSpinBox, QDoubleSpinBox, QComboBox,
-    QSplitter, QFrame, QMessageBox,
-    QFileDialog, QFormLayout, QScrollArea
-)
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QTextCursor
+from PyQt5.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 # 添加项目路径
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -73,9 +89,9 @@ class StrategyThread(QThread):
                 self.strategy.stop()
             except Exception:
                 pass
-        # 终止线程
+        # 请求退出，不在主线程阻塞等待
+        self.requestInterruption()
         self.quit()
-        self.wait(max(1000, 3000))  # 最多等待3秒
 
 
 class GridTradingWidget(QWidget):
@@ -515,6 +531,20 @@ class GridTradingWidget(QWidget):
     def _connect_events(self):
         signal_bus.subscribe(Events.ORDER_SUBMITTED, self.on_order_submitted)
 
+    def _submit_unified_order(self, symbol: str, side: str, price: float, volume: int) -> bool:
+        results = signal_bus.request(
+            Events.ORDER_REQUESTED,
+            symbol=symbol,
+            side=side,
+            price=price,
+            volume=volume,
+            source="grid",
+        )
+        if not results:
+            self.log(f"统一入口未响应: {side} {symbol} {volume} @ {price}")
+            return False
+        return bool(results[0])
+
     def on_order_submitted(self, symbol: str, side: str, price: float, volume: int, **kwargs):
         if not symbol:
             return
@@ -572,7 +602,7 @@ class GridTradingWidget(QWidget):
 
         if config_file:
             try:
-                with open(config_file, 'r', encoding='utf-8') as f:
+                with open(config_file, encoding='utf-8') as f:
                     config = json.load(f)
                 self.apply_config(config)
                 self.log(f"✓ 配置加载成功: {os.path.basename(config_file)}")
@@ -691,6 +721,11 @@ class GridTradingWidget(QWidget):
             else:
                 raise ValueError(f"未知的策略类型: {strategy}")
 
+            if hasattr(self.strategy, "set_order_executor"):
+                self.strategy.set_order_executor(self._submit_unified_order)
+            else:
+                setattr(self.strategy, "order_executor", self._submit_unified_order)
+
             # 在新线程中运行策略
             self.strategy_thread = StrategyThread(self.strategy)
             self.strategy_thread.log_signal.connect(self.log)
@@ -757,6 +792,19 @@ class GridTradingWidget(QWidget):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
+    def closeEvent(self, event):
+        """关闭时清理策略线程"""
+        try:
+            if self.strategy_thread and self.strategy_thread.isRunning():
+                self.strategy_thread.stop()  # stop() 内部已 requestInterruption+quit
+                t0 = time.monotonic()
+                finished = self.strategy_thread.wait(500)
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                status = "已退出" if finished else "超时未退出"
+                print(f"[closeEvent] GridTradingWidget - {self.strategy_thread.__class__.__name__}: {status} ({elapsed_ms}ms)")
+        finally:
+            super().closeEvent(event)
+
     def update_monitor_data(self):
         """更新监控数据"""
         if not self.is_running or not self.strategy:
@@ -764,8 +812,9 @@ class GridTradingWidget(QWidget):
 
         try:
             # 尝试从策略对象获取状态信息
-            if hasattr(self.strategy, 'get_status'):
-                self.strategy.get_status()
+            get_status = getattr(self.strategy, "get_status", None)
+            if callable(get_status):
+                get_status()
                 # 更新状态表格
                 # 这里可以根据策略返回的状态更新UI
         except Exception:

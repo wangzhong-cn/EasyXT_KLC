@@ -5,13 +5,13 @@
 """
 
 from .cache_manager import CacheManager
+from .cache_strategy import CacheConfig, CacheStrategy
 from .memory_cache import MemoryCache
 from .redis_cache import RedisCache
-from .cache_strategy import CacheStrategy, CacheConfig
 
 __all__ = [
     'CacheManager',
-    'MemoryCache', 
+    'MemoryCache',
     'RedisCache',
     'CacheStrategy',
     'CacheConfig'

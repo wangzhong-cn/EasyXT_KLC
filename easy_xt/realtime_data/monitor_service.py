@@ -10,14 +10,14 @@ import logging
 import signal
 import sys
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Optional
 
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from easy_xt.realtime_data.monitor.integration import MonitoringService
-from easy_xt.realtime_data.monitor.alert_manager import AlertLevel, AlertRule
 from easy_xt.realtime_data.config import RealtimeDataConfig
+from easy_xt.realtime_data.monitor.alert_manager import AlertLevel, AlertRule
+from easy_xt.realtime_data.monitor.integration import MonitoringService
 
 # 配置日志
 logging.basicConfig(
@@ -34,25 +34,26 @@ logger = logging.getLogger(__name__)
 
 class MonitorServiceManager:
     """监控服务管理器"""
-    
+
     def __init__(self, config_file: Optional[str] = None):
         """初始化监控服务管理器
-        
+
         Args:
             config_file: 配置文件路径
         """
         self.config_file = config_file or "config/monitor_config.json"
         self.config = self._load_config()
+        self.config["config_file"] = self.config_file
         self.monitoring_service: Optional[MonitoringService] = None
         self._shutdown_event = asyncio.Event()
-        
+
         # 注册信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
-        
+
         logger.info("监控服务管理器初始化完成")
-    
-    def _load_config(self) -> Dict[str, Any]:
+
+    def _load_config(self) -> dict[str, Any]:
         """加载配置"""
         try:
             # 尝试加载配置文件
@@ -61,8 +62,8 @@ class MonitorServiceManager:
         except Exception as e:
             logger.warning(f"加载配置文件失败: {e}，使用默认配置")
             return self._get_default_config()
-    
-    def _get_default_config(self) -> Dict[str, Any]:
+
+    def _get_default_config(self) -> dict[str, Any]:
         """获取默认配置"""
         return {
             "system_monitor": {
@@ -120,23 +121,23 @@ class MonitorServiceManager:
                 "port": 8080
             }
         }
-    
+
     def _signal_handler(self, signum, frame):
         """信号处理器"""
         logger.info(f"接收到信号 {signum}，准备关闭服务...")
         self._shutdown_event.set()
-    
+
     async def start(self):
         """启动监控服务"""
         try:
             logger.info("正在启动监控告警系统...")
-            
+
             # 创建监控服务
             self.monitoring_service = MonitoringService(self.config)
-            
+
             # 启动监控服务
             await self.monitoring_service.start()
-            
+
             logger.info("[OK] 监控告警系统启动成功")
             logger.info("监控功能:")
             logger.info("  - 系统性能监控 (CPU、内存、磁盘、网络)")
@@ -144,27 +145,27 @@ class MonitorServiceManager:
             logger.info("  - API性能监控 (响应时间、成功率)")
             logger.info("  - 智能告警系统 (邮件、Webhook)")
             logger.info("  - 监控仪表板 (Web界面)")
-            
+
             # 等待关闭信号
             await self._shutdown_event.wait()
-            
+
         except Exception as e:
             logger.error(f"启动监控服务失败: {e}")
             raise
         finally:
             await self.stop()
-    
+
     async def stop(self):
         """停止监控服务"""
         if self.monitoring_service:
             logger.info("正在停止监控服务...")
             await self.monitoring_service.stop()
             logger.info("[OK] 监控服务已停止")
-    
+
     def create_default_alert_rules(self) -> list:
         """创建默认告警规则"""
         rules = []
-        
+
         # 系统资源告警规则
         rules.extend([
             AlertRule(
@@ -177,7 +178,7 @@ class MonitorServiceManager:
                 notification_channels=["email"]
             ),
             AlertRule(
-                name="critical_cpu_usage", 
+                name="critical_cpu_usage",
                 condition="CPU使用率严重过高",
                 level=AlertLevel.CRITICAL,
                 threshold=95.0,
@@ -204,7 +205,7 @@ class MonitorServiceManager:
                 notification_channels=["email", "webhook"]
             )
         ])
-        
+
         # 数据源告警规则
         rules.extend([
             AlertRule(
@@ -226,7 +227,7 @@ class MonitorServiceManager:
                 notification_channels=["email"]
             )
         ])
-        
+
         # API性能告警规则
         rules.extend([
             AlertRule(
@@ -248,34 +249,34 @@ class MonitorServiceManager:
                 notification_channels=["email"]
             )
         ])
-        
+
         return rules
-    
+
     def print_status(self):
         """打印服务状态"""
         print("\n" + "="*60)
         print("📊 EasyXT监控告警系统状态")
         print("="*60)
-        
+
         if self.monitoring_service:
             print("🟢 服务状态: 运行中")
             print(f"📁 配置文件: {self.config_file}")
             print(f"🔧 监控组件: {len([k for k, v in self.config.items() if v.get('enabled', False)])} 个已启用")
-            
+
             # 显示启用的组件
             enabled_components = []
             for component, config in self.config.items():
                 if config.get('enabled', False):
                     enabled_components.append(component)
-            
+
             print(f"📋 启用组件: {', '.join(enabled_components)}")
-            
+
             if self.config.get('dashboard', {}).get('enabled'):
                 dashboard_config = self.config['dashboard']
                 print(f"🌐 监控面板: http://{dashboard_config['host']}:{dashboard_config['port']}")
         else:
             print("🔴 服务状态: 未启动")
-        
+
         print("="*60)
 
 
@@ -284,13 +285,13 @@ async def main():
     try:
         # 创建监控服务管理器
         manager = MonitorServiceManager()
-        
+
         # 显示状态
         manager.print_status()
-        
+
         # 启动服务
         await manager.start()
-        
+
     except KeyboardInterrupt:
         logger.info("用户中断，正在退出...")
     except Exception as e:
@@ -301,6 +302,6 @@ async def main():
 if __name__ == "__main__":
     # 确保日志目录存在
     Path("logs").mkdir(exist_ok=True)
-    
+
     # 运行服务
     asyncio.run(main())

@@ -1,27 +1,37 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 高级数据查看器组件
 符合现有GUI的浅色主题风格
 """
 
-import sys
-import os
 import importlib.util
-from typing import Optional, Callable, Any, List, Tuple
+import os
+import sys
+import time
 from datetime import datetime
-
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QGroupBox, QLabel, QPushButton, QTableWidget,
-    QTableWidgetItem, QComboBox, QDateEdit,
-    QMessageBox, QFileDialog, QSplitter, QLineEdit,
-    QTabWidget
-)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDate, QTimer
-from PyQt5.QtGui import QFont, QColor
+from typing import Any, Callable, Optional
 
 import pandas as pd
+from PyQt5.QtCore import QDate, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtWidgets import (
+    QComboBox,
+    QDateEdit,
+    QFileDialog,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 # 添加项目路径
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -33,12 +43,14 @@ _default_financial_saver: Optional[type]
 
 try:
     from data_manager.duckdb_connection_pool import get_db_manager as _default_get_db_manager
+    from data_manager.duckdb_connection_pool import resolve_duckdb_path
     from data_manager.financial_data_saver import FinancialDataSaver as _default_financial_saver
     DB_MANAGER_AVAILABLE = True
     FINANCIAL_SAVER_AVAILABLE = True
 except ImportError:
     _default_get_db_manager = None
     _default_financial_saver = None
+    resolve_duckdb_path = None
     DB_MANAGER_AVAILABLE = False
     FINANCIAL_SAVER_AVAILABLE = False
 
@@ -89,15 +101,28 @@ def _get_financial_saver():
     return _import_financial_saver()
 
 
+def _get_duckdb_path() -> str:
+    if resolve_duckdb_path is not None:
+        return resolve_duckdb_path()
+    return r"D:/StockData/stock_data.ddb"
+
+
+_tables_ensured = False  # 模块级单次标志，避免每个线程反复开写连接
+
+
 def _ensure_duckdb_tables() -> bool:
+    global _tables_ensured
+    if _tables_ensured:
+        return True
     if not UNIFIED_INTERFACE_AVAILABLE:
         return False
     interface = None
     try:
-        interface = UnifiedDataInterface(r"D:/StockData/stock_data.ddb")
+        interface = UnifiedDataInterface(_get_duckdb_path())
         if not interface.connect(read_only=False):
             return False
         interface._ensure_tables_exist()
+        _tables_ensured = True
         return True
     except Exception:
         return False
@@ -146,15 +171,8 @@ class DataLoadThread(QThread):
                 ORDER BY date
             """
 
-            try:
-                get_db_manager = _get_db_manager()
-                manager = get_db_manager(r'D:/StockData/stock_data.ddb')
-                df = manager.execute_read_query(query)
-            except Exception:
-                import duckdb
-                con = duckdb.connect(r'D:/StockData/stock_data.ddb', read_only=True)
-                df = con.execute(query).df()
-                con.close()
+            manager = _get_db_manager()(_get_duckdb_path())
+            df = manager.execute_read_query(query)
 
             if not df.empty:
                 df = df.set_index('date')
@@ -165,6 +183,117 @@ class DataLoadThread(QThread):
             self.error_occurred.emit(str(e))
 
 
+class _StockListLoadThread(QThread):
+    data_ready = pyqtSignal(pd.DataFrame)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, filter_type: str, search_text: str):
+        super().__init__()
+        self.filter_type = filter_type
+        self.search_text = search_text
+
+    def run(self):
+        try:
+            _ensure_duckdb_tables()
+            if self.isInterruptionRequested():
+                return
+            has_symbol_type = self._has_symbol_type_column()
+            if self.isInterruptionRequested():
+                return
+
+            conditions = []
+            if self.filter_type != 'all':
+                if has_symbol_type:
+                    conditions.append(f"symbol_type = '{self.filter_type}'")
+                elif self.filter_type not in ['stock', 'all']:
+                    conditions.append("1 = 0")
+
+            if self.search_text:
+                conditions.append(f"stock_code LIKE '%{self.search_text}%'")
+
+            where_clause = ""
+            if conditions:
+                where_clause = "WHERE " + " AND ".join(conditions)
+
+            limit_clause = "" if self.search_text else "LIMIT 5000"
+            if has_symbol_type:
+                query = f"""
+                    SELECT
+                        stock_code,
+                        symbol_type,
+                        COUNT(*) as count,
+                        MIN(date) as min_date,
+                        MAX(date) as max_date
+                    FROM stock_daily
+                    {where_clause}
+                    GROUP BY stock_code, symbol_type
+                    ORDER BY stock_code
+                    {limit_clause}
+                """
+            else:
+                query = f"""
+                    SELECT
+                        stock_code,
+                        'stock' as symbol_type,
+                        COUNT(*) as count,
+                        MIN(date) as min_date,
+                        MAX(date) as max_date
+                    FROM stock_daily
+                    {where_clause}
+                    GROUP BY stock_code
+                    ORDER BY stock_code
+                    {limit_clause}
+                """
+
+            manager = _get_db_manager()(_get_duckdb_path())
+            df = manager.execute_read_query(query)
+
+            if self.isInterruptionRequested():
+                return
+
+            # 在后台线程中合并 QMT 股票列表，避免主线程调用 xtdata（㊺修复）
+            if not self.search_text and self.filter_type in ('all', 'stock'):
+                if df is None or len(df) <= 100:
+                    df = self._merge_qmt_stock_list(df, self.filter_type)
+
+            self.data_ready.emit(df if df is not None else pd.DataFrame())
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+    @staticmethod
+    def _merge_qmt_stock_list(df, filter_type: str):
+        try:
+            from xtquant import xtdata
+        except Exception:
+            return df if df is not None else pd.DataFrame()
+        try:
+            qmt_list = xtdata.get_stock_list_in_sector('沪深A股')
+        except Exception:
+            return df if df is not None else pd.DataFrame()
+        if not qmt_list:
+            return df if df is not None else pd.DataFrame()
+        existing = set(df['stock_code'].astype(str)) if df is not None and not df.empty else set()
+        missing = [code for code in qmt_list if code not in existing]
+        if not missing:
+            return df if df is not None else pd.DataFrame()
+        extra_df = pd.DataFrame([{
+            'stock_code': code, 'symbol_type': 'stock',
+            'count': 0, 'min_date': pd.NaT, 'max_date': pd.NaT,
+        } for code in missing])
+        if df is None or df.empty:
+            return extra_df.sort_values('stock_code')
+        return pd.concat([df, extra_df], ignore_index=True).sort_values('stock_code')
+
+    def _has_symbol_type_column(self) -> bool:
+        try:
+            query = "SELECT column_name FROM pragma_table_info('stock_daily')"
+            df = _get_db_manager()(_get_duckdb_path()).execute_read_query(query)
+            if df is None or df.empty:
+                return False
+            return 'symbol_type' in set(df['column_name'].astype(str))
+        except Exception:
+            return False
+
 class AdvancedDataViewerWidget(QWidget):
     """高级数据查看器组件 - 浅色主题风格"""
 
@@ -173,8 +302,13 @@ class AdvancedDataViewerWidget(QWidget):
         self.current_stock = None
         self.current_data = None
         self.search_timer = None  # 搜索延迟定时器
+        self.stock_list_thread = None
+        self._stock_list_start = None
+        self.load_thread = None
+        self.fin_thread = None
+        self.tick_thread = None
         self.init_ui()
-        self.load_initial_data()
+        QTimer.singleShot(600, self.load_initial_data)
 
     def init_ui(self):
         """初始化UI"""
@@ -456,136 +590,50 @@ class AdvancedDataViewerWidget(QWidget):
     def _has_symbol_type_column(self) -> bool:
         try:
             query = "SELECT column_name FROM pragma_table_info('stock_daily')"
-            try:
-                get_db_manager = _get_db_manager()
-                manager = get_db_manager(r'D:/StockData/stock_data.ddb')
-                df = manager.execute_read_query(query)
-            except Exception:
-                import duckdb
-                con = duckdb.connect(r'D:/StockData/stock_data.ddb', read_only=True)
-                try:
-                    df = con.execute(query).df()
-                finally:
-                    con.close()
+            df = _get_db_manager()(_get_duckdb_path()).execute_read_query(query)
             if df is None or df.empty:
                 return False
             return 'symbol_type' in set(df['column_name'].astype(str))
         except Exception:
             return False
 
-    def _merge_qmt_stock_list(self, df: pd.DataFrame, filter_type: str) -> pd.DataFrame:
-        if filter_type not in ['all', 'stock']:
-            return df
-        try:
-            from xtquant import xtdata
-        except Exception:
-            return df
-        try:
-            qmt_list = xtdata.get_stock_list_in_sector('沪深A股')
-        except Exception:
-            return df
-        if not qmt_list:
-            return df
-        if df is None or df.empty:
-            existing = set()
-        else:
-            existing = set(df['stock_code'].astype(str))
-        missing = [code for code in qmt_list if code not in existing]
-        if not missing:
-            return df
-        extra_df = pd.DataFrame([{
-            'stock_code': code,
-            'symbol_type': 'stock',
-            'count': 0,
-            'min_date': pd.NaT,
-            'max_date': pd.NaT
-        } for code in missing])
-        if df is None or df.empty:
-            merged = extra_df
-        else:
-            merged = pd.concat([df, extra_df], ignore_index=True)
-        return merged.sort_values('stock_code')
-
     def load_stock_list(self, filter_type: str = 'all', search_text: str = ''):
-        """加载股票列表（支持全局搜索）"""
+        """加载股票列表（支持全局搜索）- 后台线程执行查询"""
+        if self.stock_list_thread is not None and self.stock_list_thread.isRunning():
+            self.stock_list_thread.requestInterruption()
+            # Fix 58: 不在主线程 wait(), 旧线程自行退出
+        self.stock_table.setSortingEnabled(False)
+        self.data_stats_label.setText("正在加载股票列表…")
+        self._stock_list_start = time.perf_counter()
+        self.stock_list_thread = _StockListLoadThread(filter_type, search_text)
+        self.stock_list_thread.data_ready.connect(lambda df: self._on_stock_list_loaded(df, filter_type, search_text))
+        self.stock_list_thread.error_occurred.connect(self._on_stock_list_error)
+        self.stock_list_thread.start()
+
+    def _on_stock_list_loaded(self, df: pd.DataFrame, filter_type: str, search_text: str):
+        elapsed_ms = None
+        if self._stock_list_start is not None:
+            elapsed_ms = (time.perf_counter() - self._stock_list_start) * 1000
+        # QMT 合并已在 _StockListLoadThread.run() 后台完成（㊺修复）
+        self.stock_table.setUpdatesEnabled(False)
         try:
-            _ensure_duckdb_tables()
-            has_symbol_type = self._has_symbol_type_column()
-
-            # 构建WHERE子句
-            conditions = []
-
-            # 类型筛选
-            if filter_type != 'all':
-                if has_symbol_type:
-                    conditions.append(f"symbol_type = '{filter_type}'")
-                elif filter_type not in ['stock', 'all']:
-                    conditions.append("1 = 0")
-
-            # 搜索筛选
-            if search_text:
-                conditions.append(f"stock_code LIKE '%{search_text}%'")
-
-            where_clause = ""
-            if conditions:
-                where_clause = "WHERE " + " AND ".join(conditions)
-
-            limit_clause = "" if search_text else "LIMIT 5000"
-            if has_symbol_type:
-                query = f"""
-                    SELECT
-                        stock_code,
-                        symbol_type,
-                        COUNT(*) as count,
-                        MIN(date) as min_date,
-                        MAX(date) as max_date
-                    FROM stock_daily
-                    {where_clause}
-                    GROUP BY stock_code, symbol_type
-                    ORDER BY stock_code
-                    {limit_clause}
-                """
-            else:
-                query = f"""
-                    SELECT
-                        stock_code,
-                        'stock' as symbol_type,
-                        COUNT(*) as count,
-                        MIN(date) as min_date,
-                        MAX(date) as max_date
-                    FROM stock_daily
-                    {where_clause}
-                    GROUP BY stock_code
-                    ORDER BY stock_code
-                    {limit_clause}
-                """
-
-            try:
-                get_db_manager = _get_db_manager()
-                manager = get_db_manager(r'D:/StockData/stock_data.ddb')
-                df = manager.execute_read_query(query)
-            except Exception:
-                import duckdb
-                con = duckdb.connect(r'D:/StockData/stock_data.ddb', read_only=True)
-                try:
-                    df = con.execute(query).fetchdf()
-                finally:
-                    con.close()
-                con.close()
-
-            if not search_text and (df is None or len(df) <= 100):
-                df = self._merge_qmt_stock_list(df, filter_type)
-
             self.populate_stock_table(df)
-
-            # 显示搜索结果统计
-            if search_text:
+        finally:
+            self.stock_table.setUpdatesEnabled(True)
+            self.stock_table.setSortingEnabled(True)
+        if search_text:
+            if elapsed_ms is not None:
+                self.data_stats_label.setText(f"搜索 '{search_text}': 找到 {len(df)} 只股票, {elapsed_ms:.0f}ms")
+            else:
                 self.data_stats_label.setText(f"搜索 '{search_text}': 找到 {len(df)} 只股票")
+        else:
+            if elapsed_ms is not None:
+                self.data_stats_label.setText(f"共 {len(df)} 只股票, {elapsed_ms:.0f}ms")
             else:
                 self.data_stats_label.setText(f"共 {len(df)} 只股票")
 
-        except Exception as e:
-            QMessageBox.warning(self, "错误", f"加载股票列表失败: {e}")
+    def _on_stock_list_error(self, msg: str):
+        QMessageBox.warning(self, "错误", f"加载股票列表失败: {msg}")
 
     def populate_stock_table(self, df: pd.DataFrame):
         """填充股票表格"""
@@ -599,12 +647,13 @@ class AdvancedDataViewerWidget(QWidget):
 
             # 类型
             type_map = {'stock': '股票', 'bond': '债券', 'etf': 'ETF'}
-            type_item = QTableWidgetItem(type_map.get(data_row['symbol_type'], data_row['symbol_type']))
+            symbol_type = str(data_row.get('symbol_type', ''))
+            type_item = QTableWidgetItem(type_map.get(symbol_type, symbol_type))
             self.stock_table.setItem(row_idx, 1, type_item)
 
             # 记录数
             count_item = QTableWidgetItem(f"{data_row['count']:,}")
-            count_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            count_item.setTextAlignment(int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter))
             self.stock_table.setItem(row_idx, 2, count_item)
 
             # 日期范围
@@ -672,8 +721,10 @@ class AdvancedDataViewerWidget(QWidget):
         selected_items = self.stock_table.selectedItems()
         if selected_items:
             row = selected_items[0].row()
-            stock_code = self.stock_table.item(row, 0).text()
-            record_count = self.stock_table.item(row, 2).text()
+            stock_item = self.stock_table.item(row, 0)
+            count_item = self.stock_table.item(row, 2)
+            stock_code = stock_item.text() if stock_item else ""
+            record_count = count_item.text() if count_item else "0"
             self.current_stock = stock_code
             self.stock_label.setText(f"当前股票: {stock_code}")
             self.record_count_label.setText(f"记录数: {record_count}")
@@ -809,7 +860,7 @@ class AdvancedDataViewerWidget(QWidget):
                 self.financial_table.setItem(row_idx, 0, report_item)
 
                 # 财务指标
-                formatters: List[Tuple[str, Callable[[Any], str]]] = [
+                formatters: list[tuple[str, Callable[[Any], str]]] = [
                     ('净资产收益率', lambda x: f"{x:.2f}%" if pd.notna(x) else "-"),
                     ('毛利率', lambda x: f"{x:.2f}%" if pd.notna(x) else "-"),
                     ('净利率', lambda x: f"{x:.2f}%" if pd.notna(x) else "-"),
@@ -969,8 +1020,10 @@ class AdvancedDataViewerWidget(QWidget):
             try:
                 # 收集表格数据
                 data = []
-                headers = [table.horizontalHeaderItem(col).text()
-                          for col in range(table.columnCount())]
+                headers = []
+                for col in range(table.columnCount()):
+                    header_item = table.horizontalHeaderItem(col)
+                    headers.append(header_item.text() if header_item else f"col_{col}")
 
                 for row in range(table.rowCount()):
                     row_data = []
@@ -990,6 +1043,16 @@ class AdvancedDataViewerWidget(QWidget):
 
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"导出失败: {e}")
+
+    def closeEvent(self, event):
+        """清理所有运行中的 QThread，防止退出时崩溃"""
+        for attr in ("stock_list_thread", "load_thread", "fin_thread", "tick_thread"):
+            t = getattr(self, attr, None)
+            if t is not None and t.isRunning():
+                t.requestInterruption()
+                t.quit()
+                t.wait(1000)
+        super().closeEvent(event)
 
 
 class FinancialDataLoadThread(QThread):
@@ -1193,7 +1256,7 @@ class FinancialDataSaveThread(QThread):
             # 获取数据库管理器
             try:
                 get_db_manager = _get_db_manager()
-                manager = get_db_manager(r'D:/StockData/stock_data.ddb')
+                manager = get_db_manager(_get_duckdb_path())
             except Exception as e:
                 self.error_signal.emit(f"数据库管理器不可用: {e}")
                 return
@@ -1284,7 +1347,7 @@ class BatchFinancialSaveThread(QThread):
         try:
             try:
                 get_db_manager = _get_db_manager()
-                manager = get_db_manager(r'D:/StockData/stock_data.ddb')
+                manager = get_db_manager(_get_duckdb_path())
                 financial_saver = _get_financial_saver()
                 saver = financial_saver(manager)
             except Exception as e:
@@ -1403,7 +1466,7 @@ class TickDataLoadThread(QThread):
             # 首先尝试从DuckDB加载tick数据
             try:
                 get_db_manager = _get_db_manager()
-                manager = get_db_manager(r'D:/StockData/stock_data.ddb')
+                manager = get_db_manager(_get_duckdb_path())
                 duckdb_tick_available = True
                 with manager.get_read_connection() as con:
                     if not _table_exists(con, 'stock_tick'):

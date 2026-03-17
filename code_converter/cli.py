@@ -3,13 +3,14 @@
 聚宽到Ptrade代码转换器命令行工具
 """
 import argparse
-import sys
 import os
+import sys
 
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from converters.jq_to_ptrade import JQToPtradeConverter
+
 
 def main():
     """主函数"""
@@ -18,12 +19,12 @@ def main():
     parser.add_argument('-o', '--output', help='输出的Ptrade策略文件路径')
     parser.add_argument('-m', '--mapping', help='API映射文件路径')
     parser.add_argument('--version', action='version', version='%(prog)s 1.0')
-    
+
     args = parser.parse_args()
-    
+
     # 读取输入文件
     try:
-        with open(args.input_file, 'r', encoding='utf-8') as f:
+        with open(args.input_file, encoding='utf-8') as f:
             jq_code = f.read()
     except FileNotFoundError:
         print(f"错误: 找不到输入文件 {args.input_file}")
@@ -31,7 +32,7 @@ def main():
     except Exception as e:
         print(f"错误: 读取输入文件失败: {e}")
         sys.exit(1)
-    
+
     # 确定API映射文件路径
     api_mapping_file = args.mapping
     if not api_mapping_file:
@@ -39,17 +40,17 @@ def main():
         default_mapping = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api_mapping.json')
         if os.path.exists(default_mapping):
             api_mapping_file = default_mapping
-    
+
     # 创建转换器
     converter = JQToPtradeConverter(api_mapping_file)
-    
+
     # 转换代码
     try:
         ptrade_code = converter.convert(jq_code)
     except Exception as e:
         print(f"错误: 代码转换失败: {e}")
         sys.exit(1)
-    
+
     # 输出结果
     if args.output:
         # 写入输出文件

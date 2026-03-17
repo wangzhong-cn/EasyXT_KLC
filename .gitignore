@@ -23,6 +23,9 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Native chart adapter — auto-copied LWC lib (populated at first run)
+gui_app/chart_native/lib/
+
 # PyInstaller
 *.manifest
 *.spec
@@ -129,6 +132,10 @@ logs/
 # 配置文件（包含敏感信息）
 config/user_config.py
 config/account_config.py
+config/unified_config.json
+config/secrets.json
+.env
+*.credentials
 **/userdata_mini/
 **/userdata/
 

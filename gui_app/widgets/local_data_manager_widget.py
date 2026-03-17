@@ -1,28 +1,56 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 本地数据管理GUI组件
 提供本地数据的下载、管理和查看功能
 """
 
-import sys
-import os
 import importlib
 import importlib.util
+import os
+import sys
+import threading
+import time
+from collections import deque
 from datetime import datetime, timedelta
-from typing import List, Any
+from datetime import time as dt_time
 from pathlib import Path
-
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QGroupBox, QLabel, QLineEdit, QPushButton, QTextEdit,
-    QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QProgressBar, QSplitter, QMessageBox, QDialog,
-    QFileDialog, QDateEdit, QComboBox, QInputDialog
-)
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QDate
-from PyQt5.QtGui import QTextCursor
+from typing import Any, Callable, Optional
 
 import pandas as pd
+from PyQt5.QtCore import (
+    QAbstractTableModel,
+    QDate,
+    QModelIndex,
+    QSortFilterProxyModel,
+    Qt,
+    QThread,
+    QTimer,
+    QVariant,
+    pyqtSignal,
+)
+from PyQt5.QtGui import QTextCursor
+from PyQt5.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDateEdit,
+    QDialog,
+    QFileDialog,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSplitter,
+    QTableView,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 # 添加项目路径
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -33,7 +61,42 @@ widgets_path = os.path.join(project_root, 'gui_app', 'widgets')
 if widgets_path not in sys.path:
     sys.path.insert(0, widgets_path)
 
-def _get_table_columns(con, table_name: str) -> List[str]:
+class _PandasTableModel(QAbstractTableModel):
+    def __init__(self, df: pd.DataFrame):
+        super().__init__()
+        self._df = df.reset_index(drop=False).copy()
+        self._columns = list(self._df.columns)
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._df)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._columns)
+
+    def data(self, index: QModelIndex, role=Qt.DisplayRole):
+        if not index.isValid():
+            return QVariant()
+        if role == Qt.DisplayRole:
+            try:
+                val = self._df.iat[index.row(), index.column()]
+                if pd.isna(val):
+                    return ""
+                return str(val)
+            except Exception:
+                return ""
+        return QVariant()
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return QVariant()
+        if orientation == Qt.Horizontal:
+            if 0 <= section < len(self._columns):
+                return self._columns[section]
+        else:
+            return str(section + 1)
+        return QVariant()
+
+def _get_table_columns(con, table_name: str) -> list[str]:
     try:
         rows = con.execute(f"SELECT column_name FROM pragma_table_info('{table_name}')").fetchall()
         if rows:
@@ -47,16 +110,16 @@ def _get_table_columns(con, table_name: str) -> List[str]:
     except Exception:
         return []
 
-def _align_dataframe_to_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+def _align_dataframe_to_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     aligned = df.copy()
     for col in columns:
         if col not in aligned.columns:
             aligned[col] = None
-    aligned = aligned[columns]
+    aligned = aligned.reindex(columns=columns)
     return aligned
 
 
-def _build_stock_daily_delete_sql(stock_codes: List[str], columns: List[str], period: str = '1d', adjust_type: str = 'none') -> str:
+def _build_stock_daily_delete_sql(stock_codes: list[str], columns: list[str], period: str = '1d', adjust_type: str = 'none') -> str:
     symbols_sql = ", ".join([f"'{s}'" for s in stock_codes])
     where_clauses = [f"stock_code IN ({symbols_sql})"]
     if 'period' in columns:
@@ -64,6 +127,66 @@ def _build_stock_daily_delete_sql(stock_codes: List[str], columns: List[str], pe
     if 'adjust_type' in columns:
         where_clauses.append(f"adjust_type = '{adjust_type}'")
     return "DELETE FROM stock_daily WHERE " + " AND ".join(where_clauses)
+
+
+def _upsert_ingestion_status(
+    con,
+    stock_code: str,
+    period: str,
+    start_date: str,
+    end_date: str,
+    source: str,
+    status: str,
+    record_count: int,
+    error_message: Optional[str]
+) -> None:
+    try:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS data_ingestion_status (
+                stock_code VARCHAR NOT NULL,
+                period VARCHAR NOT NULL,
+                start_date TIMESTAMP,
+                end_date TIMESTAMP,
+                source VARCHAR,
+                status VARCHAR,
+                record_count INTEGER,
+                error_message VARCHAR,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (stock_code, period)
+            )
+        """)
+        con.execute(
+            "DELETE FROM data_ingestion_status WHERE stock_code = ? AND period = ?",
+            [stock_code, period]
+        )
+        con.execute(
+            """
+            INSERT INTO data_ingestion_status (
+                stock_code,
+                period,
+                start_date,
+                end_date,
+                source,
+                status,
+                record_count,
+                error_message,
+                last_updated
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            [
+                stock_code,
+                period,
+                start_date,
+                end_date,
+                source,
+                status,
+                int(record_count),
+                error_message
+            ]
+        )
+    except Exception:
+        return
 
 
 def _import_duckdb_manager():
@@ -76,15 +199,22 @@ def _import_duckdb_manager():
     return module.get_db_manager
 
 
+_tables_ensured = False  # 模块级单次标志，避免每个线程反复开写连接
+
+
 def _ensure_duckdb_tables() -> bool:
+    global _tables_ensured
+    if _tables_ensured:
+        return True
     if not UNIFIED_INTERFACE_AVAILABLE:
         return False
     interface = None
     try:
-        interface = UnifiedDataInterface(r"D:/StockData/stock_data.ddb")
+        interface = UnifiedDataInterface(_get_duckdb_path())
         if not interface.connect(read_only=False):
             return False
         interface._ensure_tables_exist()
+        _tables_ensured = True
         return True
     except Exception:
         return False
@@ -105,6 +235,22 @@ try:
     UNIFIED_INTERFACE_AVAILABLE = True
 except ImportError:
     UNIFIED_INTERFACE_AVAILABLE = False
+
+_resolve_duckdb_path: Optional[Callable[[Optional[str]], str]] = None
+try:
+    from data_manager.duckdb_connection_pool import resolve_duckdb_path as _resolve_duckdb_path
+except Exception:
+    _resolve_duckdb_path = None
+
+resolve_duckdb_path: Optional[Callable[[Optional[str]], str]] = (
+    _resolve_duckdb_path if callable(_resolve_duckdb_path) else None
+)
+
+
+def _get_duckdb_path() -> str:
+    if resolve_duckdb_path is not None:
+        return resolve_duckdb_path(None)
+    return r"D:/StockData/stock_data.ddb"
 
 
 class DataDownloadThread(QThread):
@@ -134,6 +280,10 @@ class DataDownloadThread(QThread):
                 self._update_data()
             elif self.task_type == 'backfill_history':
                 self._backfill_history()
+            elif self.task_type == 'download_tick':
+                self._download_tick()
+            elif self.task_type == 'download_transaction':
+                self._download_transaction()
         except Exception as e:
             import traceback
             error_msg = f"下载失败: {str(e)}\n{traceback.format_exc()}"
@@ -155,7 +305,7 @@ class DataDownloadThread(QThread):
             duckdb_batch_size = 50
             try:
                 get_db_manager = _import_duckdb_manager()
-                duckdb_manager = get_db_manager(r'D:/StockData/stock_data.ddb')
+                duckdb_manager = get_db_manager(_get_duckdb_path())
             except Exception:
                 duckdb_manager = None
 
@@ -252,6 +402,19 @@ class DataDownloadThread(QThread):
                                         cols_sql = ", ".join(duckdb_columns)
                                         con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")
                                         con.unregister('temp_bulk')
+                                        for stock_code in df_all['stock_code'].unique().tolist():
+                                            df_symbol = df_all[df_all['stock_code'] == stock_code]
+                                            _upsert_ingestion_status(
+                                                con,
+                                                stock_code,
+                                                '1d',
+                                                str(df_symbol['date'].min()),
+                                                str(df_symbol['date'].max()),
+                                                'local_download',
+                                                'success',
+                                                len(df_symbol),
+                                                None
+                                            )
                                     duckdb_buffer = []
                                 except Exception as e:
                                     self.log_signal.emit(f"⚠️ DuckDB写入失败: {str(e)[:60]}")
@@ -289,6 +452,32 @@ class DataDownloadThread(QThread):
                         cols_sql = ", ".join(duckdb_columns)
                         con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")
                         con.unregister('temp_bulk')
+                        for stock_code in df_all['stock_code'].unique().tolist():
+                            df_symbol = df_all[df_all['stock_code'] == stock_code]
+                            _upsert_ingestion_status(
+                                con,
+                                stock_code,
+                                '1d',
+                                str(df_symbol['date'].min()),
+                                str(df_symbol['date'].max()),
+                                'local_download',
+                                'success',
+                                len(df_symbol),
+                                None
+                            )
+                        for stock_code in df_all['stock_code'].unique().tolist():
+                            df_symbol = df_all[df_all['stock_code'] == stock_code]
+                            _upsert_ingestion_status(
+                                con,
+                                stock_code,
+                                '1d',
+                                str(df_symbol['date'].min()),
+                                str(df_symbol['date'].max()),
+                                'local_download',
+                                'success',
+                                len(df_symbol),
+                                None
+                            )
                 except Exception as e:
                     self.log_signal.emit(f"⚠️ DuckDB写入失败: {str(e)[:60]}")
 
@@ -332,7 +521,7 @@ class DataDownloadThread(QThread):
             duckdb_batch_size = 50
             try:
                 get_db_manager = _import_duckdb_manager()
-                duckdb_manager = get_db_manager(r'D:/StockData/stock_data.ddb')
+                duckdb_manager = get_db_manager(_get_duckdb_path())
             except Exception:
                 duckdb_manager = None
 
@@ -423,6 +612,19 @@ class DataDownloadThread(QThread):
                                         cols_sql = ", ".join(duckdb_columns)
                                         con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")
                                         con.unregister('temp_bulk')
+                                        for stock_code in df_all['stock_code'].unique().tolist():
+                                            df_symbol = df_all[df_all['stock_code'] == stock_code]
+                                            _upsert_ingestion_status(
+                                                con,
+                                                stock_code,
+                                                '1d',
+                                                str(df_symbol['date'].min()),
+                                                str(df_symbol['date'].max()),
+                                                'local_download',
+                                                'success',
+                                                len(df_symbol),
+                                                None
+                                            )
                                     duckdb_buffer = []
                                 except Exception as e:
                                     self.log_signal.emit(f"⚠️ DuckDB写入失败: {str(e)[:60]}")
@@ -489,17 +691,260 @@ class DataDownloadThread(QThread):
             self.log_signal.emit(error_msg)
             self.error_signal.emit(error_msg)
 
+    def _download_tick(self):
+        try:
+            from data_manager.unified_data_interface import UnifiedDataInterface
+            factor_platform_path = Path(__file__).parents[2] / "101因子" / "101因子分析平台" / "src"
+            if str(factor_platform_path) not in sys.path:
+                sys.path.insert(0, str(factor_platform_path))
+            from data_manager import LocalDataManager
+            manager = LocalDataManager()
+            if not self.symbols:
+                self.log_signal.emit("📊 正在获取A股列表...")
+                self.symbols = manager.get_all_stocks_list(
+                    include_st=True,
+                    include_sz=True,
+                    include_bj=True,
+                    exclude_st=True,
+                    exclude_delisted=True
+                )
+                self.log_signal.emit(f"✅ 获取到 {len(self.symbols)} 只A股")
+            queue = deque([(symbol, 0) for symbol in self.symbols])
+            total = len(self.symbols)
+            success_count = 0
+            failed_count = 0
+            failed_samples: list[dict[str, Any]] = []
+            failed_reasons: dict[str, int] = {}
+            max_retries = 2
+            interface = UnifiedDataInterface(duckdb_path=_get_duckdb_path(), silent_init=True)
+            interface.connect(read_only=False)
+            idx = 0
+            start_ts = time.time()
+            last_log = start_ts
+            while queue:
+                if not self._is_running:
+                    break
+                symbol, attempt = queue.popleft()
+                idx += 1
+                self.progress_signal.emit(min(idx, total), total)
+                reason = None
+                try:
+                    ok = interface.ingest_tick_data(
+                        symbol, self.start_date, self.end_date, aggregate_1m=True
+                    )
+                    if ok:
+                        success_count += 1
+                    else:
+                        reason = "empty_or_unavailable"
+                except Exception as e:
+                    reason = f"exception:{str(e)[:60]}"
+                if reason:
+                    if attempt < max_retries:
+                        queue.append((symbol, attempt + 1))
+                        self.log_signal.emit(f"🔁 Tick重试 {symbol} (第{attempt + 1}次)")
+                    else:
+                        failed_count += 1
+                        failed_samples.append(
+                            {
+                                "stock_code": symbol,
+                                "reason": reason,
+                                "attempt": attempt + 1,
+                                "start_date": self.start_date,
+                                "end_date": self.end_date,
+                                "task_type": "download_tick",
+                            }
+                        )
+                        failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
+                now = time.time()
+                if now - last_log >= 2:
+                    elapsed = max(now - start_ts, 1.0)
+                    speed = idx / elapsed
+                    remaining = max(total - min(idx, total), 0)
+                    eta = int(remaining / speed) if speed > 0 else 0
+                    self.log_signal.emit(
+                        f"📊 Tick进度: {min(idx, total)}/{total} | 成功: {success_count} | 失败: {failed_count} | 速度: {speed:.2f}/s | ETA: {eta}s"
+                    )
+                    last_log = now
+            interface.close()
+            failed_path = None
+            if failed_samples:
+                failed_path = self._export_failed_samples(failed_samples, "tick")
+                self.log_signal.emit(f"📄 Tick失败样本已导出: {failed_path}")
+            if failed_reasons:
+                self.log_signal.emit(f"🧾 Tick失败原因统计: {failed_reasons}")
+            result = {
+                'total': total,
+                'success': success_count,
+                'failed': failed_count,
+                'task_type': 'download_tick',
+                'failed_samples_path': failed_path,
+                'failed_reasons': failed_reasons
+            }
+            self.finished_signal.emit(result)
+        except Exception as e:
+            import traceback
+            error_msg = f"下载Tick失败: {str(e)}\n{traceback.format_exc()}"
+            self.log_signal.emit(error_msg)
+            self.error_signal.emit(error_msg)
+
+    def _download_transaction(self):
+        try:
+            from data_manager.unified_data_interface import UnifiedDataInterface
+            factor_platform_path = Path(__file__).parents[2] / "101因子" / "101因子分析平台" / "src"
+            if str(factor_platform_path) not in sys.path:
+                sys.path.insert(0, str(factor_platform_path))
+            from data_manager import LocalDataManager
+            manager = LocalDataManager()
+            if not self.symbols:
+                self.log_signal.emit("📊 正在获取A股列表...")
+                self.symbols = manager.get_all_stocks_list(
+                    include_st=True,
+                    include_sz=True,
+                    include_bj=True,
+                    exclude_st=True,
+                    exclude_delisted=True
+                )
+                self.log_signal.emit(f"✅ 获取到 {len(self.symbols)} 只A股")
+            queue = deque([(symbol, 0) for symbol in self.symbols])
+            total = len(self.symbols)
+            success_count = 0
+            failed_count = 0
+            failed_samples: list[dict[str, Any]] = []
+            failed_reasons: dict[str, int] = {}
+            max_retries = 2
+            interface = UnifiedDataInterface(duckdb_path=_get_duckdb_path(), silent_init=True)
+            interface.connect(read_only=False)
+            idx = 0
+            start_ts = time.time()
+            last_log = start_ts
+            while queue:
+                if not self._is_running:
+                    break
+                symbol, attempt = queue.popleft()
+                idx += 1
+                self.progress_signal.emit(min(idx, total), total)
+                reason = None
+                fallback = False
+                try:
+                    ok, fallback = interface.ingest_transaction_data(
+                        symbol, self.start_date, self.end_date, aggregate_1m=True
+                    )
+                    if ok:
+                        success_count += 1
+                        if fallback:
+                            self.log_signal.emit(f"⚠️ Level2不可用，已降级为tick转换: {symbol}")
+                    else:
+                        reason = "empty_or_unavailable"
+                except Exception as e:
+                    reason = f"exception:{str(e)[:60]}"
+                if reason:
+                    if attempt < max_retries:
+                        queue.append((symbol, attempt + 1))
+                        self.log_signal.emit(f"🔁 分笔重试 {symbol} (第{attempt + 1}次)")
+                    else:
+                        failed_count += 1
+                        failed_samples.append(
+                            {
+                                "stock_code": symbol,
+                                "reason": reason,
+                                "attempt": attempt + 1,
+                                "start_date": self.start_date,
+                                "end_date": self.end_date,
+                                "task_type": "download_transaction",
+                                "fallback_used": fallback,
+                            }
+                        )
+                        failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
+                now = time.time()
+                if now - last_log >= 2:
+                    elapsed = max(now - start_ts, 1.0)
+                    speed = idx / elapsed
+                    remaining = max(total - min(idx, total), 0)
+                    eta = int(remaining / speed) if speed > 0 else 0
+                    self.log_signal.emit(
+                        f"📊 分笔进度: {min(idx, total)}/{total} | 成功: {success_count} | 失败: {failed_count} | 速度: {speed:.2f}/s | ETA: {eta}s"
+                    )
+                    last_log = now
+            interface.close()
+            failed_path = None
+            if failed_samples:
+                failed_path = self._export_failed_samples(failed_samples, "transaction")
+                self.log_signal.emit(f"📄 分笔失败样本已导出: {failed_path}")
+            if failed_reasons:
+                self.log_signal.emit(f"🧾 分笔失败原因统计: {failed_reasons}")
+            result = {
+                'total': total,
+                'success': success_count,
+                'failed': failed_count,
+                'task_type': 'download_transaction',
+                'failed_samples_path': failed_path,
+                'failed_reasons': failed_reasons
+            }
+            self.finished_signal.emit(result)
+        except Exception as e:
+            import traceback
+            error_msg = f"下载分笔成交失败: {str(e)}\n{traceback.format_exc()}"
+            self.log_signal.emit(error_msg)
+            self.error_signal.emit(error_msg)
+
+    def _export_failed_samples(self, samples: list[dict[str, Any]], tag: str) -> Optional[str]:
+        try:
+            if not samples:
+                return None
+            log_dir = os.path.join(Path(__file__).parents[2], "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_path = os.path.join(log_dir, f"failed_{tag}_{ts}.csv")
+            pd.DataFrame(samples).to_csv(file_path, index=False, encoding="utf-8-sig")
+            return file_path
+        except Exception:
+            return None
+
+    def _get_latest_failed_csv(self) -> Optional[str]:
+        try:
+            log_dir = os.path.join(Path(__file__).parents[2], "logs")
+            if not os.path.exists(log_dir):
+                return None
+            candidates = []
+            for name in os.listdir(log_dir):
+                if name.startswith("failed_") and name.endswith(".csv"):
+                    candidates.append(os.path.join(log_dir, name))
+            if not candidates:
+                return None
+            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            return candidates[0]
+        except Exception:
+            return None
+
+    def _parse_task_type_from_path(self, path: str) -> str:
+        base = os.path.basename(path)
+        if "transaction" in base:
+            return "download_transaction"
+        if "tick" in base:
+            return "download_tick"
+        return "download_tick"
+
+    def _build_symbols_from_csv(self, file_path: str) -> list[str]:
+        try:
+            df = pd.read_csv(file_path)
+            if "stock_code" in df.columns:
+                return [str(code).strip() for code in df["stock_code"].dropna().unique().tolist()]
+        except Exception:
+            pass
+        return []
+
     def _update_data(self):
         """更新数据（增量）- 使用DuckDB存储，批量处理避免连接冲突"""
         try:
+            from data_manager.unified_data_interface import UnifiedDataInterface
             get_db_manager = _import_duckdb_manager()
-            from xtquant import xtdata
-            import pandas as pd
 
             self.log_signal.emit("✅ 数据管理器初始化成功")
 
             # 获取DuckDB管理器
-            manager = get_db_manager(r'D:/StockData/stock_data.ddb')
+            manager = get_db_manager(_get_duckdb_path())
+            interface = UnifiedDataInterface(duckdb_path=_get_duckdb_path(), silent_init=True)
+            interface.connect(read_only=False)
 
             # 查找需要更新的股票（落后超过0天，包括今天的数据）
             # 说明：落后0天表示今天的数据可能还没收盘，落后1天表示昨天数据缺失
@@ -530,10 +975,6 @@ class DataDownloadThread(QThread):
             skipped_count = 0
             failed_list = []
 
-            # === 步骤1: 批量收集所有数据（不写入数据库） ===
-            self.log_signal.emit("📥 [步骤1/2] 从QMT批量收集数据...")
-            update_data = []
-
             for i, stock_code in enumerate(stock_codes):
                 if not self._is_running:
                     self.log_signal.emit("⚠️ 用户中断更新")
@@ -546,127 +987,45 @@ class DataDownloadThread(QThread):
                     if (i + 1) % 100 == 0 or i == 0:
                         self.log_signal.emit(f"  📈 进度: {i+1}/{total} ({(i+1)/total*100:.1f}%)")
 
-                    # 获取最新日期和落后天数
                     stock_data = df_stocks[df_stocks['stock_code'] == stock_code].iloc[0]
-                    latest_date = stock_data['latest_date']
-                    days_behind = stock_data['days_behind']
-
-                    # 计算需要获取的条数
-                    # 策略：最少30条，落后天数多时适当增加
-                    # 考虑到QMT数据是最近往回数，获取足够的数据确保覆盖缺失
-                    count = int(days_behind) + 30  # 增加30天缓冲
-                    # 最少获取30条，最多获取500条（约2年数据）
-                    count = max(30, min(count, 500))
-
-                    # 从QMT获取数据（使用count参数）
-                    data = xtdata.get_market_data_ex(
-                        stock_list=[stock_code],
-                        period='1d',
-                        count=count
+                    latest_date = pd.to_datetime(stock_data['latest_date'], errors='coerce')
+                    if latest_date is None or pd.isna(latest_date):
+                        skipped_count += 1
+                        continue
+                    start_date = latest_date.strftime('%Y-%m-%d')
+                    end_date = datetime.now().strftime('%Y-%m-%d')
+                    plan = interface.build_incremental_plan(
+                        stock_code=stock_code,
+                        start_date=start_date,
+                        end_date=end_date,
+                        period='1d'
                     )
-
-                    if isinstance(data, dict) and stock_code in data:
-                        df = data[stock_code]
-                        if not df.empty:
-                            # 转换数据格式
-                            df_processed = pd.DataFrame({
-                                'stock_code': stock_code,
-                                'symbol_type': 'stock',
-                                'date': pd.to_datetime(df['time'], unit='ms').dt.strftime('%Y-%m-%d'),
-                                'period': '1d',
-                                'open': df['open'],
-                                'high': df['high'],
-                                'low': df['low'],
-                                'close': df['close'],
-                                'volume': df['volume'].astype('int64'),
-                                'amount': df['amount'],
-                                'adjust_type': 'none',
-                                'factor': 1.0,
-                                'created_at': datetime.now(),
-                                'updated_at': datetime.now()
-                            })
-
-                            # 填充复权数据
-                            for col in ['open', 'high', 'low', 'close']:
-                                df_processed[f'{col}_front'] = df_processed[col]
-                                df_processed[f'{col}_back'] = df_processed[col]
-                                df_processed[f'{col}_geometric_front'] = df_processed[col]
-                                df_processed[f'{col}_geometric_back'] = df_processed[col]
-
-                            # 只保留最新日期之后的数据
-                            latest_date_str = pd.to_datetime(latest_date).strftime('%Y-%m-%d')
-                            df_processed = df_processed[df_processed['date'] > latest_date_str]
-
-                            if not df_processed.empty:
-                                update_data.append(df_processed)
-                                success_count += 1
-                            else:
-                                skipped_count += 1
-                        else:
-                            skipped_count += 1
+                    if not plan:
+                        skipped_count += 1
+                        continue
+                    total_records = 0
+                    for item in plan:
+                        mode = item.get("mode")
+                        if mode == "skip":
+                            continue
+                        df = interface.get_stock_data(
+                            stock_code=stock_code,
+                            start_date=item.get("start_date", start_date),
+                            end_date=item.get("end_date", end_date),
+                            period='1d',
+                            auto_save=True
+                        )
+                        if df is not None and not df.empty:
+                            total_records += len(df)
+                    if total_records > 0:
+                        success_count += 1
                     else:
-                        failed_count += 1
-                        failed_list.append(stock_code)
+                        skipped_count += 1
 
                 except Exception as e:
                     self.log_signal.emit(f"  [{i+1}/{total}] {stock_code}: ✗ 错误 - {str(e)[:50]}")
                     failed_count += 1
                     failed_list.append(f"{stock_code} - {str(e)[:30]}")
-
-            self.log_signal.emit(f"📥 数据收集完成: {len(update_data)} 条记录，来自 {success_count} 只股票")
-
-            # === 步骤2: 批量写入DuckDB（一次性写入，减少连接时间） ===
-            self.log_signal.emit("💾 [步骤2/2] 批量写入DuckDB...")
-            self.log_signal.emit("⏳ 提示：写入期间请勿进行其他数据库操作...")
-
-            if update_data:
-                try:
-                    # 合并所有数据
-                    df_all = pd.concat(update_data, ignore_index=True)
-
-                    # 使用延迟写入策略，给其他连接释放的时间
-                    import time
-                    self.log_signal.emit("⏳ 等待其他连接释放...")
-                    time.sleep(2)  # 等待2秒，让其他可能的连接释放
-
-                    # 一次性写入（连接池会自动重试）
-                    self.log_signal.emit("💾 正在写入数据库...")
-                    with manager.get_write_connection() as con:
-                        columns = _get_table_columns(con, 'stock_daily')
-                        df_aligned = _align_dataframe_to_columns(df_all, columns)
-                        con.register('temp_updates', df_aligned)
-                        cols_sql = ", ".join(columns)
-                        con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_updates")
-                        con.unregister('temp_updates')
-
-                    self.log_signal.emit(f"✅ 成功保存 {len(df_all)} 条记录到数据库")
-                except Exception as e:
-                    self.log_signal.emit(f"❌ 批量写入失败: {str(e)}")
-                    # 尝试分批写入
-                    self.log_signal.emit("🔄 尝试分批写入...")
-                    batch_size = 1000
-                    success_batches = 0
-                    for i in range(0, len(update_data), batch_size):
-                        batch = update_data[i:i+batch_size]
-                        df_batch = pd.concat(batch, ignore_index=True)
-                        try:
-                            # 每批次之间等待，让连接释放
-                            if i > 0:
-                                time.sleep(0.5)
-                            with manager.get_write_connection() as con:
-                                columns = _get_table_columns(con, 'stock_daily')
-                                df_aligned = _align_dataframe_to_columns(df_batch, columns)
-                                con.register('temp_batch', df_aligned)
-                                cols_sql = ", ".join(columns)
-                                con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_batch")
-                                con.unregister('temp_batch')
-                            success_batches += 1
-                            self.log_signal.emit(f"  ✅ 批次 {i//batch_size + 1} 写入成功 ({len(df_batch)} 条)")
-                        except Exception as batch_error:
-                            self.log_signal.emit(f"  ❌ 批次 {i//batch_size + 1} 写入失败: {batch_error}")
-
-                    if success_batches > 0:
-                        self.log_signal.emit(f"✅ 分批写入完成，成功 {success_batches}/{(len(update_data)-1)//batch_size + 1} 个批次")
 
             # 输出结果
             result = {
@@ -705,14 +1064,15 @@ class DataDownloadThread(QThread):
     def _backfill_history(self):
         """补充历史数据（从2018年开始）"""
         try:
+            from data_manager.unified_data_interface import UnifiedDataInterface
             get_db_manager = _import_duckdb_manager()
-            from xtquant import xtdata
-            import pandas as pd
 
             self.log_signal.emit("✅ 数据管理器初始化成功")
 
             # 获取DuckDB管理器
-            manager = get_db_manager(r'D:/StockData/stock_data.ddb')
+            manager = get_db_manager(_get_duckdb_path())
+            interface = UnifiedDataInterface(duckdb_path=_get_duckdb_path(), silent_init=True)
+            interface.connect(read_only=False)
 
             # 查询所有股票及其最早日期
             query = """
@@ -734,6 +1094,8 @@ class DataDownloadThread(QThread):
 
             # 筛选需要补充历史的股票（最早日期晚于2018-06-01）
             cutoff_date = pd.to_datetime('2018-06-01')
+            df_stocks['earliest_date'] = pd.to_datetime(df_stocks['earliest_date'], errors='coerce')
+            df_stocks = df_stocks[df_stocks['earliest_date'].notna()]
             needs_backfill = df_stocks[df_stocks['earliest_date'] > cutoff_date]
 
             if needs_backfill.empty:
@@ -744,16 +1106,10 @@ class DataDownloadThread(QThread):
             stock_codes = needs_backfill['stock_code'].tolist()
             self.log_signal.emit(f"📊 发现 {len(stock_codes)} 只股票需要补充历史数据")
 
-            # 从QMT获取完整历史数据（使用较大count值）
-            # 2018-06到2026年约2000个交易日
-            count = 2500
-            self.log_signal.emit(f"📡 将获取每只股票的最近 {count} 条数据...")
-
             total = len(stock_codes)
             success_count = 0
             failed_count = 0
             failed_list = []
-            backfill_data = []
 
             for i, stock_code in enumerate(stock_codes):
                 try:
@@ -761,49 +1117,41 @@ class DataDownloadThread(QThread):
                     if (i + 1) % 100 == 0:
                         self.log_signal.emit(f"📊 进度: {i+1}/{total} ({(i+1)/total*100:.1f}%)")
 
-                    # 从QMT获取数据
-                    data = xtdata.get_market_data_ex(
-                        stock_list=[stock_code],
-                        period='1d',
-                        count=count
+                    row = needs_backfill[needs_backfill['stock_code'] == stock_code].iloc[0]
+                    earliest_date = pd.to_datetime(row['earliest_date'], errors='coerce')
+                    if earliest_date is None or pd.isna(earliest_date):
+                        failed_count += 1
+                        failed_list.append(f"{stock_code} - earliest_date无效")
+                        continue
+                    start_date = cutoff_date.strftime('%Y-%m-%d')
+                    end_date = earliest_date.strftime('%Y-%m-%d')
+                    plan = interface.build_incremental_plan(
+                        stock_code=stock_code,
+                        start_date=start_date,
+                        end_date=end_date,
+                        period='1d'
                     )
-
-                    if isinstance(data, dict) and stock_code in data:
-                        df = data[stock_code]
-                        if not df.empty:
-                            # 转换数据格式
-                            df_processed = pd.DataFrame({
-                                'stock_code': stock_code,
-                                'symbol_type': 'stock',
-                                'date': pd.to_datetime(df['time'], unit='ms').dt.strftime('%Y-%m-%d'),
-                                'period': '1d',
-                                'open': df['open'],
-                                'high': df['high'],
-                                'low': df['low'],
-                                'close': df['close'],
-                                'volume': df['volume'].astype('int64'),
-                                'amount': df['amount'],
-                                'adjust_type': 'none',
-                                'factor': 1.0,
-                                'created_at': datetime.now(),
-                                'updated_at': datetime.now()
-                            })
-
-                            # 填充复权数据
-                            for col in ['open', 'high', 'low', 'close']:
-                                df_processed[f'{col}_front'] = df_processed[col]
-                                df_processed[f'{col}_back'] = df_processed[col]
-                                df_processed[f'{col}_geometric_front'] = df_processed[col]
-                                df_processed[f'{col}_geometric_back'] = df_processed[col]
-
-                            backfill_data.append(df_processed)
-                            success_count += 1
-                        else:
-                            failed_count += 1
-                            failed_list.append(f"{stock_code} - 数据为空")
+                    if not plan:
+                        continue
+                    total_records = 0
+                    for item in plan:
+                        mode = item.get("mode")
+                        if mode == "skip":
+                            continue
+                        df = interface.get_stock_data(
+                            stock_code=stock_code,
+                            start_date=item.get("start_date", start_date),
+                            end_date=item.get("end_date", end_date),
+                            period='1d',
+                            auto_save=True
+                        )
+                        if df is not None and not df.empty:
+                            total_records += len(df)
+                    if total_records > 0:
+                        success_count += 1
                     else:
                         failed_count += 1
-                        failed_list.append(f"{stock_code} - 获取失败")
+                        failed_list.append(f"{stock_code} - 数据为空")
 
                 except Exception as e:
                     self.log_signal.emit(f"  [{i+1}/{total}] {stock_code}: ✗ 错误 - {str(e)[:50]}")
@@ -811,36 +1159,6 @@ class DataDownloadThread(QThread):
                     failed_list.append(f"{stock_code} - {str(e)[:30]}")
 
             self.log_signal.emit(f"📥 历史数据收集完成: {success_count} 只股票成功")
-
-            # 批量写入DuckDB（替换旧数据）
-            if backfill_data:
-                self.log_signal.emit("💾 正在写入数据库...")
-                import time
-                time.sleep(2)
-
-                try:
-                    # 合并所有数据
-                    df_all = pd.concat(backfill_data, ignore_index=True)
-
-                    # 获取涉及的股票列表
-                    stocks_to_update = df_all['stock_code'].unique().tolist()
-
-                    with manager.get_write_connection() as con:
-                        # 先删除这些股票的旧数据
-                        for stock in stocks_to_update:
-                            con.execute(f"DELETE FROM stock_daily WHERE stock_code = '{stock}'")
-
-                        # 插入新的完整数据
-                        columns = _get_table_columns(con, 'stock_daily')
-                        df_aligned = _align_dataframe_to_columns(df_all, columns)
-                        con.register('temp_backfill', df_aligned)
-                        cols_sql = ", ".join(columns)
-                        con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_backfill")
-                        con.unregister('temp_backfill')
-
-                    self.log_signal.emit(f"✅ 成功保存 {len(df_all)} 条记录")
-                except Exception as e:
-                    self.log_signal.emit(f"❌ 写入失败: {str(e)}")
 
             result = {
                 'total': total,
@@ -872,7 +1190,7 @@ class DataDownloadThread(QThread):
         """停止下载"""
         self._is_running = False
         self.quit()
-        self.wait()
+        # Fix 58: 不在主线程 wait(3000)，让线程自行退出后由 Qt 清理
 
 
 class SingleStockDownloadThread(QThread):
@@ -894,13 +1212,11 @@ class SingleStockDownloadThread(QThread):
         """运行下载任务"""
         try:
             from xtquant import xtdata
-            from datetime import datetime
-            import pandas as pd
 
             # 检查DuckDB管理器是否可用
             try:
                 get_db_manager = _import_duckdb_manager()
-                manager = get_db_manager(r'D:/StockData/stock_data.ddb')
+                manager = get_db_manager(_get_duckdb_path())
                 self.log_signal.emit("[OK] 数据管理器初始化成功")
             except ImportError:
                 self.error_signal.emit("DuckDB管理器不可用，请确保data_manager.duckdb_connection_pool模块存在")
@@ -927,7 +1243,8 @@ class SingleStockDownloadThread(QThread):
                 '15m': '15m',
                 '30m': '30m',
                 '60m': '60m',
-                'tick': 'tick'
+                'tick': 'tick',
+                'l2transaction': 'l2transaction'
             }
             qmt_period = period_map.get(self.period, '1d')
 
@@ -966,6 +1283,9 @@ class SingleStockDownloadThread(QThread):
                 # 下载后尝试读取，设置较大的count
                 count = 100000
                 self.log_signal.emit("📡 正在读取已下载的tick数据...")
+            elif self.period == 'l2transaction':
+                count = 100000
+                self.log_signal.emit("📡 正在读取分笔成交数据...")
             else:
                 # 分钟线：估算每天的条数
                 if self.period == '1m':
@@ -995,6 +1315,15 @@ class SingleStockDownloadThread(QThread):
                     end_time=end_str,
                     count=count
                 )
+            elif self.period == 'l2transaction':
+                data = xtdata.get_market_data_ex(
+                    field_list=['time', 'price', 'volume', 'amount', 'bsflag', 'trade_id'],
+                    stock_list=[self.stock_code],
+                    period=qmt_period,
+                    start_time=start_str,
+                    end_time=end_str,
+                    count=count
+                )
             else:
                 data = xtdata.get_market_data_ex(
                     stock_list=[self.stock_code],
@@ -1005,8 +1334,21 @@ class SingleStockDownloadThread(QThread):
             if isinstance(data, dict) and self.stock_code in data:
                 df = data[self.stock_code]
                 if df.empty:
-                    self.error_signal.emit(f"没有获取到 {self.stock_code} 的数据，请检查代码和日期范围")
-                    return
+                    if self.period == 'l2transaction':
+                        self.log_signal.emit("⚠️ Level2分笔为空，尝试降级为tick转换")
+                        data = xtdata.get_market_data_ex(
+                            field_list=['time', 'lastPrice', 'volume', 'amount', 'func_type', 'openInt'],
+                            stock_list=[self.stock_code],
+                            period='tick',
+                            start_time=start_str,
+                            end_time=end_str,
+                            count=count
+                        )
+                        if isinstance(data, dict) and self.stock_code in data:
+                            df = data[self.stock_code]
+                    if df.empty:
+                        self.error_signal.emit(f"没有获取到 {self.stock_code} 的数据，请检查代码和日期范围")
+                        return
             else:
                 self.error_signal.emit(f"没有获取到 {self.stock_code} 的数据，请检查代码和日期范围")
                 return
@@ -1021,8 +1363,7 @@ class SingleStockDownloadThread(QThread):
             else:
                 # 分钟线/tick：只保留日期范围内的数据（精确到分钟/秒）
                 # 使用当天的23:59:59作为结束时间
-                from datetime import datetime as dt, time as dt_time
-                end_dt_dt = dt.combine(end_dt, dt_time(23, 59, 59))
+                end_dt_dt = datetime.combine(end_dt, dt_time(23, 59, 59))
                 df = df[(df['datetime'] >= start_dt) & (df['datetime'] <= end_dt_dt)]
 
             if df.empty:
@@ -1036,6 +1377,98 @@ class SingleStockDownloadThread(QThread):
             self.log_signal.emit("💾 正在保存到DuckDB...")
 
             # 转换为标准格式
+            if self.period == 'l2transaction':
+                time_series = pd.to_datetime(df['time'], unit='ms')
+                price_col = 'price' if 'price' in df.columns else 'lastPrice'
+                bs_col = 'bsflag' if 'bsflag' in df.columns else 'bsFlag' if 'bsFlag' in df.columns else None
+                trade_col = 'trade_id' if 'trade_id' in df.columns else 'tradeId' if 'tradeId' in df.columns else None
+                df_processed = pd.DataFrame({
+                    'stock_code': self.stock_code,
+                    'symbol_type': 'stock' if (self.stock_code.startswith('0') or self.stock_code.startswith('3') or self.stock_code.startswith('6')) else 'etf',
+                    'datetime': time_series,
+                    'period': 'tick',
+                    'price': df[price_col] if price_col in df.columns else 0,
+                    'volume': df['volume'].astype('int64') if 'volume' in df.columns else 0,
+                    'amount': df['amount'] if 'amount' in df.columns else 0,
+                    'bs_flag': df[bs_col] if bs_col else None,
+                    'trade_id': df[trade_col] if trade_col else 0,
+                    'created_at': datetime.now(),
+                    'updated_at': datetime.now()
+                })
+                table_name = 'stock_transaction'
+                with manager.get_write_connection() as con:
+                    con.execute(f"""
+                        CREATE TABLE IF NOT EXISTS {table_name} (
+                            stock_code VARCHAR(20),
+                            symbol_type VARCHAR(10),
+                            datetime TIMESTAMP,
+                            period VARCHAR(10),
+                            price DOUBLE,
+                            volume BIGINT,
+                            amount DOUBLE,
+                            bs_flag VARCHAR,
+                            trade_id BIGINT,
+                            created_at TIMESTAMP,
+                            updated_at TIMESTAMP
+                        )
+                    """)
+                with manager.get_write_connection() as con:
+                    con.register('temp_data', df_processed)
+                    con.execute(f"DELETE FROM {table_name} WHERE stock_code = '{self.stock_code}' AND datetime >= '{start_dt}' AND datetime <= '{end_dt}'")
+                    con.execute(f"INSERT INTO {table_name} SELECT * FROM temp_data")
+                    con.unregister('temp_data')
+                try:
+                    series = df_processed.set_index('datetime')['price'].astype(float)
+                    ohlc = series.resample('1min').ohlc()
+                    vol = df_processed.set_index('datetime')['volume'].resample('1min').sum()
+                    amt = df_processed.set_index('datetime')['amount'].resample('1min').sum()
+                    bars = pd.concat([ohlc, vol.rename('volume'), amt.rename('amount')], axis=1).dropna(how='all')
+                    bars = bars.reset_index().rename(columns={'datetime': 'datetime'})
+                    bars['stock_code'] = self.stock_code
+                    bars['symbol_type'] = 'stock' if (self.stock_code.startswith('0') or self.stock_code.startswith('3') or self.stock_code.startswith('6')) else 'etf'
+                    bars['period'] = '1m'
+                    bars['adjust_type'] = 'none'
+                    bars['factor'] = 1.0
+                    bars['created_at'] = datetime.now()
+                    bars['updated_at'] = datetime.now()
+                    with manager.get_write_connection() as con:
+                        con.execute("""
+                            CREATE TABLE IF NOT EXISTS stock_1m (
+                                stock_code VARCHAR(20),
+                                symbol_type VARCHAR(10),
+                                datetime TIMESTAMP,
+                                period VARCHAR(10),
+                                open DOUBLE,
+                                high DOUBLE,
+                                low DOUBLE,
+                                close DOUBLE,
+                                volume BIGINT,
+                                amount DOUBLE,
+                                adjust_type VARCHAR,
+                                factor DOUBLE,
+                                created_at TIMESTAMP,
+                                updated_at TIMESTAMP
+                            )
+                        """)
+                        columns = _get_table_columns(con, 'stock_1m')
+                        df_aligned = _align_dataframe_to_columns(bars, columns)
+                        con.register('temp_1m', df_aligned)
+                        con.execute(f"DELETE FROM stock_1m WHERE stock_code = '{self.stock_code}' AND datetime >= '{start_dt}' AND datetime <= '{end_dt_dt}'")
+                        cols_sql = ", ".join(columns)
+                        con.execute(f"INSERT INTO stock_1m ({cols_sql}) SELECT {cols_sql} FROM temp_1m")
+                        con.unregister('temp_1m')
+                    self.log_signal.emit("✅ 分笔聚合1m写入完成")
+                except Exception as e:
+                    self.log_signal.emit(f"⚠️ 分笔聚合1m失败: {str(e)[:60]}")
+                result = {
+                    'success': True,
+                    'symbol': self.stock_code,
+                    'record_count': len(df_processed),
+                    'file_size': len(df_processed) * 0.0001
+                }
+                self.finished_signal.emit(result)
+                self.log_signal.emit(f"[OK] {self.stock_code} 下载完成!")
+                return
             if self.period == 'tick':
                 # tick数据处理（字段结构不同）
                 time_series = pd.to_datetime(df['time'], unit='ms')
@@ -1084,6 +1517,50 @@ class SingleStockDownloadThread(QThread):
                     con.unregister('temp_data')
 
                 self.log_signal.emit(f"✅ 已保存 {len(df_processed)} 条tick记录到DuckDB")
+
+                try:
+                    series = df_processed.set_index('datetime')['lastPrice'].astype(float)
+                    ohlc = series.resample('1min').ohlc()
+                    vol = df_processed.set_index('datetime')['volume'].resample('1min').sum()
+                    amt = df_processed.set_index('datetime')['amount'].resample('1min').sum()
+                    bars = pd.concat([ohlc, vol.rename('volume'), amt.rename('amount')], axis=1).dropna(how='all')
+                    bars = bars.reset_index().rename(columns={'datetime': 'datetime'})
+                    bars['stock_code'] = self.stock_code
+                    bars['symbol_type'] = 'stock' if (self.stock_code.startswith('0') or self.stock_code.startswith('3') or self.stock_code.startswith('6')) else 'etf'
+                    bars['period'] = '1m'
+                    bars['adjust_type'] = 'none'
+                    bars['factor'] = 1.0
+                    bars['created_at'] = datetime.now()
+                    bars['updated_at'] = datetime.now()
+                    with manager.get_write_connection() as con:
+                        con.execute("""
+                            CREATE TABLE IF NOT EXISTS stock_1m (
+                                stock_code VARCHAR(20),
+                                symbol_type VARCHAR(10),
+                                datetime TIMESTAMP,
+                                period VARCHAR(10),
+                                open DOUBLE,
+                                high DOUBLE,
+                                low DOUBLE,
+                                close DOUBLE,
+                                volume BIGINT,
+                                amount DOUBLE,
+                                adjust_type VARCHAR,
+                                factor DOUBLE,
+                                created_at TIMESTAMP,
+                                updated_at TIMESTAMP
+                            )
+                        """)
+                        columns = _get_table_columns(con, 'stock_1m')
+                        df_aligned = _align_dataframe_to_columns(bars, columns)
+                        con.register('temp_1m', df_aligned)
+                        con.execute(f"DELETE FROM stock_1m WHERE stock_code = '{self.stock_code}' AND datetime >= '{start_dt}' AND datetime <= '{end_dt_dt}'")
+                        cols_sql = ", ".join(columns)
+                        con.execute(f"INSERT INTO stock_1m ({cols_sql}) SELECT {cols_sql} FROM temp_1m")
+                        con.unregister('temp_1m')
+                    self.log_signal.emit("✅ Tick聚合1m写入完成")
+                except Exception as e:
+                    self.log_signal.emit(f"⚠️ Tick聚合1m失败: {str(e)[:60]}")
 
                 result = {
                     'success': True,
@@ -1193,7 +1670,7 @@ class SingleStockDownloadThread(QThread):
         """停止下载"""
         self._is_running = False
         self.quit()
-        self.wait()
+        # Fix 58: 不在主线程 wait(3000)，让线程自行退出后由 Qt 清理
 
 
 class VerifyDataThread(QThread):
@@ -1209,81 +1686,77 @@ class VerifyDataThread(QThread):
         """运行验证任务"""
         try:
             _ensure_duckdb_tables()
-            import duckdb
+            get_db_manager = _import_duckdb_manager()
+            manager = get_db_manager(_get_duckdb_path())
+            with manager.get_read_connection() as con:
+                # 检查1分钟数据
+                has_1min = False
+                records_1min = 0
+                start_1min = ''
+                end_1min = ''
+                try:
+                    result = con.execute(f"""
+                        SELECT
+                            COUNT(*) as cnt,
+                            MIN(date) as start_date,
+                            MAX(date) as end_date
+                        FROM stock_1m
+                        WHERE stock_code = '{self.stock_code}'
+                    """).fetchone()
+                    if result and result[0] > 0:
+                        has_1min = True
+                        records_1min = result[0]
+                        start_1min = str(result[1]) if result[1] else ''
+                        end_1min = str(result[2]) if result[2] else ''
+                        self.log_signal.emit(f"✓ 1分钟数据: {records_1min:,} 条 ({start_1min} ~ {end_1min})")
+                except Exception:
+                    pass
 
-            db_path = r'D:/StockData/stock_data.ddb'
-            con = duckdb.connect(db_path, read_only=True)
+                # 检查日线数据
+                has_daily = False
+                records_daily = 0
+                start_daily = ''
+                end_daily = ''
+                try:
+                    result = con.execute(f"""
+                        SELECT
+                            COUNT(*) as cnt,
+                            MIN(date) as start_date,
+                            MAX(date) as end_date
+                        FROM stock_daily
+                        WHERE stock_code = '{self.stock_code}'
+                    """).fetchone()
+                    if result and result[0] > 0:
+                        has_daily = True
+                        records_daily = result[0]
+                        start_daily = str(result[1]) if result[1] else ''
+                        end_daily = str(result[2]) if result[2] else ''
+                        self.log_signal.emit(f"✓ 日线数据: {records_daily:,} 条 ({start_daily} ~ {end_daily})")
+                except Exception:
+                    pass
 
-            # 检查1分钟数据
-            has_1min = False
-            records_1min = 0
-            start_1min = ''
-            end_1min = ''
-            try:
-                result = con.execute(f"""
-                    SELECT
-                        COUNT(*) as cnt,
-                        MIN(date) as start_date,
-                        MAX(date) as end_date
-                    FROM stock_1m
-                    WHERE stock_code = '{self.stock_code}'
-                """).fetchone()
-                if result and result[0] > 0:
-                    has_1min = True
-                    records_1min = result[0]
-                    start_1min = str(result[1]) if result[1] else ''
-                    end_1min = str(result[2]) if result[2] else ''
-                    self.log_signal.emit(f"✓ 1分钟数据: {records_1min:,} 条 ({start_1min} ~ {end_1min})")
-            except Exception:
-                pass
-
-            # 检查日线数据
-            has_daily = False
-            records_daily = 0
-            start_daily = ''
-            end_daily = ''
-            try:
-                result = con.execute(f"""
-                    SELECT
-                        COUNT(*) as cnt,
-                        MIN(date) as start_date,
-                        MAX(date) as end_date
-                    FROM stock_daily
-                    WHERE stock_code = '{self.stock_code}'
-                """).fetchone()
-                if result and result[0] > 0:
-                    has_daily = True
-                    records_daily = result[0]
-                    start_daily = str(result[1]) if result[1] else ''
-                    end_daily = str(result[2]) if result[2] else ''
-                    self.log_signal.emit(f"✓ 日线数据: {records_daily:,} 条 ({start_daily} ~ {end_daily})")
-            except Exception:
-                pass
-
-            # 检查tick数据
-            has_tick = False
-            records_tick = 0
-            start_tick = ''
-            end_tick = ''
-            try:
-                result = con.execute(f"""
-                    SELECT
-                        COUNT(*) as cnt,
-                        MIN(datetime) as start_time,
-                        MAX(datetime) as end_time
-                    FROM stock_tick
-                    WHERE stock_code = '{self.stock_code}'
-                """).fetchone()
-                if result and result[0] > 0:
-                    has_tick = True
-                    records_tick = result[0]
-                    start_tick = str(result[1]) if result[1] else ''
-                    end_tick = str(result[2]) if result[2] else ''
-                    self.log_signal.emit(f"✓ Tick数据: {records_tick:,} 条 ({start_tick} ~ {end_tick})")
-            except Exception:
-                pass
-
-            con.close()
+                # 检查tick数据
+                has_tick = False
+                records_tick = 0
+                start_tick = ''
+                end_tick = ''
+                try:
+                    result = con.execute(f"""
+                        SELECT
+                            COUNT(*) as cnt,
+                            MIN(datetime) as start_time,
+                            MAX(datetime) as end_time
+                        FROM stock_tick
+                        WHERE stock_code = '{self.stock_code}'
+                    """).fetchone()
+                    if result and result[0] > 0:
+                        has_tick = True
+                        records_tick = result[0]
+                        start_tick = str(result[1]) if result[1] else ''
+                        end_tick = str(result[2]) if result[2] else ''
+                        self.log_signal.emit(f"✓ Tick数据: {records_tick:,} 条 ({start_tick} ~ {end_tick})")
+                except Exception:
+                    pass
 
             result = {
                 'stock': self.stock_code,
@@ -1563,7 +2036,109 @@ class FinancialDataDownloadThread(QThread):
         """停止下载"""
         self._is_running = False
         self.quit()
-        self.wait()
+        # Fix 58: 不在主线程 wait(3000)，让线程自行退出后由 Qt 清理
+
+
+class LocalStatsLoadThread(QThread):
+    """后台加载本地数据统计，避免阻塞UI线程"""
+
+    result_ready = pyqtSignal(dict)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, duckdb_path: str):
+        super().__init__()
+        self.duckdb_path = duckdb_path
+
+    def run(self):
+        try:
+            get_db_manager = _import_duckdb_manager()
+            manager = get_db_manager(self.duckdb_path)
+
+            def _table_exists(con, table_name: str) -> bool:
+                try:
+                    result = con.execute(
+                        """
+                        SELECT COUNT(*) FROM information_schema.tables
+                        WHERE table_name = ?
+                        """,
+                        [table_name],
+                    ).fetchone()
+                    return bool(result and int(result[0]) > 0)
+                except Exception:
+                    return False
+
+            with manager.get_read_connection() as con:
+                has_daily = _table_exists(con, "stock_daily")
+                has_symbol_type = False
+                stats_daily = None
+                if has_daily:
+                    columns = _get_table_columns(con, "stock_daily")
+                    has_symbol_type = "symbol_type" in columns
+                    if has_symbol_type:
+                        stats_daily = con.execute(
+                            """
+                            SELECT
+                                COUNT(DISTINCT stock_code) as stock_count,
+                                SUM(CASE WHEN symbol_type = 'stock' THEN 1 ELSE 0 END) as stock_only,
+                                SUM(CASE WHEN symbol_type = 'etf' THEN 1 ELSE 0 END) as etf_count,
+                                COUNT(*) as total_records,
+                                MAX(date) as latest_date
+                            FROM stock_daily
+                            """
+                        ).fetchone()
+                    else:
+                        stats_daily = con.execute(
+                            """
+                            SELECT
+                                COUNT(DISTINCT stock_code) as stock_count,
+                                COUNT(*) as total_records,
+                                MAX(date) as latest_date
+                            FROM stock_daily
+                            """
+                        ).fetchone()
+
+                minute_tables = ["stock_1m", "stock_5m", "stock_15m", "stock_30m", "stock_60m"]
+                minute_records = 0
+                for table in minute_tables:
+                    try:
+                        if not _table_exists(con, table):
+                            continue
+                        result = con.execute(
+                            f"""
+                            SELECT COUNT(*) as records
+                            FROM {table}
+                            """
+                        ).fetchone()
+                        if result:
+                            minute_records += int(result[0] or 0)
+                    except Exception:
+                        pass
+
+            if has_symbol_type:
+                total_symbols = stats_daily[0] if stats_daily else 0
+                stock_count = stats_daily[1] if stats_daily else 0
+                daily_records = stats_daily[3] if stats_daily else 0
+                latest_date = str(stats_daily[4]) if stats_daily and stats_daily[4] else "N/A"
+            else:
+                total_symbols = stats_daily[0] if stats_daily else 0
+                stock_count = total_symbols
+                daily_records = stats_daily[1] if stats_daily else 0
+                latest_date = str(stats_daily[2]) if stats_daily and stats_daily[2] else "N/A"
+
+            total_records = daily_records + minute_records
+            size_mb = total_records * 0.0001
+            self.result_ready.emit(
+                {
+                    "total_symbols": int(total_symbols or 0),
+                    "stock_count": int(stock_count or 0),
+                    "total_bonds": 0,
+                    "total_records": int(total_records or 0),
+                    "size_mb": float(size_mb or 0.0),
+                    "latest_date": latest_date,
+                }
+            )
+        except Exception as e:
+            self.error_occurred.emit(str(e))
 
 
 class LocalDataManagerWidget(QWidget):
@@ -1574,6 +2149,7 @@ class LocalDataManagerWidget(QWidget):
         self.download_thread = None
         self.duckdb_storage = None
         self.duckdb_con = None  # 添加DuckDB连接属性
+        self._stats_thread = None
         self.init_ui()
 
     def init_ui(self):
@@ -1740,6 +2316,46 @@ class LocalDataManagerWidget(QWidget):
         """)
         btn_layout.addWidget(self.backfill_data_btn)
 
+        self.download_tick_btn = QPushButton("⏱ 下载Tick")
+        self.download_tick_btn.clicked.connect(self.download_tick_data)
+        self.download_tick_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3F51B5;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #303F9F;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        btn_layout.addWidget(self.download_tick_btn)
+
+        self.download_transaction_btn = QPushButton("🧾 下载分笔成交")
+        self.download_transaction_btn.clicked.connect(self.download_transaction_data)
+        self.download_transaction_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #795548;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #5D4037;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        btn_layout.addWidget(self.download_transaction_btn)
+
         action_layout.addLayout(btn_layout, 2, 0, 1, 4)
 
         # 进度条
@@ -1794,6 +2410,66 @@ class LocalDataManagerWidget(QWidget):
             }
         """)
         other_action_layout.addWidget(self.verify_data_btn)
+
+        self.retry_failed_btn = QPushButton("♻️ 失败样本重试")
+        self.retry_failed_btn.clicked.connect(self.retry_failed_samples)
+        self.retry_failed_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #8BC34A;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #7CB342;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        other_action_layout.addWidget(self.retry_failed_btn)
+
+        self.import_failed_btn = QPushButton("📂 导入CSV重跑")
+        self.import_failed_btn.clicked.connect(self.import_failed_samples)
+        self.import_failed_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #009688;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #00796B;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        other_action_layout.addWidget(self.import_failed_btn)
+
+        self.show_failures_btn = QPushButton("📈 失败原因图")
+        self.show_failures_btn.clicked.connect(self.show_failure_chart)
+        self.show_failures_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #E91E63;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #C2185B;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        other_action_layout.addWidget(self.show_failures_btn)
 
         other_action_layout.addStretch()
         quick_action_layout.addLayout(other_action_layout, 0, 0, 1, 4)
@@ -1948,7 +2624,8 @@ class LocalDataManagerWidget(QWidget):
             "15分钟数据",
             "30分钟数据",
             "60分钟数据",
-            "Tick数据"
+            "Tick数据",
+            "分笔成交"
         ])
         manual_layout.addWidget(self.manual_data_type_combo, 2, 1)
 
@@ -2027,7 +2704,7 @@ class LocalDataManagerWidget(QWidget):
         self.log("本地数据管理组件已加载")
         self.log("提示：首次使用请先下载数据")
 
-        # 加载DuckDB统计数据
+        # 异步加载DuckDB统计数据，避免切换标签页时主线程卡顿
         QTimer.singleShot(100, self.load_duckdb_statistics)
 
     def log(self, message):
@@ -2040,85 +2717,31 @@ class LocalDataManagerWidget(QWidget):
         self.log_text.setTextCursor(cursor)
 
     def load_duckdb_statistics(self):
-        """从DuckDB加载统计数据"""
-        try:
-            _ensure_duckdb_tables()
-            import duckdb
+        """异步从DuckDB加载统计数据"""
+        if self._stats_thread is not None and self._stats_thread.isRunning():
+            return
+        self._stats_thread = LocalStatsLoadThread(_get_duckdb_path())
+        self._stats_thread.result_ready.connect(self._on_duckdb_statistics_loaded)
+        self._stats_thread.error_occurred.connect(self._on_duckdb_statistics_error)
+        self._stats_thread.start()
 
-            db_path = r'D:/StockData/stock_data.ddb'
-            con = duckdb.connect(db_path, read_only=True)
+    def _on_duckdb_statistics_loaded(self, stats: dict[str, Any]):
+        total_symbols = int(stats.get("total_symbols", 0) or 0)
+        stock_count = int(stats.get("stock_count", 0) or 0)
+        total_bonds = int(stats.get("total_bonds", 0) or 0)
+        total_records = int(stats.get("total_records", 0) or 0)
+        size_mb = float(stats.get("size_mb", 0.0) or 0.0)
+        latest_date = str(stats.get("latest_date", "N/A") or "N/A")
 
-            # 统计stock_daily表
-            columns = _get_table_columns(con, 'stock_daily')
-            has_symbol_type = 'symbol_type' in columns
+        self.total_symbols_label.setText(f"标的总数: {total_symbols:,}")
+        self.total_stocks_label.setText(f"股票数量: {stock_count:,}")
+        self.total_bonds_label.setText(f"可转债数量: {total_bonds:,}")
+        self.total_records_label.setText(f"总记录数: {total_records:,}")
+        self.total_size_label.setText(f"存储大小: {size_mb:.2f} MB")
+        self.latest_date_label.setText(f"最新日期: {latest_date}")
 
-            if has_symbol_type:
-                stats_daily = con.execute("""
-                    SELECT
-                        COUNT(DISTINCT stock_code) as stock_count,
-                        SUM(CASE WHEN symbol_type = 'stock' THEN 1 ELSE 0 END) as stock_only,
-                        SUM(CASE WHEN symbol_type = 'etf' THEN 1 ELSE 0 END) as etf_count,
-                        COUNT(*) as total_records,
-                        MAX(date) as latest_date
-                    FROM stock_daily
-                """).fetchone()
-            else:
-                stats_daily = con.execute("""
-                    SELECT
-                        COUNT(DISTINCT stock_code) as stock_count,
-                        COUNT(*) as total_records,
-                        MAX(date) as latest_date
-                    FROM stock_daily
-                """).fetchone()
-
-            # 统计所有分钟数据表
-            minute_tables = ['stock_1m', 'stock_5m', 'stock_15m', 'stock_30m', 'stock_60m']
-            minute_records = 0
-            minute_stocks = set()
-
-            for table in minute_tables:
-                try:
-                    result = con.execute(f"""
-                        SELECT
-                            COUNT(DISTINCT stock_code) as cnt,
-                            COUNT(*) as records
-                        FROM {table}
-                    """).fetchone()
-                    if result:
-                        minute_stocks.update(con.execute(f"SELECT DISTINCT stock_code FROM {table}").fetchall())
-                        minute_records += result[1]
-                except Exception:
-                    pass
-
-            con.close()
-
-            # 更新UI
-            if has_symbol_type:
-                total_symbols = stats_daily[0] if stats_daily else 0
-                stock_count = stats_daily[1] if stats_daily else 0
-                daily_records = stats_daily[3] if stats_daily else 0
-                latest_date = str(stats_daily[4]) if stats_daily and stats_daily[4] else 'N/A'
-            else:
-                total_symbols = stats_daily[0] if stats_daily else 0
-                stock_count = total_symbols
-                daily_records = stats_daily[1] if stats_daily else 0
-                latest_date = str(stats_daily[2]) if stats_daily and stats_daily[2] else 'N/A'
-
-            total_records = daily_records + minute_records
-            total_bonds = 0  # 暂时没有可转债数据
-
-            # 估算存储大小（每条记录约0.1KB）
-            size_mb = total_records * 0.0001
-
-            self.total_symbols_label.setText(f"标的总数: {total_symbols:,}")
-            self.total_stocks_label.setText(f"股票数量: {stock_count:,}")
-            self.total_bonds_label.setText(f"可转债数量: {total_bonds:,}")
-            self.total_records_label.setText(f"总记录数: {total_records:,}")
-            self.total_size_label.setText(f"存储大小: {size_mb:.2f} MB")
-            self.latest_date_label.setText(f"最新日期: {latest_date}")
-
-        except Exception as e:
-            self.log(f"[ERROR] 加载统计数据失败: {e}")
+    def _on_duckdb_statistics_error(self, error_message: str):
+        self.log(f"[ERROR] 加载统计数据失败: {error_message}")
 
     def download_single_stock(self):
         """下载单个标的的数据"""
@@ -2153,7 +2776,8 @@ class LocalDataManagerWidget(QWidget):
             "15分钟数据": "15m",
             "30分钟数据": "30m",
             "60分钟数据": "60m",
-            "Tick数据": "tick"
+            "Tick数据": "tick",
+            "分笔成交": "l2transaction"
         }
         period = period_map.get(data_type_text, "1d")
 
@@ -2232,34 +2856,19 @@ class LocalDataManagerWidget(QWidget):
             )
             if reply == QMessageBox.No:
                 return
-            # 获取全部A股列表
-            try:
-                from xtquant import xtdata
-                all_stocks = xtdata.get_stock_list_in_sector('沪深A股')
-                stock_list = all_stocks[:100]  # 限制前100只，避免太多
-                QMessageBox.information(self, "提示", "为避免下载时间过长，限制为前100只股票")
-            except Exception:
+            # 获取全部A股列表（后台线程，㊺修复）
+            all_stocks = self._get_sector_stocks('沪深A股')
+            if not all_stocks:
                 QMessageBox.warning(self, "错误", "获取股票列表失败")
                 return
+            stock_list = all_stocks[:100]
+            QMessageBox.information(self, "提示", "为避免下载时间过长，限制为前100只股票")
         elif "沪深300" in stock_selection:
-            # 获取沪深300成分股
-            try:
-                from xtquant import xtdata
-                stock_list = xtdata.get_stock_list_in_sector('沪深300')
-            except Exception:
-                stock_list = ["000001.SZ", "600519.SH", "511380.SH"]
+            stock_list = self._get_sector_stocks('沪深300') or ["000001.SZ", "600519.SH", "511380.SH"]
         elif "中证500" in stock_selection:
-            try:
-                from xtquant import xtdata
-                stock_list = xtdata.get_stock_list_in_sector('中证500')
-            except Exception:
-                stock_list = ["000001.SZ", "600519.SH", "511380.SH"]
+            stock_list = self._get_sector_stocks('中证500') or ["000001.SZ", "600519.SH", "511380.SH"]
         elif "中证1000" in stock_selection:
-            try:
-                from xtquant import xtdata
-                stock_list = xtdata.get_stock_list_in_sector('中证1000')
-            except Exception:
-                stock_list = ["000001.SZ", "600519.SH", "511380.SH"]
+            stock_list = self._get_sector_stocks('中证1000') or ["000001.SZ", "600519.SH", "511380.SH"]
         else:
             stock_list = ["000001.SZ", "600519.SH", "511380.SH"]
 
@@ -2339,23 +2948,11 @@ class LocalDataManagerWidget(QWidget):
                 return
             stock_list = [s.strip() for s in text.split(',')]
         elif "沪深300" in stock_selection:
-            try:
-                from xtquant import xtdata
-                stock_list = xtdata.get_stock_list_in_sector('沪深300')
-            except Exception:
-                stock_list = ["000001.SZ", "600519.SH"]
+            stock_list = self._get_sector_stocks('沪深300') or ["000001.SZ", "600519.SH"]
         elif "中证500" in stock_selection:
-            try:
-                from xtquant import xtdata
-                stock_list = xtdata.get_stock_list_in_sector('中证500')
-            except Exception:
-                stock_list = ["000001.SZ", "600519.SH"]
+            stock_list = self._get_sector_stocks('中证500') or ["000001.SZ", "600519.SH"]
         elif "中证1000" in stock_selection:
-            try:
-                from xtquant import xtdata
-                stock_list = xtdata.get_stock_list_in_sector('中证1000')
-            except Exception:
-                stock_list = ["000001.SZ", "600519.SH"]
+            stock_list = self._get_sector_stocks('中证1000') or ["000001.SZ", "600519.SH"]
         elif "全部A股" in stock_selection:
             reply = QMessageBox.question(
                 self, "确认保存",
@@ -2365,10 +2962,8 @@ class LocalDataManagerWidget(QWidget):
             )
             if reply == QMessageBox.No:
                 return
-            try:
-                from xtquant import xtdata
-                stock_list = xtdata.get_stock_list_in_sector('沪深A股')
-            except Exception:
+            stock_list = self._get_sector_stocks('沪深A股')
+            if not stock_list:
                 QMessageBox.warning(self, "错误", "获取股票列表失败")
                 return
         else:
@@ -2417,7 +3012,11 @@ class LocalDataManagerWidget(QWidget):
 
     def download_single_financial(self):
         """下载单只股票的财务数据"""
-        stock_code = self.financial_stock_input.text().strip()
+        financial_stock_input = getattr(self, "financial_stock_input", None)
+        if financial_stock_input is None or not hasattr(financial_stock_input, "text"):
+            QMessageBox.warning(self, "提示", "当前界面未启用单股财务输入框")
+            return
+        stock_code = str(financial_stock_input.text()).strip()
 
         if not stock_code:
             QMessageBox.warning(self, "提示", "请输入股票代码")
@@ -2492,13 +3091,14 @@ class LocalDataManagerWidget(QWidget):
         self.refresh_financial_stats()
 
     def refresh_financial_stats(self):
-        """刷新财务数据统计"""
+        """刷新财务数据统计（后台线程执行 xtdata 调用，㊺修复）"""
+        self.log("[INFO] 正在统计已下载的财务数据...")
+        threading.Thread(target=self._refresh_financial_stats_bg, daemon=True).start()
+
+    def _refresh_financial_stats_bg(self):
         try:
             from xtquant import xtdata
 
-            self.log("[INFO] 正在统计已下载的财务数据...")
-
-            # 测试几只常用股票
             test_stocks = ["000001.SZ", "600519.SH", "511380.SH", "512100.SH"]
             table_list = ["Balance", "Income", "CashFlow"]
 
@@ -2540,15 +3140,19 @@ class LocalDataManagerWidget(QWidget):
 
     def view_financial_data(self):
         """查看选中股票的财务数据"""
+        data_table = getattr(self, "data_table", None)
+        if data_table is None:
+            QMessageBox.warning(self, "提示", "当前界面没有可用的数据表格")
+            return
         # 获取选中的行
-        selected_items = self.data_table.selectedItems()
+        selected_items = data_table.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "提示", "请先在列表中选择一只股票")
             return
 
         # 获取股票代码
-        row = self.data_table.currentRow()
-        code_item = self.data_table.item(row, 0)
+        row = data_table.currentRow()
+        code_item = data_table.item(row, 0)
         if not code_item:
             return
 
@@ -2567,11 +3171,58 @@ class LocalDataManagerWidget(QWidget):
             f"新功能支持查看更详细的财务指标数据。"
         )
 
+    def _get_latest_failed_csv(self) -> Optional[str]:
+        try:
+            log_dir = os.path.join(Path(__file__).parents[2], "logs")
+            if not os.path.exists(log_dir):
+                return None
+            candidates: list[str] = []
+            for name in os.listdir(log_dir):
+                if name.startswith("failed_") and name.endswith(".csv"):
+                    candidates.append(os.path.join(log_dir, name))
+            if not candidates:
+                return None
+            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            return candidates[0]
+        except Exception:
+            return None
+
+    def _parse_task_type_from_path(self, path: str) -> str:
+        base = os.path.basename(path)
+        if "transaction" in base:
+            return "download_transaction"
+        if "tick" in base:
+            return "download_tick"
+        return "download_tick"
+
+    def _build_symbols_from_csv(self, file_path: str) -> list[str]:
+        try:
+            df = pd.read_csv(file_path)
+            if "stock_code" in df.columns:
+                return [str(code).strip() for code in df["stock_code"].dropna().unique().tolist()]
+        except Exception:
+            pass
+        return []
+
     def on_financial_download_error(self, error_msg):
         """财务数据下载出错"""
         self._set_download_state(False)
         self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "下载失败", error_msg)
+
+    @staticmethod
+    def _get_sector_stocks(sector_name: str) -> list:
+        """在后台线程中获取板块股票列表，避免主线程阻塞（㊺修复）"""
+        from concurrent.futures import ThreadPoolExecutor
+        def _fetch():
+            from xtquant import xtdata
+            return xtdata.get_stock_list_in_sector(sector_name) or []
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_fetch)
+                return future.result(timeout=10)
+        except Exception:
+            return []
 
     def download_stocks(self):
         """下载A股数据"""
@@ -2678,6 +3329,64 @@ class LocalDataManagerWidget(QWidget):
 
         self._set_download_state(True)
 
+    def download_tick_data(self):
+        if self.download_thread and self.download_thread.isRunning():
+            QMessageBox.warning(self, "提示", "已有下载任务正在运行")
+            return
+        start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
+        end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
+        reply = QMessageBox.question(
+            self,
+            "确认操作",
+            f"将下载Tick数据并写入DuckDB。\n日期范围: {start_date} ~ {end_date}\n\n数据量较大，确定继续吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.No:
+            return
+        self.log(f"⏱ 开始下载Tick数据 ({start_date} ~ {end_date})")
+        self.download_thread = DataDownloadThread(
+            task_type='download_tick',
+            symbols=None,
+            start_date=start_date,
+            end_date=end_date
+        )
+        self.download_thread.log_signal.connect(self.log)
+        self.download_thread.progress_signal.connect(self.update_progress)
+        self.download_thread.finished_signal.connect(self.on_download_finished)
+        self.download_thread.error_signal.connect(self.on_download_error)
+        self.download_thread.start()
+        self._set_download_state(True)
+
+    def download_transaction_data(self):
+        if self.download_thread and self.download_thread.isRunning():
+            QMessageBox.warning(self, "提示", "已有下载任务正在运行")
+            return
+        start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
+        end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
+        reply = QMessageBox.question(
+            self,
+            "确认操作",
+            f"将下载分笔成交数据并写入DuckDB。\n日期范围: {start_date} ~ {end_date}\n\n数据量较大，确定继续吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.No:
+            return
+        self.log(f"🧾 开始下载分笔成交 ({start_date} ~ {end_date})")
+        self.download_thread = DataDownloadThread(
+            task_type='download_transaction',
+            symbols=None,
+            start_date=start_date,
+            end_date=end_date
+        )
+        self.download_thread.log_signal.connect(self.log)
+        self.download_thread.progress_signal.connect(self.update_progress)
+        self.download_thread.finished_signal.connect(self.on_download_finished)
+        self.download_thread.error_signal.connect(self.on_download_error)
+        self.download_thread.start()
+        self._set_download_state(True)
+
     def update_progress(self, current, total):
         """更新进度"""
         self.progress_bar.setMaximum(total)
@@ -2722,8 +3431,13 @@ class LocalDataManagerWidget(QWidget):
         self.download_bonds_btn.setEnabled(not is_downloading)
         self.update_data_btn.setEnabled(not is_downloading)
         self.backfill_data_btn.setEnabled(not is_downloading)
+        self.download_tick_btn.setEnabled(not is_downloading)
+        self.download_transaction_btn.setEnabled(not is_downloading)
         self.manual_download_btn.setEnabled(not is_downloading)
         self.verify_data_btn.setEnabled(not is_downloading)
+        self.retry_failed_btn.setEnabled(not is_downloading)
+        self.import_failed_btn.setEnabled(not is_downloading)
+        self.show_failures_btn.setEnabled(not is_downloading)
         self.financial_download_btn.setEnabled(not is_downloading)
         self.stop_btn.setVisible(is_downloading)
         self.progress_bar.setVisible(is_downloading)
@@ -2799,6 +3513,125 @@ class LocalDataManagerWidget(QWidget):
         else:
             QMessageBox.warning(self, "验证完成", msg + "\n⚠️ 该股票没有本地数据，请先下载")
 
+    def retry_failed_samples(self):
+        if self.download_thread and self.download_thread.isRunning():
+            QMessageBox.warning(self, "提示", "已有下载任务正在运行")
+            return
+        latest = self._get_latest_failed_csv()
+        if not latest:
+            QMessageBox.information(self, "提示", "未找到失败样本CSV")
+            return
+        symbols = self._build_symbols_from_csv(latest)
+        if not symbols:
+            QMessageBox.information(self, "提示", "失败样本CSV为空或格式不正确")
+            return
+        task_type = self._parse_task_type_from_path(latest)
+        reply = QMessageBox.question(
+            self,
+            "确认操作",
+            f"将重试失败样本，共 {len(symbols)} 只标的。\n\n文件: {latest}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.No:
+            return
+        self.log(f"♻️ 开始重试失败样本: {len(symbols)} 只标的")
+        self.download_thread = DataDownloadThread(
+            task_type=task_type,
+            symbols=symbols,
+            start_date=self.start_date_edit.date().toString("yyyy-MM-dd"),
+            end_date=self.end_date_edit.date().toString("yyyy-MM-dd")
+        )
+        self.download_thread.log_signal.connect(self.log)
+        self.download_thread.progress_signal.connect(self.update_progress)
+        self.download_thread.finished_signal.connect(self.on_download_finished)
+        self.download_thread.error_signal.connect(self.on_download_error)
+        self.download_thread.start()
+        self._set_download_state(True)
+
+    def import_failed_samples(self):
+        if self.download_thread and self.download_thread.isRunning():
+            QMessageBox.warning(self, "提示", "已有下载任务正在运行")
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择失败样本CSV", "", "CSV文件 (*.csv)"
+        )
+        if not file_path:
+            return
+        symbols = self._build_symbols_from_csv(file_path)
+        if not symbols:
+            QMessageBox.information(self, "提示", "CSV为空或格式不正确")
+            return
+        task_type = self._parse_task_type_from_path(file_path)
+        reply = QMessageBox.question(
+            self,
+            "确认操作",
+            f"将导入CSV并重跑，共 {len(symbols)} 只标的。\n\n文件: {file_path}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.No:
+            return
+        self.log(f"📂 导入CSV重跑: {len(symbols)} 只标的")
+        self.download_thread = DataDownloadThread(
+            task_type=task_type,
+            symbols=symbols,
+            start_date=self.start_date_edit.date().toString("yyyy-MM-dd"),
+            end_date=self.end_date_edit.date().toString("yyyy-MM-dd")
+        )
+        self.download_thread.log_signal.connect(self.log)
+        self.download_thread.progress_signal.connect(self.update_progress)
+        self.download_thread.finished_signal.connect(self.on_download_finished)
+        self.download_thread.error_signal.connect(self.on_download_error)
+        self.download_thread.start()
+        self._set_download_state(True)
+
+    def show_failure_chart(self):
+        latest = self._get_latest_failed_csv()
+        if not latest:
+            QMessageBox.information(self, "提示", "未找到失败样本CSV")
+            return
+        try:
+            df = pd.read_csv(latest)
+        except Exception:
+            QMessageBox.information(self, "提示", "无法读取失败样本CSV")
+            return
+        if "reason" not in df.columns:
+            QMessageBox.information(self, "提示", "CSV缺少reason列")
+            return
+        reason_counts = df["reason"].fillna("unknown").value_counts().to_dict()
+        total = sum(reason_counts.values())
+        summary = "\n".join([f"{k}: {v}" for k, v in reason_counts.items()])
+        QMessageBox.information(
+            self,
+            "失败原因统计",
+            f"文件: {latest}\n总计: {total}\n\n{summary}"
+        )
+
+    def closeEvent(self, event):
+        try:
+            # verify_thread 含多个串行 DuckDB 查询，给更长的等待窗口
+            thread_timeouts = [
+                (self.download_thread, 1000),
+                (self._stats_thread, 1000),
+                (getattr(self, 'save_thread', None), 1000),
+                (getattr(self, 'verify_thread', None), 3000),
+            ]
+            for t, timeout_ms in thread_timeouts:
+                try:
+                    if t and t.isRunning():
+                        t.requestInterruption()
+                        t.quit()
+                        t0 = time.monotonic()
+                        finished = t.wait(timeout_ms)
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        status = "已退出" if finished else "超时未退出"
+                        print(f"[closeEvent] LocalDataManagerWidget - {t.__class__.__name__}: {status} ({elapsed_ms}ms)")
+                except Exception:
+                    pass  # 测试 mock 或非 QThread 对象，跳过清理
+        finally:
+            super().closeEvent(event)
+
 
 class DataViewerDialog(QDialog):
     """数据查看对话框 - 支持复权"""
@@ -2869,7 +3702,7 @@ class DataViewerDialog(QDialog):
         layout.addLayout(info_layout)
 
         # 数据表格
-        self.data_table = QTableWidget()
+        self.data_table = QTableView()
         self.data_table.setAlternatingRowColors(True)
         self.data_table.setSortingEnabled(True)
         layout.addWidget(self.data_table)
@@ -2882,68 +3715,57 @@ class DataViewerDialog(QDialog):
     def load_data(self):
         """加载数据"""
         try:
-            # 使用只读模式连接，避免配置冲突
-            import duckdb
+            get_db_manager = _import_duckdb_manager()
+            manager = get_db_manager(_get_duckdb_path())
 
-            # DuckDB数据库路径
-            db_path = Path('D:/StockData/stock_data.ddb')
+            db_path = Path(_get_duckdb_path())
 
             if not db_path.exists():
                 self.stats_label.setText(f"❌ 数据库不存在: {db_path}")
-                self.data_table.setRowCount(1)
-                self.data_table.setColumnCount(1)
-                self.data_table.setHorizontalHeaderLabels(["错误"])
-                self.data_table.setItem(0, 0, QTableWidgetItem(f"数据库不存在:\n{db_path}"))
+                model = _PandasTableModel(pd.DataFrame({"错误": [f"数据库不存在:\n{db_path}"]}))
+                self.data_table.setModel(model)
                 return
 
-            # 创建只读连接
-            con = duckdb.connect(str(db_path), read_only=True)
+            with manager.get_read_connection() as con:
+                adjust_map = {
+                    "none": "none",
+                    "qfq": "front",
+                    "hfq": "back"
+                }
+                duckdb_adjust = adjust_map.get(self.adjust, "none")
 
-            # 映射复权类型
-            adjust_map = {
-                "none": "none",
-                "qfq": "front",
-                "hfq": "back"
-            }
-            duckdb_adjust = adjust_map.get(self.adjust, "none")
+                columns = _get_table_columns(con, 'stock_daily')
+                if not columns:
+                    self.stats_label.setText("❌ stock_daily 表不存在或无列")
+                    return
 
-            # 加载数据（直接查询DuckDB）
-            columns = _get_table_columns(con, 'stock_daily')
-            if not columns:
-                con.close()
-                self.stats_label.setText("❌ stock_daily 表不存在或无列")
-                return
+                conditions = [f"stock_code = '{self.stock_code}'"]
+                if 'period' in columns:
+                    conditions.append("period = '1d'")
+                if 'adjust_type' in columns:
+                    conditions.append(f"adjust_type = '{duckdb_adjust}'")
+                where_clause = " AND ".join(conditions)
 
-            conditions = [f"stock_code = '{self.stock_code}'"]
-            if 'period' in columns:
-                conditions.append("period = '1d'")
-            if 'adjust_type' in columns:
-                conditions.append(f"adjust_type = '{duckdb_adjust}'")
-            where_clause = " AND ".join(conditions)
+                query = f"""
+                    SELECT
+                        date,
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume,
+                        amount
+                    FROM stock_daily
+                    WHERE {where_clause}
+                    ORDER BY date
+                """
 
-            query = f"""
-                SELECT
-                    date,
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume,
-                    amount
-                FROM stock_daily
-                WHERE {where_clause}
-                ORDER BY date
-            """
-
-            df = con.execute(query).df()
-            con.close()
+                df = con.execute(query).df()
 
             if df.empty:
                 self.stats_label.setText(f"❌ 未找到 {self.stock_code} 的数据")
-                self.data_table.setRowCount(1)
-                self.data_table.setColumnCount(1)
-                self.data_table.setHorizontalHeaderLabels(["提示"])
-                self.data_table.setItem(0, 0, QTableWidgetItem(f"未找到 {self.stock_code} 的数据\n请先下载该股票的数据"))
+                model = _PandasTableModel(pd.DataFrame({"提示": [f"未找到 {self.stock_code} 的数据\n请先下载该股票的数据"]}))
+                self.data_table.setModel(model)
                 return
 
             # 设置日期为索引
@@ -2956,40 +3778,19 @@ class DataViewerDialog(QDialog):
             self.stats_label.setText(f"❌ 加载失败: {str(e)}")
             import traceback
             traceback.print_exc()
-            self.data_table.setRowCount(1)
-            self.data_table.setColumnCount(1)
-            self.data_table.setHorizontalHeaderLabels(["错误"])
-            self.data_table.setItem(0, 0, QTableWidgetItem(f"加载数据失败:\n{str(e)}"))
+            model = _PandasTableModel(pd.DataFrame({"错误": [f"加载数据失败:\n{str(e)}"]}))
+            self.data_table.setModel(model)
 
     def _display_data(self, df):
         """显示数据到表格"""
-        # 设置列
-        df = df.reset_index()
-        columns = df.columns.tolist()
-
-        self.data_table.setColumnCount(len(columns))
-        self.data_table.setHorizontalHeaderLabels(columns)
-
-        # 设置行
-        self.data_table.setRowCount(len(df))
-
-        # 填充数据（只显示前1000条，避免太慢）
-        display_df = df.head(1000)
-
-        for row_idx in range(len(display_df)):
-            for col_idx, col in enumerate(columns):
-                value = display_df.iloc[row_idx, col_idx]
-                item = QTableWidgetItem(str(value))
-                self.data_table.setItem(row_idx, col_idx, item)
-
-        # 调整列宽
+        model = _PandasTableModel(df)
+        proxy = QSortFilterProxyModel(self)
+        proxy.setSourceModel(model)
+        self.data_table.setModel(proxy)
         self.data_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
         # 更新统计信息
         stats = f"总记录数: {len(df):,} 条"
-        if len(df) > 1000:
-            stats += " (显示前1000条)"
-
         if not df.empty:
             latest_price = df['close'].iloc[-1]
             stats += f" | 最新价: {latest_price:.2f}"
@@ -3004,11 +3805,8 @@ class DataViewerDialog(QDialog):
     def export_csv(self):
         """导出为CSV"""
         try:
-            # 使用只读模式连接
-            import duckdb
-
-            # DuckDB数据库路径
-            db_path = Path('D:/StockData/stock_data.ddb')
+            get_db_manager = _import_duckdb_manager()
+            manager = get_db_manager(_get_duckdb_path())
 
             # 映射复权类型
             adjust_map = {
@@ -3018,36 +3816,33 @@ class DataViewerDialog(QDialog):
             }
             duckdb_adjust = adjust_map.get(self.adjust, "none")
 
-            # 创建只读连接并加载数据
-            con = duckdb.connect(str(db_path), read_only=True)
-            columns = _get_table_columns(con, 'stock_daily')
-            if not columns:
-                con.close()
-                self.stats_label.setText("❌ stock_daily 表不存在或无列")
-                return
+            with manager.get_read_connection() as con:
+                columns = _get_table_columns(con, 'stock_daily')
+                if not columns:
+                    self.stats_label.setText("❌ stock_daily 表不存在或无列")
+                    return
 
-            conditions = [f"stock_code = '{self.stock_code}'"]
-            if 'period' in columns:
-                conditions.append("period = '1d'")
-            if 'adjust_type' in columns:
-                conditions.append(f"adjust_type = '{duckdb_adjust}'")
-            where_clause = " AND ".join(conditions)
+                conditions = [f"stock_code = '{self.stock_code}'"]
+                if 'period' in columns:
+                    conditions.append("period = '1d'")
+                if 'adjust_type' in columns:
+                    conditions.append(f"adjust_type = '{duckdb_adjust}'")
+                where_clause = " AND ".join(conditions)
 
-            query = f"""
-                SELECT
-                    date,
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume,
-                    amount
-                FROM stock_daily
-                WHERE {where_clause}
-                ORDER BY date
-            """
-            df = con.execute(query).df()
-            con.close()
+                query = f"""
+                    SELECT
+                        date,
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume,
+                        amount
+                    FROM stock_daily
+                    WHERE {where_clause}
+                    ORDER BY date
+                """
+                df = con.execute(query).df()
 
             # 设置日期为索引
             df.set_index('date', inplace=True)
@@ -3069,12 +3864,38 @@ class DataViewerDialog(QDialog):
             QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
 
 
+class _FinancialFetchThread(QThread):
+    """后台获取 xtdata 财务数据，避免主线程阻塞（㊺修复）"""
+    data_ready = pyqtSignal(str, object)  # (table_name, result_dict_or_None)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, stock_code: str, table_name: str):
+        super().__init__()
+        self._stock_code = stock_code
+        self._table_name = table_name
+
+    def run(self):
+        try:
+            from xtquant import xtdata
+            xtdata.download_financial_data(
+                stock_list=[self._stock_code], table_list=[self._table_name]
+            )
+            result = xtdata.get_financial_data(
+                stock_list=[self._stock_code], table_list=[self._table_name],
+                start_time="20200101", end_time="20260130", report_type='report_time',
+            )
+            self.data_ready.emit(self._table_name, result)
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+
+
 class FinancialDataViewerDialog(QDialog):
     """财务数据查看对话框"""
 
     def __init__(self, stock_code: str, parent=None):
         super().__init__(parent)
         self.stock_code = stock_code
+        self._fetch_thread: Optional[QThread] = None
         self.setWindowTitle(f"查看财务数据 - {stock_code}")
         self.setMinimumSize(0, 0)
         self.init_ui()
@@ -3155,7 +3976,7 @@ class FinancialDataViewerDialog(QDialog):
         layout.addLayout(info_layout)
 
         # 数据表格
-        self.data_table = QTableWidget()
+        self.data_table = QTableView()
         self.data_table.setAlternatingRowColors(True)
         self.data_table.setSortingEnabled(True)
         layout.addWidget(self.data_table)
@@ -3166,195 +3987,122 @@ class FinancialDataViewerDialog(QDialog):
         layout.addWidget(self.stats_label)
 
     def load_data(self):
-        """加载数据"""
-        try:
-            from xtquant import xtdata
-            import pandas as pd
+        """加载数据 — 后台线程执行 xtdata 调用（㊺修复）"""
+        table_text = self.table_combo.currentText()
+        table_map = {
+            "Balance (资产负债表)": "Balance",
+            "Income (利润表)": "Income",
+            "CashFlow (现金流量表)": "CashFlow",
+            "Capitalization (股本结构)": "Capitalization"
+        }
+        table_name = table_map.get(table_text, "Balance")
 
-            # 获取选择的数据表
-            table_text = self.table_combo.currentText()
-            table_map = {
-                "Balance (资产负债表)": "Balance",
-                "Income (利润表)": "Income",
-                "CashFlow (现金流量表)": "CashFlow",
-                "Capitalization (股本结构)": "Capitalization"
-            }
-            table_name = table_map.get(table_text, "Balance")
+        self.data_table.setModel(_PandasTableModel(pd.DataFrame()))
+        self.stats_label.setText("正在加载数据...")
 
-            # 下载财务数据
-            self.data_table.setRowCount(0)
-            self.data_table.setColumnCount(0)
-            self.stats_label.setText("正在加载数据...")
+        if self._fetch_thread and self._fetch_thread.isRunning():
+            self._fetch_thread.requestInterruption()
+        thread = _FinancialFetchThread(self.stock_code, table_name)
+        thread.data_ready.connect(self._on_financial_data_ready)
+        thread.error_occurred.connect(lambda msg: self._on_financial_error(msg))
+        self._fetch_thread = thread
+        thread.start()
 
-            # 先下载
-            xtdata.download_financial_data(
-                stock_list=[self.stock_code],
-                table_list=[table_name]
-            )
-
-            # 再读取
-            result = xtdata.get_financial_data(
-                stock_list=[self.stock_code],
-                table_list=[table_name],
-                start_time="20200101",
-                end_time="20260130",
-                report_type='report_time'
-            )
-
-            if isinstance(result, dict) and self.stock_code in result:
-                stock_data = result[self.stock_code]
-
-                if table_name in stock_data:
-                    table_data = stock_data[table_name]
-
-                    if isinstance(table_data, pd.DataFrame):
-                        # DataFrame格式
-                        self._display_dataframe(table_data)
-                    elif isinstance(table_data, dict):
-                        # 字典格式，转换为表格显示
-                        self._display_dict(table_data)
-                    else:
-                        self.stats_label.setText(f"数据类型: {type(table_data)}")
-                        QMessageBox.information(self, "提示", f"数据格式: {type(table_data)}")
+    def _on_financial_data_ready(self, table_name: str, result):
+        if isinstance(result, dict) and self.stock_code in result:
+            stock_data = result[self.stock_code]
+            if table_name in stock_data:
+                table_data = stock_data[table_name]
+                if isinstance(table_data, pd.DataFrame):
+                    self._display_dataframe(table_data)
+                elif isinstance(table_data, dict):
+                    self._display_dict(table_data)
                 else:
-                    self.stats_label.setText(f"未找到 {table_name} 表数据")
-                    QMessageBox.information(self, "提示", f"未找到 {table_name} 表数据\n\n可能原因：\n1. 该股票没有此表数据\n2. 需要先下载财务数据")
+                    self.stats_label.setText(f"数据类型: {type(table_data)}")
             else:
-                self.stats_label.setText("未找到财务数据")
-                QMessageBox.information(self, "提示", "未找到财务数据\n\n请先下载财务数据")
+                self.stats_label.setText(f"未找到 {table_name} 表数据")
+        else:
+            self.stats_label.setText("未找到财务数据")
 
-        except Exception as e:
-            self.stats_label.setText(f"加载失败: {str(e)}")
-            QMessageBox.critical(self, "错误", f"加载财务数据失败: {str(e)}")
+    def _on_financial_error(self, msg: str):
+        self.stats_label.setText(f"加载失败: {msg}")
 
     def _display_dataframe(self, df):
         """显示DataFrame"""
-        # 重置索引
-        df = df.reset_index()
-
-        # 设置列
-        columns = df.columns.tolist()
-        self.data_table.setColumnCount(len(columns))
-        self.data_table.setHorizontalHeaderLabels(columns)
-
-        # 设置行
-        self.data_table.setRowCount(len(df))
-
-        # 填充数据（显示前100条）
-        display_df = df.head(100)
-
-        for row_idx in range(len(display_df)):
-            for col_idx, col in enumerate(columns):
-                value = display_df.iloc[row_idx, col_idx]
-                item = QTableWidgetItem(str(value))
-                self.data_table.setItem(row_idx, col_idx, item)
-
-        # 调整列宽
+        model = _PandasTableModel(df)
+        proxy = QSortFilterProxyModel(self)
+        proxy.setSourceModel(model)
+        self.data_table.setModel(proxy)
         self.data_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
         # 更新统计信息
         total = len(df)
-        if total > 100:
-            self.stats_label.setText(f"总记录数: {total} 条 (显示前100条)")
-        else:
-            self.stats_label.setText(f"总记录数: {total} 条")
+        self.stats_label.setText(f"总记录数: {total} 条")
 
     def _display_dict(self, data):
         """显示字典数据"""
         # 将字典转换为表格
-        self.data_table.setColumnCount(2)
-        self.data_table.setHorizontalHeaderLabels(["字段名", "值"])
-
-        # 获取所有键
         keys = list(data.keys())
-        self.data_table.setRowCount(len(keys))
-
-        for row_idx, key in enumerate(keys):
+        values = []
+        for key in keys:
             value = data[key]
-
-            # 字段名
-            key_item = QTableWidgetItem(str(key))
-            self.data_table.setItem(row_idx, 0, key_item)
-
-            # 值
             value_str = str(value) if not isinstance(value, (list, dict)) else f"{type(value).__name__}({len(value)})"
-            value_item = QTableWidgetItem(value_str)
-            self.data_table.setItem(row_idx, 1, value_item)
-
-        # 调整列宽
+            values.append(value_str)
+        df = pd.DataFrame({"字段名": keys, "值": values})
+        model = _PandasTableModel(df)
+        proxy = QSortFilterProxyModel(self)
+        proxy.setSourceModel(model)
+        self.data_table.setModel(proxy)
         self.data_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.data_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-
-        # 更新统计信息
         self.stats_label.setText(f"字段数量: {len(keys)} 个")
 
     def export_financial_csv(self):
-        """导出财务数据为CSV"""
-        try:
-            from xtquant import xtdata
-            import pandas as pd
+        """导出财务数据为CSV — 先选路径再后台获取数据（㊺修复）"""
+        table_text = self.table_combo.currentText()
+        table_map = {
+            "Balance (资产负债表)": "Balance",
+            "Income (利润表)": "Income",
+            "CashFlow (现金流量表)": "CashFlow",
+            "Capitalization (股本结构)": "Capitalization"
+        }
+        table_name = table_map.get(table_text, "Balance")
 
-            # 获取选择的数据表
-            table_text = self.table_combo.currentText()
-            table_map = {
-                "Balance (资产负债表)": "Balance",
-                "Income (利润表)": "Income",
-                "CashFlow (现金流量表)": "CashFlow",
-                "Capitalization (股本结构)": "Capitalization"
-            }
-            table_name = table_map.get(table_text, "Balance")
+        default_name = f"{self.stock_code}_{table_name}_财务数据.csv"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出财务数据CSV", default_name, "CSV文件 (*.csv)"
+        )
+        if not file_path:
+            return
 
-            # 下载数据
-            xtdata.download_financial_data(
-                stock_list=[self.stock_code],
-                table_list=[table_name]
-            )
+        self.stats_label.setText("正在导出数据...")
 
-            # 读取数据
-            result = xtdata.get_financial_data(
-                stock_list=[self.stock_code],
-                table_list=[table_name],
-                start_time="20200101",
-                end_time="20260130",
-                report_type='report_time'
-            )
-
-            if isinstance(result, dict) and self.stock_code in result:
-                stock_data = result[self.stock_code]
-
-                if table_name in stock_data:
-                    table_data = stock_data[table_name]
-
-                    # 转换为DataFrame
-                    if isinstance(table_data, pd.DataFrame):
-                        df = table_data
-                    elif isinstance(table_data, dict):
-                        # 字典转换为DataFrame
-                        df = pd.DataFrame.from_dict(table_data, orient='index').T
-                    else:
-                        QMessageBox.warning(self, "提示", f"无法导出数据类型: {type(table_data)}")
-                        return
-
-                    # 选择保存路径
-                    default_name = f"{self.stock_code}_{table_name}_财务数据.csv"
-                    file_path, _ = QFileDialog.getSaveFileName(
-                        self,
-                        "导出财务数据CSV",
-                        default_name,
-                        "CSV文件 (*.csv)"
-                    )
-
-                    if file_path:
-                        # 导出为CSV
+        def _do_export():
+            try:
+                from xtquant import xtdata
+                xtdata.download_financial_data(
+                    stock_list=[self.stock_code], table_list=[table_name]
+                )
+                result = xtdata.get_financial_data(
+                    stock_list=[self.stock_code], table_list=[table_name],
+                    start_time="20200101", end_time="20260130",
+                    report_type='report_time',
+                )
+                if isinstance(result, dict) and self.stock_code in result:
+                    stock_data = result[self.stock_code]
+                    if table_name in stock_data:
+                        table_data = stock_data[table_name]
+                        if isinstance(table_data, pd.DataFrame):
+                            df = table_data
+                        elif isinstance(table_data, dict):
+                            df = pd.DataFrame.from_dict(table_data, orient='index').T
+                        else:
+                            return
                         df.to_csv(file_path, encoding='utf-8-sig', index=True)
-                        QMessageBox.information(self, "成功", f"财务数据已导出到:\n{file_path}\n\n共 {len(df)} 条记录")
-                else:
-                    QMessageBox.warning(self, "提示", f"未找到 {table_name} 表数据")
-            else:
-                QMessageBox.warning(self, "提示", "未找到财务数据")
+            except Exception:
+                pass
 
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+        threading.Thread(target=_do_export, daemon=True).start()
 
 
 
@@ -3362,7 +4110,6 @@ class FinancialDataViewerDialog(QDialog):
 
 if __name__ == '__main__':
     from PyQt5.QtWidgets import QApplication
-    import sys
 
     app = QApplication(sys.argv)
     window = LocalDataManagerWidget()

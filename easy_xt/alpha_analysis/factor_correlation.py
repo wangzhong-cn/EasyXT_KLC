@@ -11,12 +11,14 @@
 作者：EasyXT团队
 """
 
+import warnings
+from typing import Any, Literal, Optional, cast
+
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
-from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
+from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import squareform
-import warnings
+
 warnings.filterwarnings('ignore')
 
 
@@ -31,7 +33,7 @@ class FactorCorrelationAnalyzer:
     4. 生成去重建议
     """
 
-    def __init__(self, factor_dict: Dict[str, pd.DataFrame]):
+    def __init__(self, factor_dict: dict[str, pd.DataFrame]):
         """
         初始化因子相关性分析器
 
@@ -56,22 +58,23 @@ class FactorCorrelationAnalyzer:
     def _align_data(self):
         """对齐所有因子的日期和股票"""
         # 获取共同的日期和股票
-        common_dates = None
-        common_stocks = None
+        common_dates_set: Optional[set[Any]] = None
+        common_stocks_set: Optional[set[str]] = None
 
         for factor_name, factor_data in self.factor_dict.items():
-            if common_dates is None:
-                common_dates = set(factor_data.index)
-                common_stocks = set(factor_data.columns)
+            if common_dates_set is None:
+                common_dates_set = set(factor_data.index)
+                common_stocks_set = set(factor_data.columns)
             else:
-                common_dates &= set(factor_data.index)
-                common_stocks &= set(factor_data.columns)
+                common_dates_set &= set(factor_data.index)
+                if common_stocks_set is not None:
+                    common_stocks_set &= set(factor_data.columns)
 
-        if not common_dates or not common_stocks:
+        if common_dates_set is None or common_stocks_set is None or not common_dates_set or not common_stocks_set:
             raise ValueError("因子之间没有共同的日期或股票")
 
-        common_dates = sorted(common_dates)
-        common_stocks = sorted(common_stocks)
+        common_dates = sorted(common_dates_set)
+        common_stocks = sorted(common_stocks_set)
 
         # 对齐所有因子数据
         self.aligned_factors = {}
@@ -119,7 +122,8 @@ class FactorCorrelationAnalyzer:
         factor_df = pd.DataFrame(factor_series)
 
         # 计算相关系数
-        self.correlation_matrix = factor_df.corr(method=method)
+        corr_method = cast(Literal['pearson', 'spearman', 'kendall'], method)
+        self.correlation_matrix = factor_df.corr(method=corr_method)
 
         return self.correlation_matrix
 
@@ -127,7 +131,7 @@ class FactorCorrelationAnalyzer:
         self,
         threshold: float = 0.7,
         method: str = 'spearman'
-    ) -> List[Tuple[str, str, float]]:
+    ) -> list[tuple[str, str, float]]:
         """
         识别高相关性因子对
 
@@ -148,6 +152,8 @@ class FactorCorrelationAnalyzer:
             self.calculate_correlation(method=method)
 
         corr_matrix = self.correlation_matrix
+        if corr_matrix is None:
+            return []
 
         # 找出高相关性因子对（只取上三角，避免重复）
         high_corr_pairs = []
@@ -156,7 +162,8 @@ class FactorCorrelationAnalyzer:
             for j in range(i + 1, len(corr_matrix.columns)):
                 factor1 = corr_matrix.columns[i]
                 factor2 = corr_matrix.columns[j]
-                corr_value = corr_matrix.iloc[i, j]
+                corr_value_raw = corr_matrix.iloc[i, j]
+                corr_value = float(np.asarray(corr_value_raw).item()) if pd.notna(corr_value_raw) else 0.0
 
                 if abs(corr_value) >= threshold:
                     high_corr_pairs.append((factor1, factor2, corr_value))
@@ -194,9 +201,12 @@ class FactorCorrelationAnalyzer:
         # 计算相关性矩阵
         if self.correlation_matrix is None:
             self.calculate_correlation()
+        corr_matrix = self.correlation_matrix
+        if corr_matrix is None:
+            raise ValueError("相关系数矩阵为空")
 
         # 转换为距离矩阵（距离 = 1 - |相关系数|）
-        distance_matrix = 1 - abs(self.correlation_matrix)
+        distance_matrix = 1 - abs(corr_matrix)
 
         # 层次聚类
         linkage_matrix = linkage(
@@ -229,7 +239,7 @@ class FactorCorrelationAnalyzer:
         threshold: float = 0.7,
         method: str = 'spearman',
         keep_criteria: str = 'ic_mean'  # 或 'name', 'stability'
-    ) -> Dict[str, List[str]]:
+    ) -> dict[str, list[str]]:
         """
         生成因子去重建议
 
@@ -263,7 +273,7 @@ class FactorCorrelationAnalyzer:
 
         # 构建因子分组
         factor_groups = []
-        factor_set = set(self.factor_names)
+        set(self.factor_names)
 
         for factor1, factor2, corr in high_corr_pairs:
             # 查找这两个因子是否已经在某个组中
@@ -322,7 +332,8 @@ class FactorCorrelationAnalyzer:
         # 创建报告数据
         report_data = []
 
-        for factor1, factor2, corr in self.high_corr_pairs:
+        high_corr_pairs = self.high_corr_pairs or []
+        for factor1, factor2, corr in high_corr_pairs:
             report_data.append({
                 '因子1': factor1,
                 '因子2': factor2,
@@ -420,8 +431,10 @@ class FactorCorrelationAnalyzer:
         """保存相关系数矩阵到文件"""
         if self.correlation_matrix is None:
             self.calculate_correlation()
-
-        self.correlation_matrix.to_csv(filepath)
+        corr_matrix = self.correlation_matrix
+        if corr_matrix is None:
+            raise ValueError("相关系数矩阵为空")
+        corr_matrix.to_csv(filepath)
         print(f"相关系数矩阵已保存到: {filepath}")
 
     def save_report(self, filepath: str, threshold: float = 0.7):

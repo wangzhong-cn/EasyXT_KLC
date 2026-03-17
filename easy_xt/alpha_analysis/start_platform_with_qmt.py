@@ -6,8 +6,8 @@
 运行此文件启动因子分析平台，自动从QMT获取行情数据
 """
 
-import sys
 import os
+import sys
 
 # 添加当前目录到Python路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -19,11 +19,15 @@ easy_xt_dir = os.path.abspath(os.path.join(current_dir, '../..'))
 if easy_xt_dir not in sys.path:
     sys.path.insert(0, easy_xt_dir)
 
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_SH = ZoneInfo('Asia/Shanghai')
+
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
-from ic_ir_analysis import ICIRAnalyzer
 from factor_correlation import FactorCorrelationAnalyzer
+from ic_ir_analysis import ICIRAnalyzer
 from layered_backtest import LayeredBacktester
 
 # 配置报告输出目录
@@ -70,7 +74,11 @@ def load_data_from_qmt():
         if pool_choice == '1':
             # 获取全A股列表
             stock_list = api.get_stock_list()
-            stock_codes = [s['stock_code'] for s in stock_list if s['stock_code'].endswith('.SZ') or s['stock_code'].endswith('.SH')]
+            stock_codes = []
+            for s in stock_list:
+                code = s.get('stock_code') if isinstance(s, dict) else str(s)
+                if isinstance(code, str) and (code.endswith('.SZ') or code.endswith('.SH')):
+                    stock_codes.append(code)
         elif pool_choice == '2':
             # 沪深300成分股
             stock_codes = get_hs300_stocks()
@@ -96,7 +104,7 @@ def load_data_from_qmt():
 
         time_choice = input("\n请选择 (1-4): ").strip()
 
-        end_date = datetime.now()
+        end_date = datetime.now(tz=_SH)
         if time_choice == '1':
             start_date = end_date - timedelta(days=365)
         elif time_choice == '2':
@@ -107,7 +115,7 @@ def load_data_from_qmt():
             start_str = input("请输入开始日期 (YYYY-MM-DD): ").strip()
             end_str = input("请输入结束日期 (YYYY-MM-DD, 留空至今): ").strip()
             start_date = datetime.strptime(start_str, '%Y-%m-%d')
-            end_date = datetime.strptime(end_str, '%Y-%m-%d') if end_str else datetime.now()
+            end_date = datetime.strptime(end_str, '%Y-%m-%d') if end_str else datetime.now(tz=_SH)
         else:
             print("\n使用默认：最近1年")
             start_date = end_date - timedelta(days=365)
@@ -121,17 +129,22 @@ def load_data_from_qmt():
         for i, code in enumerate(stock_codes[:100]):  # 限制前100只股票演示
             try:
                 print(f"\r获取进度: {i+1}/{min(len(stock_codes), 100)}", end='')
-                data = api.get_history(
-                    stock_code=code,
-                    period='daily',
-                    start_time=start_date.strftime('%Y%m%d'),
-                    end_time=end_date.strftime('%Y%m%d')
+                data_api = getattr(api, "data", None)
+                if data_api is None:
+                    continue
+                data = data_api.get_price(
+                    codes=code,
+                    period='1d',
+                    start=start_date.strftime('%Y-%m-%d'),
+                    end=end_date.strftime('%Y-%m-%d')
                 )
 
                 if data is not None and len(data) > 0:
-                    price_dict[code] = data['close'].to_dict()
+                    close_series = data['close'] if 'close' in data.columns else None
+                    if close_series is not None:
+                        price_dict[code] = close_series.to_dict()
 
-            except Exception as e:
+            except Exception:
                 continue
 
         print(f"\n成功获取 {len(price_dict)} 只股票的行情数据")
@@ -145,7 +158,7 @@ def load_data_from_qmt():
         print("\n正在计算基础因子...")
         factor_dict = calculate_basic_factors(price_data)
 
-        print(f"\n[OK] 数据准备完成！")
+        print("\n[OK] 数据准备完成！")
         print(f"  日期范围: {price_data.index[0]} 至 {price_data.index[-1]}")
         print(f"  股票数量: {len(price_data.columns)}")
         print(f"  因子数量: {len(factor_dict)}\n")
@@ -273,7 +286,7 @@ def load_data_from_file():
         # 转换为因子字典格式
         factor_dict = {'custom_factor': factor_data}
 
-        print(f"\n[OK] 数据加载成功！")
+        print("\n[OK] 数据加载成功！")
         print(f"  价格数据：{price_data.shape}")
         print(f"  因子数据：{factor_data.shape}\n")
         return price_data, factor_dict
@@ -306,7 +319,7 @@ def ic_ir_analysis(price_data, factor_dict):
     try:
         period = input("请输入持有期数（默认1）: ").strip()
         period = int(period) if period else 1
-    except:
+    except ValueError:
         period = 1
 
     # 执行分析
@@ -355,7 +368,7 @@ def factor_correlation_analysis(price_data, factor_dict):
     try:
         threshold = input("请输入相关性阈值（默认0.7）: ").strip()
         threshold = float(threshold) if threshold else 0.7
-    except:
+    except ValueError:
         threshold = 0.7
 
     # 执行分析
@@ -398,13 +411,13 @@ def layered_backtest(price_data, factor_dict):
     try:
         n_layers = input("请输入分层数量（默认5）: ").strip()
         n_layers = int(n_layers) if n_layers else 5
-    except:
+    except ValueError:
         n_layers = 5
 
     try:
         period = input("请输入持有期数（默认1）: ").strip()
         period = int(period) if period else 1
-    except:
+    except ValueError:
         period = 1
 
     # 执行回测
@@ -541,8 +554,9 @@ def main():
         elif choice == '5':
             # 重新获取数据
             print("\n将从QMT重新获取数据...")
-            price_data, factor_dict = load_data_from_qmt()
-            if price_data is not None:
+            data = load_data_from_qmt()
+            if data is not None:
+                price_data, factor_dict = data
                 print("\n数据获取完成，请选择分析功能\n")
             continue
         else:

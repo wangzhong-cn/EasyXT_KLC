@@ -9,6 +9,6 @@ License: MIT
 __version__ = "V1.0"
 __author__ = "EasyXT Team"
 
-# from .main import XueQiuFollowStrategy  # 暂时注释，等待strategy_engine完成
+# from .main import XueQiuFollowMain  # 暂时注释，按需启用
 
-__all__ = ["XueQiuFollowStrategy"]
+__all__ = []

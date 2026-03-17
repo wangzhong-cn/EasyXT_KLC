@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 启动 qka FastAPI 服务端的便捷脚本：自动修复 PYTHONPATH 并调用 qmt_server。
 用法示例：
-python strategies\jq2qmt\run_qka_server.py --account YOUR_ACCOUNT_ID --mini-qmt-path "C:\\Path\\To\\miniQMT" --host 127.0.0.1 --port 8000
+python strategies\\jq2qmt\run_qka_server.py --account YOUR_ACCOUNT_ID --mini-qmt-path "C:\\Path\\To\\miniQMT" --host 127.0.0.1 --port 8000
 """
 
-import sys
-import os
 import argparse
+import os
+import sys
 
 # 将 qka 包根目录加入 PYTHONPATH（包含子包 qka/*）
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))

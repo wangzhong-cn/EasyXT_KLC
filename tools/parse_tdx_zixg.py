@@ -3,8 +3,8 @@
 """
 
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent
@@ -54,7 +54,7 @@ def parse_zxg_blk(zxg_file):
                         i += 7
                     else:
                         i += 1
-                except:
+                except (UnicodeDecodeError, ValueError, IndexError):
                     i += 1
 
     except Exception as e:
@@ -74,7 +74,7 @@ def read_tdx_zixg():
     tdx_path = Path(r"D:\new_tdx64.2")
     zxg_file = tdx_path / "T0002" / "blocknew" / "zxg.blk"
 
-    print(f"[步骤1] 定位自选股文件")
+    print("[步骤1] 定位自选股文件")
     print("-"*70)
     print(f"  通达信路径: {tdx_path}")
     print(f"  自选股文件: {zxg_file}")
@@ -85,7 +85,7 @@ def read_tdx_zixg():
 
     file_size = zxg_file.stat().st_size
     print(f"  文件大小: {file_size} 字节")
-    print(f"  [OK] 文件存在\n")
+    print("  [OK] 文件存在\n")
 
     # 方法1: 尝试二进制解析
     print("[方法1] 二进制解析")
@@ -98,14 +98,14 @@ def read_tdx_zixg():
         for i, stock in enumerate(stocks, 1):
             print(f"    {i:2d}. {stock}")
     else:
-        print(f"\n  [失败] 未能解析出股票")
+        print("\n  [失败] 未能解析出股票")
 
     # 方法2: 尝试文本读取
     print("\n[方法2] 文本读取")
     print("-"*70)
 
     try:
-        with open(zxg_file, 'r', encoding='gbk', errors='ignore') as f:
+        with open(zxg_file, encoding='gbk', errors='ignore') as f:
             lines = f.readlines()
 
         print(f"  文件行数: {len(lines)}")
@@ -122,7 +122,7 @@ def read_tdx_zixg():
                 code7 = match.group()
 
                 # 判断市场：第1位是市场代码
-                market_code = code7[0]
+                code7[0]
                 stock_code = code7[1:]  # 后6位是股票代码
 
                 # 市场代码：1=上海，0=深圳（但在文件中可能不同）
@@ -168,7 +168,7 @@ def read_tdx_zixg():
         with open(zxg_file, 'rb') as f:
             header = f.read(200)
 
-        print(f"  前200字节（十六进制）:")
+        print("  前200字节（十六进制）:")
         for i in range(0, min(len(header), 200), 16):
             hex_str = ' '.join(f'{b:02x}' for b in header[i:i+16])
             ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in header[i:i+16])

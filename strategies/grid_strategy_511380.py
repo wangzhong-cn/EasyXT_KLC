@@ -1,32 +1,35 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 511380.SH 网格策略回测
 专门针对债券ETF的网格策略实现和参数优化
 """
 
 import sys
-import os
+import importlib
 from pathlib import Path
-from datetime import datetime, timedelta
+from typing import Any, Optional, cast
+
 import pandas as pd
-import numpy as np
-from typing import Dict, List, Tuple, Any, Optional
-import json
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "101因子" / "101因子分析平台" / "src"))
 
+bt: Any
+btanalyzers: Any = None
 try:
-    import backtrader as bt
+    bt = importlib.import_module("backtrader")
+    btanalyzers = importlib.import_module("backtrader.analyzers")
     BACKTRADER_AVAILABLE = True
-except ImportError:
+except Exception:
     BACKTRADER_AVAILABLE = False
+    class _BTStub:
+        class Strategy:
+            pass
+    bt = _BTStub()
     print("[ERROR] Backtrader未安装，请先安装: pip install backtrader")
 
-from data_manager import LocalDataManager
 
 
 class GridStrategy(bt.Strategy):
@@ -40,7 +43,7 @@ class GridStrategy(bt.Strategy):
     4. 适合震荡行情的ETF品种
     """
 
-    params = (
+    params: Any = (
         ('grid_count', 15),           # 网格数量
         ('price_range', 0.05),        # 价格区间比例
         ('position_size', 1000),      # 每格交易数量
@@ -103,8 +106,10 @@ class GridStrategy(bt.Strategy):
                     self.last_adjust_date = current_date
 
             # 更新高低点
-            self.price_high = max(self.price_high, current_price)
-            self.price_low = min(self.price_low, current_price)
+            high_ref = float(self.price_high) if self.price_high is not None else float(current_price)
+            low_ref = float(self.price_low) if self.price_low is not None else float(current_price)
+            self.price_high = max(high_ref, float(current_price))
+            self.price_low = min(low_ref, float(current_price))
 
         # 检查是否到达网格线
         self._check_grid_triggers(current_price, current_date)
@@ -181,11 +186,14 @@ class GridStrategy(bt.Strategy):
     def _adjust_base_price(self, current_price: float):
         """动态调整基准价格"""
         # 使用最近的高低点重新计算基准价
-        new_base = (self.price_high + self.price_low) / 2
+        high_ref = float(self.price_high) if self.price_high is not None else float(current_price)
+        low_ref = float(self.price_low) if self.price_low is not None else float(current_price)
+        base_ref = float(self.base_price) if self.base_price is not None else float(current_price)
+        new_base = (high_ref + low_ref) / 2
 
         # 只有当变化超过10%时才调整
-        if abs(new_base - self.base_price) / self.base_price > 0.10:
-            print(f"[动态调整] 基准价: {self.base_price:.3f} -> {new_base:.3f}")
+        if abs(new_base - base_ref) / base_ref > 0.10:
+            print(f"[动态调整] 基准价: {base_ref:.3f} -> {new_base:.3f}")
             self.base_price = new_base
 
             # 重新初始化网格
@@ -232,7 +240,7 @@ class GridStrategy(bt.Strategy):
         starting_cash = 100000
         total_return = (final_value - starting_cash) / starting_cash * 100
         print(f"\n{'='*60}")
-        print(f"回测完成")
+        print("回测完成")
         print(f"初始资金: {starting_cash:,.2f}")
         print(f"最终资金: {final_value:,.2f}")
         print(f"总收益率: {total_return:.2f}%")
@@ -251,7 +259,7 @@ class AdaptiveGridStrategy(bt.Strategy):
     4. 适合趋势行情或波动较大的品种
     """
 
-    params = (
+    params: Any = (
         ('buy_threshold', 0.01),      # 买入阈值（默认1%）
         ('sell_threshold', 0.01),     # 卖出阈值（默认1%）
         ('position_size', 1000),      # 每次交易数量
@@ -293,9 +301,6 @@ class AdaptiveGridStrategy(bt.Strategy):
             'portfolio_value': self.broker.getvalue(),
             'position': current_pos
         })
-
-        # 计算相对于基准价的变化
-        change_from_base = (current_price - self.base_price) / self.base_price
 
         # 计算相对于上次交易价格的变化
         if self.last_buy_price:
@@ -356,7 +361,7 @@ class AdaptiveGridStrategy(bt.Strategy):
         starting_cash = 100000
         total_return = (final_value - starting_cash) / starting_cash * 100
         print(f"\n{'='*60}")
-        print(f"自适应网格策略回测完成")
+        print("自适应网格策略回测完成")
         print(f"初始资金: {starting_cash:,.2f}")
         print(f"最终资金: {final_value:,.2f}")
         print(f"总收益率: {total_return:.2f}%")
@@ -375,7 +380,7 @@ class ATRGridStrategy(bt.Strategy):
     4. 适合波动率变化的品种
     """
 
-    params = (
+    params: Any = (
         ('atr_period', 300),          # ATR计算周期（分钟数据建议200-500）
         ('atr_multiplier', 6.0),      # ATR倍数（可转债ETF建议5-8）
         ('position_size', 1000),      # 每次交易数量
@@ -460,12 +465,14 @@ class ATRGridStrategy(bt.Strategy):
             self._price_history.append(current_price)
             if len(self._price_history) < 5:
                 # 数据太少，使用基准价的1%作为估算
-                estimated_atr = self.base_price * 0.01
+                base_price = float(self.base_price) if self.base_price is not None else float(current_price)
+                estimated_atr = base_price * 0.01
             else:
                 # 使用最近价格的标准差作为估算
                 import numpy as np
                 prices = np.array(self._price_history[-20:])
-                estimated_atr = prices.std() if len(prices) > 0 else self.base_price * 0.01
+                base_price = float(self.base_price) if self.base_price is not None else float(current_price)
+                estimated_atr = prices.std() if len(prices) > 0 else base_price * 0.01
 
             grid_spacing = estimated_atr * self.params.atr_multiplier
             print(f"[ATR网格初始化] 使用估算ATR: {estimated_atr:.4f}, 网格间距: {grid_spacing:.4f}")
@@ -572,7 +579,7 @@ class ATRGridStrategy(bt.Strategy):
         starting_cash = 100000
         total_return = (final_value - starting_cash) / starting_cash * 100
         print(f"\n{'='*60}")
-        print(f"ATR动态网格策略回测完成")
+        print("ATR动态网格策略回测完成")
         print(f"初始资金: {starting_cash:,.2f}")
         print(f"最终资金: {final_value:,.2f}")
         print(f"总收益率: {total_return:.2f}%")
@@ -683,14 +690,14 @@ class GridBacktester:
 
                 print(f"[步骤1/3] [OK] 从DuckDB读取成功 ({len(df):,} 条)")
                 print(f"[数据范围] {df.index[0]} ~ {df.index[-1]}")
-                print(f"[数据来源] DuckDB本地数据库（高速读取）")
+                print("[数据来源] DuckDB本地数据库（高速读取）")
                 return df
             else:
-                print(f"[步骤1/3] DuckDB中无该周期数据，将从QMT下载")
+                print("[步骤1/3] DuckDB中无该周期数据，将从QMT下载")
 
         except Exception as e:
             print(f"[步骤1/3] DuckDB读取失败: {e}")
-            print(f"[步骤1/3] 将从QMT下载数据")
+            print("[步骤1/3] 将从QMT下载数据")
 
         # ========== 步骤2: 从QMT下载数据 ==========
         try:
@@ -701,7 +708,7 @@ class GridBacktester:
         start_time_str = start_dt.strftime('%Y%m%d')
         end_time_str = end_dt.strftime('%Y%m%d')
 
-        print(f"[步骤2/3] 从QMT下载数据...")
+        print("[步骤2/3] 从QMT下载数据...")
         print(f"[步骤2/3] QMT下载参数: {start_time_str} ~ {end_time_str}, 周期={period}")
 
         # 下载历史数据（使用指定的周期）
@@ -751,7 +758,7 @@ class GridBacktester:
                         'volume': float(data['volume'].iloc[0, idx])
                         # 注意：不包含amount，因为Backtrader不认识
                     })
-            except:
+            except (KeyError, ValueError, IndexError, TypeError):
                 continue
 
         df = pd.DataFrame(records)
@@ -777,17 +784,17 @@ class GridBacktester:
                 avg_per_day = len(df) / days
                 print(f"[数据验证] 平均每天{avg_per_day:.0f}条数据")
                 if avg_per_day > 200:
-                    print(f"[数据验证] 确认: 分钟级数据")
+                    print("[数据验证] 确认: 分钟级数据")
                 elif avg_per_day > 50:
-                    print(f"[数据验证] 确认: 可能是5-15分钟数据")
+                    print("[数据验证] 确认: 可能是5-15分钟数据")
                 elif avg_per_day < 5:
-                    print(f"[数据验证] 确认: 日线数据")
+                    print("[数据验证] 确认: 日线数据")
                 else:
-                    print(f"[数据验证] 确认: 小时级数据")
+                    print("[数据验证] 确认: 小时级数据")
 
         # ========== 步骤3: 保存到DuckDB（下次更快） ==========
         try:
-            print(f"[步骤3/3] 保存数据到DuckDB...")
+            print("[步骤3/3] 保存数据到DuckDB...")
 
             # 确定目标表
             period_to_table = {
@@ -841,7 +848,7 @@ class GridBacktester:
                 """
 
             con.execute(delete_query)
-            print(f"[步骤3/3] 已清除旧数据")
+            print("[步骤3/3] 已清除旧数据")
 
             # 插入新数据
             # 使用DuckDB的DataFrame注册功能
@@ -857,7 +864,7 @@ class GridBacktester:
             import traceback
             traceback.print_exc()
 
-        print(f"\n[完成] 数据加载完成，来源: QMT（已缓存到DuckDB）")
+        print("\n[完成] 数据加载完成，来源: QMT（已缓存到DuckDB）")
         return df
 
     def _calculate_win_rate(self, trade_log: pd.DataFrame):
@@ -915,8 +922,8 @@ class GridBacktester:
                     atr_multiplier: float = 1.0,
                     # 通用参数
                     position_size: int = 1000,
-                    base_price: float = None,
-                    data_period: str = '1m') -> Dict[str, Any]:
+                    base_price: Optional[float] = None,
+                    data_period: str = '1m') -> dict[str, Any]:
         """
         运行单次回测（支持三种策略模式）
 
@@ -964,7 +971,7 @@ class GridBacktester:
                 base_price=base_price,
                 enable_trailing=enable_trailing
             )
-            print(f"[策略模式] 固定网格")
+            print("[策略模式] 固定网格")
             print(f"[参数] 网格数={grid_count}, 区间={price_range*100:.1f}%, 动态调整={enable_trailing}")
 
         elif strategy_mode == 'adaptive':
@@ -975,7 +982,7 @@ class GridBacktester:
                 position_size=position_size,
                 base_price=base_price
             )
-            print(f"[策略模式] 自适应网格")
+            print("[策略模式] 自适应网格")
             print(f"[参数] 买入阈值={buy_threshold*100:.2f}%, 卖出阈值={sell_threshold*100:.2f}%")
 
         elif strategy_mode == 'atr':
@@ -987,7 +994,7 @@ class GridBacktester:
                 base_price=base_price,
                 enable_trailing=enable_trailing
             )
-            print(f"[策略模式] ATR动态网格")
+            print("[策略模式] ATR动态网格")
             print(f"[参数] ATR周期={atr_period}, ATR倍数={atr_multiplier}")
 
         # 添加分析器
@@ -1010,8 +1017,8 @@ class GridBacktester:
         # 获取分析结果
         sharpe = results[0].analyzers.sharpe.get_analysis()
         drawdown = results[0].analyzers.drawdown.get_analysis()
-        returns = results[0].analyzers.returns.get_analysis()
-        trades = results[0].analyzers.trades.get_analysis()
+        results[0].analyzers.returns.get_analysis()
+        results[0].analyzers.trades.get_analysis()
 
         # 获取交易日志（实际订单数量）
         trade_log = strategy.get_trade_log()
@@ -1082,7 +1089,7 @@ class GridParameterOptimizer:
                    stock_code: str,
                    start_date: str,
                    end_date: str,
-                   param_grid: Dict[str, List],
+                   param_grid: dict[str, list],
                    optimization_metric: str = 'total_return',
                    data_period: str = '1m') -> pd.DataFrame:  # 新增：数据周期参数
         """
@@ -1110,7 +1117,7 @@ class GridParameterOptimizer:
             total_combinations *= len(param_values)
 
         print(f"\n{'='*60}")
-        print(f"参数优化开始")
+        print("参数优化开始")
         print(f"数据周期: {data_period}")
         print(f"总参数组合数: {total_combinations}")
         print(f"优化目标: {optimization_metric}")
@@ -1161,7 +1168,7 @@ class GridParameterOptimizer:
         results_df = results_df.sort_values(by=optimization_metric, ascending=False)
 
         print(f"\n{'='*60}")
-        print(f"优化完成！最佳参数:")
+        print("优化完成！最佳参数:")
         best_params = results_df.iloc[0]
         print(f"收益率: {best_params['total_return']*100:.2f}%")
         print(f"夏普比率: {best_params['sharpe_ratio']:.2f}")
@@ -1170,13 +1177,6 @@ class GridParameterOptimizer:
         print(f"{'='*60}\n")
 
         return results_df
-
-
-# 导入必要的模块
-try:
-    import backtrader.analyzers as btanalyzers
-except:
-    pass
 
 
 if __name__ == "__main__":

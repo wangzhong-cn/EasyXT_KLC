@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 补充更新缺失的股票数据
 检查DuckDB中数据较旧的股票，从QMT补充最新数据
 """
 
 import sys
-from pathlib import Path
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent
@@ -26,9 +25,10 @@ def update_missing_stock_data(stock_codes=None, days_behind=30):
     print("=" * 70)
 
     try:
+        import pandas as pd
+
         from data_manager.duckdb_connection_pool import get_db_manager
         from xtquant import xtdata
-        import pandas as pd
 
         print("\n[步骤1] 连接数据源...")
         manager = get_db_manager(r'D:/StockData/stock_data.ddb')
@@ -37,17 +37,17 @@ def update_missing_stock_data(stock_codes=None, days_behind=30):
 
         if stock_codes is None:
             # 自动查找落后超过指定天数的股票
-            query = f"""
+            query = """
                 SELECT
                     stock_code,
                     MAX(date) as latest_date,
                     DATEDIFF('day', MAX(date), CURRENT_DATE) as days_behind
                 FROM stock_daily
                 GROUP BY stock_code
-                HAVING DATEDIFF('day', MAX(date), CURRENT_DATE) > {days_behind}
+                HAVING DATEDIFF('day', MAX(date), CURRENT_DATE) > ?
                 ORDER BY days_behind DESC
             """
-            df_stocks = manager.execute_read_query(query)
+            df_stocks = manager.execute_read_query(query, (days_behind,))
             stock_codes = df_stocks['stock_code'].tolist()
 
         if not stock_codes:
@@ -71,12 +71,10 @@ def update_missing_stock_data(stock_codes=None, days_behind=30):
                 print(f"\n[{idx}/{len(stock_codes)}] {stock_code}:")
 
                 # 查询该股票在DuckDB中的最新日期
-                query = f"""
-                    SELECT MAX(date) as latest_date
-                    FROM stock_daily
-                    WHERE stock_code = '{stock_code}'
-                """
-                result = manager.execute_read_query(query)
+                result = manager.execute_read_query(
+                    "SELECT MAX(date) as latest_date FROM stock_daily WHERE stock_code = ?",
+                    (stock_code,)
+                )
                 if result.empty:
                     print("  ⊗ 数据库中无该股票记录，跳过")
                     skipped_count += 1
@@ -92,18 +90,17 @@ def update_missing_stock_data(stock_codes=None, days_behind=30):
                 print(f"  补充范围: {start_date} ~ {end_date}")
 
                 # 从QMT获取数据
-                print(f"  正在从QMT下载...")
+                print("  正在从QMT下载...")
                 try:
-                    download_result = xtdata.download_history_data2(
+                    xtdata.download_history_data2(
                         stock_code,
                         '1d',
                         start_time=start_date,
                         end_time=end_date
                     )
-                except TypeError as e:
+                except TypeError:
                     # API参数顺序可能不同，尝试不同的调用方式
-                    print(f"  警告: download_history_data2调用失败，尝试直接获取数据...")
-                    download_result = None
+                    print("  警告: download_history_data2调用失败，尝试直接获取数据...")
 
                 # 获取数据
                 data = xtdata.get_market_data_ex(
@@ -148,7 +145,7 @@ def update_missing_stock_data(stock_codes=None, days_behind=30):
                         df_processed[f'{col}_geometric_back'] = df_processed[col]
 
                     # 保存到DuckDB
-                    print(f"  正在保存到DuckDB...")
+                    print("  正在保存到DuckDB...")
 
                     # 使用原生DuckDB连接插入数据
                     with manager.get_write_connection() as con:
@@ -160,12 +157,11 @@ def update_missing_stock_data(stock_codes=None, days_behind=30):
                         con.unregister('temp_data')
 
                     # 验证
-                    new_count = manager.execute_read_query(f"""
-                        SELECT COUNT(*) as count
-                        FROM stock_daily
-                        WHERE stock_code = '{stock_code}'
-                          AND date > '{latest_date}'
-                    """).iloc[0]['count']
+                    new_count = manager.execute_read_query(
+                        "SELECT COUNT(*) as count FROM stock_daily"
+                        " WHERE stock_code = ? AND date > ?",
+                        (stock_code, str(latest_date))
+                    ).iloc[0]['count']
 
                     print(f"  ✓ 成功补充 {new_count} 条记录")
                     success_count += 1

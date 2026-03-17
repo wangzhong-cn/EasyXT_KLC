@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 一键补充数据工具（独立运行）
 在GUI关闭的情况下运行，避免数据库锁定冲突
 """
 
 import sys
-import os
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timedelta
+
 import pandas as pd
 
 # 添加项目路径
@@ -25,8 +24,9 @@ def update_data():
     print()
 
     try:
-        from xtquant import xtdata
         import duckdb
+
+        from xtquant import xtdata
 
         db_path = r'D:/StockData/stock_data.ddb'
 

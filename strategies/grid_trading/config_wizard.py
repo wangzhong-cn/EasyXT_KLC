@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 国债ETF网格交易 - 配置向导
 
 帮助用户快速配置参数
 """
 
-import os
 import json
+import os
 
 
 def print_banner():
@@ -22,7 +21,7 @@ def load_config():
     config_file = 'bond_etf_config.json'
 
     if os.path.exists(config_file):
-        with open(config_file, 'r', encoding='utf-8') as f:
+        with open(config_file, encoding='utf-8') as f:
             return json.load(f)
     else:
         return {

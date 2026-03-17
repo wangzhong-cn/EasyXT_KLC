@@ -1,17 +1,16 @@
 import json
 import logging
 import os
-from typing import Dict, Optional
+from typing import Optional
 
 from PyQt5.QtWidgets import QApplication
-
 
 logger = logging.getLogger(__name__)
 
 
 class ThemeManager:
     def __init__(self, config_path: Optional[str] = None) -> None:
-        self._themes: Dict[str, str] = {
+        self._themes: dict[str, str] = {
             "light": """
         QMainWindow {
             background-color: #f0f0f0;
@@ -113,7 +112,7 @@ class ThemeManager:
         if not os.path.exists(config_path):
             return
         try:
-            with open(config_path, "r", encoding="utf-8") as file:
+            with open(config_path, encoding="utf-8") as file:
                 config = json.load(file)
             theme = config.get("ui", {}).get("theme")
             if theme in self._themes:

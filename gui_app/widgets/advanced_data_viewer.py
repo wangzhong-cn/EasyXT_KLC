@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 高级本地数据查看器 - 上下分栏布局 + 专业交易风格
 重点：数据表格查看
 """
 
-import sys
 import importlib
+import sys
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from datetime import datetime
 
+from PyQt5.QtCore import QDate, Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QPushButton, QTableWidget, QTableWidgetItem, QComboBox,
-    QSplitter, QFrame, QMessageBox,
-    QDateEdit, QFileDialog, QLineEdit, QAbstractItemView,
-    QApplication
+    QAbstractItemView,
+    QApplication,
+    QComboBox,
+    QDateEdit,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDate
-from PyQt5.QtGui import QFont, QColor
 
 # 添加父目录到路径
 project_root = Path(__file__).parent.parent.parent
@@ -32,10 +43,17 @@ if TYPE_CHECKING:
     import pandas as pd
 
 try:
-    from data_manager.duckdb_connection_pool import get_db_manager
+    from data_manager.duckdb_connection_pool import get_db_manager, resolve_duckdb_path
     DB_MANAGER_AVAILABLE = True
 except ImportError:
     DB_MANAGER_AVAILABLE = False
+    resolve_duckdb_path = None
+
+
+def _get_duckdb_path() -> str:
+    if resolve_duckdb_path is not None:
+        return resolve_duckdb_path()
+    return r"D:/StockData/stock_data.ddb"
 
 
 # 专业交易风格样式表
@@ -260,13 +278,8 @@ class DataLoadThread(QThread):
                 ORDER BY date
             """
 
-            if DB_MANAGER_AVAILABLE:
-                manager = get_db_manager(r'D:/StockData/stock_data.ddb')
-                df = manager.execute_read_query(query)
-            else:
-                con = duckdb.connect(r'D:/StockData/stock_data.ddb', read_only=True)
-                df = con.execute(query).df()
-                con.close()
+            manager = get_db_manager(_get_duckdb_path())
+            df = manager.execute_read_query(query)
 
             if not df.empty:
                 df = df.set_index('date')
@@ -505,15 +518,8 @@ class AdvancedDataViewer(QWidget):
     def _has_symbol_type_column(self) -> bool:
         try:
             query = "SELECT column_name FROM pragma_table_info('stock_daily')"
-            if DB_MANAGER_AVAILABLE:
-                manager = get_db_manager(r'D:/StockData/stock_data.ddb')
-                df = manager.execute_read_query(query)
-            else:
-                con = duckdb.connect(r'D:/StockData/stock_data.ddb', read_only=True)
-                try:
-                    df = con.execute(query).fetchdf()
-                finally:
-                    con.close()
+            manager = get_db_manager(_get_duckdb_path())
+            df = manager.execute_read_query(query)
             if df is None or df.empty:
                 return False
             return 'symbol_type' in set(df['column_name'].astype(str))
@@ -562,15 +568,8 @@ class AdvancedDataViewer(QWidget):
                     LIMIT 1000
                 """
 
-            if DB_MANAGER_AVAILABLE:
-                manager = get_db_manager(r'D:/StockData/stock_data.ddb')
-                df = manager.execute_read_query(query)
-            else:
-                con = duckdb.connect(r'D:/StockData/stock_data.ddb', read_only=True)
-                try:
-                    df = con.execute(query).fetchdf()
-                finally:
-                    con.close()
+            manager = get_db_manager(_get_duckdb_path())
+            df = manager.execute_read_query(query)
 
             self.populate_stock_table(df)
 
@@ -589,12 +588,13 @@ class AdvancedDataViewer(QWidget):
 
             # 类型
             type_map = {'stock': '股票', 'bond': '债券', 'etf': 'ETF'}
-            type_item = QTableWidgetItem(type_map.get(data_row['symbol_type'], data_row['symbol_type']))
+            symbol_type = str(data_row.get('symbol_type', ''))
+            type_item = QTableWidgetItem(type_map.get(symbol_type, symbol_type))
             self.stock_table.setItem(row_idx, 1, type_item)
 
             # 记录数
             count_item = QTableWidgetItem(f"{data_row['count']:,}")
-            count_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            count_item.setTextAlignment(int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter))
             self.stock_table.setItem(row_idx, 2, count_item)
 
             # 日期范围
@@ -610,7 +610,8 @@ class AdvancedDataViewer(QWidget):
         search_text = self.search_edit.text().upper()
 
         for row in range(self.stock_table.rowCount()):
-            code = self.stock_table.item(row, 0).text()
+            code_item = self.stock_table.item(row, 0)
+            code = code_item.text() if code_item else ""
             match = search_text in code
             self.stock_table.setRowHidden(row, not match)
 
@@ -619,8 +620,10 @@ class AdvancedDataViewer(QWidget):
         selected_items = self.stock_table.selectedItems()
         if selected_items:
             row = selected_items[0].row()
-            stock_code = self.stock_table.item(row, 0).text()
-            record_count = self.stock_table.item(row, 2).text()
+            stock_item = self.stock_table.item(row, 0)
+            count_item = self.stock_table.item(row, 2)
+            stock_code = stock_item.text() if stock_item else ""
+            record_count = count_item.text() if count_item else "0"
             self.current_stock = stock_code
             self.stock_label.setText(f"当前股票: {stock_code}")
             self.record_count_label.setText(f"记录数: {record_count}")
@@ -741,8 +744,10 @@ class AdvancedDataViewer(QWidget):
             try:
                 # 收集表格数据
                 data = []
-                headers = [self.data_table.horizontalHeaderItem(col).text()
-                          for col in range(self.data_table.columnCount())]
+                headers = []
+                for col in range(self.data_table.columnCount()):
+                    header_item = self.data_table.horizontalHeaderItem(col)
+                    headers.append(header_item.text() if header_item else f"col_{col}")
 
                 for row in range(self.data_table.rowCount()):
                     row_data = []
@@ -766,8 +771,9 @@ class AdvancedDataViewer(QWidget):
 
 
 if __name__ == "__main__":
-    from PyQt5.QtWidgets import QApplication
     import sys
+
+    from PyQt5.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
     app.setStyle('Fusion')  # 使用Fusion风格配合自定义样式

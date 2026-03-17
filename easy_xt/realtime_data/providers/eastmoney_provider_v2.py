@@ -4,14 +4,13 @@
 修复连接问题，更新API端点和请求头
 """
 
-import json
+import logging
 import time
+from typing import Any, Optional
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import logging
-from typing import Dict, List, Any, Optional
-from urllib.parse import urlencode
 
 from .base_provider import BaseDataProvider
 
@@ -19,7 +18,7 @@ from .base_provider import BaseDataProvider
 class EastmoneyDataProviderV2(BaseDataProvider):
     """东方财富数据提供者 - 更新版"""
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[dict[str, Any]] = None):
         """初始化东方财富数据提供者
 
         Args:
@@ -84,7 +83,7 @@ class EastmoneyDataProviderV2(BaseDataProvider):
 
         return session
 
-    def _get_headers(self) -> Dict[str, str]:
+    def _get_headers(self) -> dict[str, str]:
         """获取完整的HTTP请求头
 
         Returns:
@@ -114,7 +113,7 @@ class EastmoneyDataProviderV2(BaseDataProvider):
         """
         try:
             # 尝试多个测试端点
-            test_endpoints: List[Dict[str, Any]] = [
+            test_endpoints: list[dict[str, Any]] = [
                 # 方法1: 使用新的API格式
                 {
                     'url': f"{self.base_url}/api/qt/clist/get",
@@ -204,7 +203,7 @@ class EastmoneyDataProviderV2(BaseDataProvider):
         """
         return self.is_connected()
 
-    def get_provider_info(self) -> Dict[str, Any]:
+    def get_provider_info(self) -> dict[str, Any]:
         """获取数据源信息
 
         Returns:
@@ -220,8 +219,8 @@ class EastmoneyDataProviderV2(BaseDataProvider):
             'connected': self.is_connected()
         }
 
-    def _make_request(self, url: str, params: Optional[Dict[str, Any]] = None,
-                     headers: Optional[Dict[str, Any]] = None) -> Optional[requests.Response]:
+    def _make_request(self, url: str, params: Optional[dict[str, Any]] = None,
+                     headers: Optional[dict[str, Any]] = None) -> Optional[requests.Response]:
         """发送HTTP请求
 
         Args:
@@ -267,7 +266,7 @@ class EastmoneyDataProviderV2(BaseDataProvider):
 
         return None
 
-    def get_realtime_quotes(self, codes: List[str]) -> List[Dict[str, Any]]:
+    def get_realtime_quotes(self, codes: list[str]) -> list[dict[str, Any]]:
         """获取实时行情数据
 
         Args:
@@ -295,7 +294,7 @@ class EastmoneyDataProviderV2(BaseDataProvider):
                 return []
 
             # 尝试多个API端点
-            api_endpoints: List[Dict[str, Any]] = [
+            api_endpoints: list[dict[str, Any]] = [
                 # 端点1: 新版API
                 {
                     'url': f"{self.base_url}/api/qt/ulist.np/get",
@@ -348,7 +347,7 @@ class EastmoneyDataProviderV2(BaseDataProvider):
             self.logger.error(f"获取实时行情失败: {e}")
             return []
 
-    def _parse_quote_data(self, item: Dict) -> Optional[Dict[str, Any]]:
+    def _parse_quote_data(self, item: dict) -> Optional[dict[str, Any]]:
         """解析行情数据
 
         Args:
@@ -399,7 +398,7 @@ class EastmoneyDataProviderV2(BaseDataProvider):
             self.logger.warning(f"解析行情数据失败: {e}")
             return None
 
-    def get_hot_stocks(self, market: str = 'all', count: int = 50) -> List[Dict[str, Any]]:
+    def get_hot_stocks(self, market: str = 'all', count: int = 50) -> list[dict[str, Any]]:
         """获取热门股票
 
         Args:
@@ -482,7 +481,7 @@ class EastmoneyDataProviderV2(BaseDataProvider):
             self.logger.error(f"获取热门股票失败: {e}")
             return []
 
-    def get_sector_data(self, sector_type: str = 'concept') -> List[Dict[str, Any]]:
+    def get_sector_data(self, sector_type: str = 'concept') -> list[dict[str, Any]]:
         """获取板块数据
 
         Args:
@@ -566,7 +565,7 @@ class EastmoneyDataProviderV2(BaseDataProvider):
             self.logger.error(f"获取板块数据失败: {e}")
             return []
 
-    def get_market_status(self) -> Dict[str, Any]:
+    def get_market_status(self) -> dict[str, Any]:
         """获取市场状态
 
         Returns:

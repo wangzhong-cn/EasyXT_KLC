@@ -1,8 +1,9 @@
 import logging
-import requests
 import os
 import re
 from datetime import date
+
+import requests
 
 formatter = logging.Formatter('[%(levelname)s][%(asctime)s]%(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 

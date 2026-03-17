@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 五维复权数据管理模块
 实现不复权、前复权、后复权、等比前复权、等比后复权的数据存储和查询
@@ -9,11 +8,11 @@
 查询时切换复权方式是直接读取字段，实现真正的"零延迟"切换
 """
 
+from typing import Any, Optional, cast
+
 import pandas as pd
-import numpy as np
-from typing import Dict, Optional, Tuple
-from datetime import datetime, date
-import duckdb
+
+from data_manager.duckdb_connection_pool import get_db_manager
 
 
 class FiveFoldAdjustmentManager:
@@ -35,20 +34,23 @@ class FiveFoldAdjustmentManager:
         'geometric_back': '等比后复权'
     }
 
-    def __init__(self, duckdb_path: str = r'D:/StockData/stock_data.ddb'):
+    def __init__(self, duckdb_path: Optional[str] = None):
         """
         初始化五维复权管理器
 
         Args:
             duckdb_path: DuckDB 数据库路径
         """
-        self.duckdb_path = duckdb_path
-        self.con = None
+        from data_manager.duckdb_connection_pool import resolve_duckdb_path
+
+        self.duckdb_path = resolve_duckdb_path(duckdb_path)
+        self._db = None
+        self.con = None  # 废弃：保留属性避免 AttributeError
 
     def connect(self):
-        """连接数据库"""
+        """连接数据库（通过连接池）"""
         try:
-            self.con = duckdb.connect(self.duckdb_path)
+            self._db = get_db_manager(self.duckdb_path)
             return True
         except Exception as e:
             print(f"[ERROR] 数据库连接失败: {e}")
@@ -64,7 +66,7 @@ class FiveFoldAdjustmentManager:
         - open_geo_front, high_geo_front, low_geo_front, close_geo_front (等比前复权)
         - open_geo_back, high_geo_back, low_geo_back, close_geo_back (等比后复权)
         """
-        if not self.con:
+        if not self._db:
             print("[ERROR] 请先连接数据库")
             return False
 
@@ -95,56 +97,55 @@ class FiveFoldAdjustmentManager:
         ]
 
         # 获取现有列
-        existing_columns = self.con.execute("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'stock_daily'
-        """).fetchdf()['column_name'].tolist()
+        with self._db.get_write_connection() as con:
+            existing_columns = con.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'stock_daily'
+            """).fetchdf()['column_name'].tolist()
 
-        # 先删除已存在的复权列（如果是DOUBLE类型）
-        # 原因：可能之前创建的是DOUBLE，需要先删除再重新创建DECIMAL
-        to_drop = []
-        for col_name, _ in columns_to_add:
-            if col_name in existing_columns:
-                # 检查该列的数据类型
-                col_info = self.con.execute(f"""
-                    SELECT data_type FROM information_schema.columns
-                    WHERE table_name = 'stock_daily'
-                      AND column_name = '{col_name}'
-                """).fetchone()
+            # 先删除已存在的复权列（如果是DOUBLE类型）
+            to_drop = []
+            for col_name, _ in columns_to_add:
+                if col_name in existing_columns:
+                    col_info = con.execute(
+                        "SELECT data_type FROM information_schema.columns"
+                        " WHERE table_name = 'stock_daily' AND column_name = '"
+                        + col_name + "'"
+                    ).fetchone()
 
-                if col_info and col_info[0] == 'DOUBLE':
-                    to_drop.append(col_name)
+                    if col_info and col_info[0] == 'DOUBLE':
+                        to_drop.append(col_name)
 
-        if to_drop:
-            print(f"[INFO] 删除旧的DOUBLE类型列: {len(to_drop)} 个")
-            for col_name in to_drop:
-                try:
-                    self.con.execute(f"ALTER TABLE stock_daily DROP COLUMN {col_name}")
-                    print(f"  [OK] 删除列: {col_name}")
-                    existing_columns.remove(col_name)
-                except Exception as e:
-                    print(f"  [WARN] 删除失败 {col_name}: {e}")
+            if to_drop:
+                print(f"[INFO] 删除旧的DOUBLE类型列: {len(to_drop)} 个")
+                for col_name in to_drop:
+                    try:
+                        con.execute("ALTER TABLE stock_daily DROP COLUMN " + col_name)
+                        print(f"  [OK] 删除列: {col_name}")
+                        existing_columns.remove(col_name)
+                    except Exception as e:
+                        print(f"  [WARN] 删除失败 {col_name}: {e}")
 
-        # 添加新的复权列
-        added_count = 0
-        for col_name, col_type in columns_to_add:
-            if col_name not in existing_columns:
-                try:
-                    self.con.execute(f"""
-                        ALTER TABLE stock_daily
-                        ADD COLUMN {col_name} {col_type}
-                    """)
-                    added_count += 1
-                    print(f"  [OK] 添加列: {col_name}")
-                except Exception as e:
-                    print(f"  [SKIP] {col_name}: {e}")
-            else:
-                print(f"  [EXISTS] {col_name}")
+            # 添加新的复权列
+            added_count = 0
+            for col_name, col_type in columns_to_add:
+                if col_name not in existing_columns:
+                    try:
+                        con.execute(f"""
+                            ALTER TABLE stock_daily
+                            ADD COLUMN {col_name} {col_type}
+                        """)
+                        added_count += 1
+                        print(f"  [OK] 添加列: {col_name}")
+                    except Exception as e:
+                        print(f"  [SKIP] {col_name}: {e}")
+                else:
+                    print(f"  [EXISTS] {col_name}")
 
         print(f"[OK] 完成，新增 {added_count} 列")
         return True
 
-    def calculate_adjustment(self, df: pd.DataFrame, dividends: Optional[pd.DataFrame] = None) -> Dict[str, pd.DataFrame]:
+    def calculate_adjustment(self, df: pd.DataFrame, dividends: Optional[pd.DataFrame] = None) -> dict[str, pd.DataFrame]:
         """
         计算五维复权数据
 
@@ -156,6 +157,25 @@ class FiveFoldAdjustmentManager:
             包含 5 种复权数据的字典
         """
         results = {}
+
+        if df is None or df.empty:
+            return results
+
+        df = df.copy()
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df = df[df['date'].notna()]
+            df = df.set_index('date')
+        else:
+            df.index = pd.to_datetime(df.index, errors='coerce')
+            df = df[df.index.notna()]
+        df.index = pd.DatetimeIndex(df.index).normalize()
+
+        if dividends is not None and not dividends.empty and 'ex_date' in dividends.columns:
+            dividends = dividends.copy()
+            dividends['ex_date'] = pd.to_datetime(dividends['ex_date'], errors='coerce')
+            dividends = dividends[dividends['ex_date'].notna()]
+            dividends['ex_date'] = pd.to_datetime(dividends['ex_date'], errors='coerce').dt.normalize()
 
         # 1. 不复权（原始数据）
         results['none'] = df.copy()
@@ -206,10 +226,10 @@ class FiveFoldAdjustmentManager:
                 for _, div_row in future_dividends_sorted.iterrows():
                     # 现金分红
                     if pd.notna(div_row.get('dividend_per_share')):
-                        dividend = div_row['dividend_per_share']
+                        dividend = pd.to_numeric(div_row['dividend_per_share'], errors='coerce')
                         # 前复权因子 = (1 - 后续分红 / 之前收盘价)
-                        prev_close = df.loc[idx, 'close']
-                        if prev_close > 0:
+                        prev_close = float(cast(Any, df.loc[idx, 'close']))
+                        if pd.notna(dividend) and prev_close > 0:
                             cumulative_factor *= (1 - dividend / prev_close)
 
                     # 送股/转增
@@ -250,9 +270,9 @@ class FiveFoldAdjustmentManager:
                 for _, div_row in day_dividends_sorted.iterrows():
                     # 现金分红
                     if pd.notna(div_row.get('dividend_per_share')):
-                        dividend = div_row['dividend_per_share']
-                        prev_close = df.loc[idx, 'close'] if idx in df.index else df['close'].iloc[0]
-                        if prev_close > 0:
+                        dividend = pd.to_numeric(div_row['dividend_per_share'], errors='coerce')
+                        prev_close = float(cast(Any, df.loc[idx, 'close'] if idx in df.index else df['close'].iloc[0]))
+                        if pd.notna(dividend) and prev_close > 0:
                             # 后复权因子 = (1 - 分红 / 除权前收盘价)
                             cumulative_factor *= (1 - dividend / prev_close)
 
@@ -317,7 +337,7 @@ class FiveFoldAdjustmentManager:
 
         return df_adj
 
-    def save_adjusted_data(self, stock_code: str, adjusted_data_dict: Dict[str, pd.DataFrame]):
+    def save_adjusted_data(self, stock_code: str, adjusted_data_dict: dict[str, pd.DataFrame]):
         """
         保存五维复权数据到 DuckDB
 
@@ -325,7 +345,7 @@ class FiveFoldAdjustmentManager:
             stock_code: 股票代码
             adjusted_data_dict: 五种复权数据字典
         """
-        if not self.con:
+        if self._db is None:
             print("[ERROR] 请先连接数据库")
             return False
 
@@ -354,13 +374,18 @@ class FiveFoldAdjustmentManager:
                         if price_col in df_adj.columns:
                             df_none[target_cols[i]] = df_adj[price_col]
 
-            # 删除旧数据
-            self.con.execute(f"DELETE FROM stock_daily WHERE stock_code = '{stock_code}'")
-
-            # 批量插入
-            self.con.register('temp_df', df_none)
-            self.con.execute("INSERT INTO stock_daily SELECT * FROM temp_df")
-            self.con.unregister('temp_df')
+            # 删除旧数据并批量插入（事务保证原子性）
+            with self._db.get_write_connection() as con:
+                con.execute("BEGIN")
+                try:
+                    con.execute(f"DELETE FROM stock_daily WHERE stock_code = ?", [stock_code])
+                    con.register('temp_df', df_none)
+                    con.execute("INSERT INTO stock_daily SELECT * FROM temp_df")
+                    con.unregister('temp_df')
+                    con.execute("COMMIT")
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
 
             print(f"[OK] {stock_code} 五维复权数据已保存")
             return True
@@ -388,7 +413,7 @@ class FiveFoldAdjustmentManager:
         Returns:
             指定复权类型的数据
         """
-        if not self.con:
+        if not self._db:
             return pd.DataFrame()
 
         if adjust_type not in self.ADJUST_TYPES:
@@ -397,11 +422,12 @@ class FiveFoldAdjustmentManager:
 
         # 检查复权列是否存在，如果不存在则先添加
         if adjust_type != 'none':
-            existing_columns = self.con.execute("""
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_name = 'stock_daily'
-            """).fetchdf()['column_name'].tolist()
+            with self._db.get_read_connection() as con:
+                existing_columns = con.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'stock_daily'
+                """).fetchdf()['column_name'].tolist()
 
             # 根据复权类型确定需要检查的列
             required_cols = []
@@ -438,29 +464,33 @@ class FiveFoldAdjustmentManager:
                          'low_geometric_back', 'close_geometric_back']
 
         # 构建查询
-        query = f"""
-            SELECT
-                stock_code, date, period,
-                {price_cols[0]} as open,
-                {price_cols[1]} as high,
-                {price_cols[2]} as low,
-                {price_cols[3]} as close,
-                volume, amount
-            FROM stock_daily
-            WHERE stock_code = '{stock_code}'
-              AND date >= '{start_date}'
-              AND date <= '{end_date}'
-            ORDER BY date
-        """
+        query = (
+            "SELECT stock_code, date, period,"
+            " " + price_cols[0] + " as open,"
+            " " + price_cols[1] + " as high,"
+            " " + price_cols[2] + " as low,"
+            " " + price_cols[3] + " as close,"
+            " volume, amount"
+            " FROM stock_daily"
+            " WHERE stock_code = ? AND date >= ? AND date <= ? AND period = '1d'"
+            " ORDER BY date"
+        )
 
         try:
-            df = self.con.execute(query).df()
+            df = self._db.execute_read_query(query, (stock_code, start_date, end_date))
 
-            # 如果指定的复权列不存在或不完整，回退到不复权
+            # 如果指定的复权列不存在或不完整，尝试自动修复后回退到不复权
             if df.empty or df['open'].isna().all():
                 if adjust_type != 'none':
+                    # 尝试自动修复：读取原始数据并重新计算复权列
+                    self._try_repair_adjustment(stock_code, start_date, end_date)
                     print(f"[WARNING] {adjust_type} 数据不存在，回退到不复权数据")
                     return self.get_data_with_adjustment(stock_code, start_date, end_date, 'none')
+
+            # 设置 DatetimeIndex（按 date 列），确保 _check_missing_trading_days 能正确判断
+            if 'date' in df.columns and not df.empty:
+                df['date'] = pd.to_datetime(df['date'], errors='coerce')
+                df = df.set_index('date')
 
             return df
 
@@ -468,11 +498,73 @@ class FiveFoldAdjustmentManager:
             print(f"[ERROR] 查询失败: {e}")
             return pd.DataFrame()
 
+    def _try_repair_adjustment(self, stock_code: str, start_date: str, end_date: str) -> None:
+        """当发现复权列全部为 NULL 时，自动重新计算并回写。
+
+        这是对历史遗留的 index 对齐 bug 导致 NULL 复权列的自愈机制。
+        """
+        if not self._db:
+            return
+        try:
+            raw_df = self._db.execute_read_query(
+                "SELECT * FROM stock_daily"
+                " WHERE stock_code = ? AND date >= ? AND date <= ? AND period = '1d'"
+                " ORDER BY date",
+                (stock_code, start_date, end_date),
+            )
+            if raw_df.empty or "close" not in raw_df.columns:
+                return
+            # 确认确实需要修复：检查 open_front 是否全 NULL
+            if "open_front" in raw_df.columns and raw_df["open_front"].notna().any():
+                return  # 已有有效数据，无需修复
+
+            print(f"  [AUTO-REPAIR] 检测到 {stock_code} 复权列全 NULL，重新计算...")
+            adjusted = self.calculate_adjustment(raw_df)
+            if not adjusted:
+                return
+
+            col_mapping = {
+                "front": ("open_front", "high_front", "low_front", "close_front"),
+                "back": ("open_back", "high_back", "low_back", "close_back"),
+                "geometric_front": (
+                    "open_geometric_front", "high_geometric_front",
+                    "low_geometric_front", "close_geometric_front",
+                ),
+                "geometric_back": (
+                    "open_geometric_back", "high_geometric_back",
+                    "low_geometric_back", "close_geometric_back",
+                ),
+            }
+
+            with self._db.get_write_connection() as con:
+                for adj_type, df_adj in adjusted.items():
+                    if adj_type == "none":
+                        continue
+                    target_cols = col_mapping.get(adj_type)
+                    if not target_cols:
+                        continue
+                    for i, price_col in enumerate(["open", "high", "low", "close"]):
+                        if price_col not in df_adj.columns:
+                            continue
+                        # 逐行 UPDATE（数据量小，日线通常 < 2000 行）
+                        update_df = pd.DataFrame({
+                            "date": df_adj.index,
+                            "val": df_adj[price_col].values,
+                        })
+                        for _, row in update_df.iterrows():
+                            if pd.notna(row["val"]):
+                                con.execute(
+                                    "UPDATE stock_daily SET " + target_cols[i] + " = ?"
+                                    " WHERE stock_code = ? AND date = ? AND period = '1d'",
+                                    [float(row["val"]), stock_code, row["date"]],
+                                )
+            print(f"  [AUTO-REPAIR] {stock_code} 复权列修复完成")
+        except Exception as e:
+            print(f"  [AUTO-REPAIR] 修复失败（不阻断）: {e}")
+
     def close(self):
-        """关闭数据库连接"""
-        if self.con:
-            self.con.close()
-            self.con = None
+        """释放数据库管理器引用"""
+        self._db = None
 
 
 def test_fivefold_adjustment():

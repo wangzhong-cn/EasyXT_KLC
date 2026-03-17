@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 通用数据导入器
 支持全市场/板块/自定义股票池的数据导入
@@ -8,19 +7,18 @@
 
 import sys
 from pathlib import Path
-from typing import List, Dict, Optional, Callable
-from datetime import datetime, timedelta
-import time
+from typing import Callable, Optional
+
 import pandas as pd
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from data_manager.unified_data_interface import UnifiedDataInterface
 from data_manager.board_stocks_loader import BoardStocksLoader
 from data_manager.csv_importer import CSVImporter
 from data_manager.smart_data_detector import SmartDataDetector
+from data_manager.unified_data_interface import UnifiedDataInterface
 
 
 class UniversalDataImporter:
@@ -36,15 +34,17 @@ class UniversalDataImporter:
     6. 断点续传
     """
 
-    def __init__(self, duckdb_path: str = r'D:/StockData/stock_data.ddb'):
+    def __init__(self, duckdb_path: Optional[str] = None):
         """
         初始化通用导入器
 
         Args:
             duckdb_path: DuckDB数据库路径
         """
-        self.duckdb_path = duckdb_path
-        self.interface = UnifiedDataInterface(duckdb_path=duckdb_path)
+        from data_manager.duckdb_connection_pool import resolve_duckdb_path
+
+        self.duckdb_path = resolve_duckdb_path(duckdb_path)
+        self.interface = UnifiedDataInterface(duckdb_path=self.duckdb_path)
         self.board_loader = BoardStocksLoader()
         self.csv_importer = CSVImporter()
         self.detector = None
@@ -70,7 +70,7 @@ class UniversalDataImporter:
         end_date: str,
         period: str = '1d',
         batch_size: int = 50
-    ) -> Dict:
+    ) -> dict:
         """
         导入整个板块的股票数据
 
@@ -89,11 +89,11 @@ class UniversalDataImporter:
         print(f"{'='*80}")
 
         # Step 1: 获取板块股票列表
-        print(f"\n步骤1: 获取板块股票列表...")
+        print("\n步骤1: 获取板块股票列表...")
         stocks = self.board_loader.get_board_stocks(board_name)
 
         if not stocks:
-            print(f"[ERROR] 未获取到板块股票")
+            print("[ERROR] 未获取到板块股票")
             return {'success': False, 'error': '未获取到板块股票'}
 
         print(f"[OK] 获取到 {len(stocks)} 只股票")
@@ -114,7 +114,7 @@ class UniversalDataImporter:
         end_date: str,
         period: str = '1d',
         batch_size: int = 50
-    ) -> Dict:
+    ) -> dict:
         """
         从CSV文件导入股票列表并下载数据
 
@@ -133,11 +133,11 @@ class UniversalDataImporter:
         print(f"{'='*80}")
 
         # Step 1: 从CSV加载股票列表
-        print(f"\n步骤1: 从CSV加载股票列表...")
+        print("\n步骤1: 从CSV加载股票列表...")
         stocks = self.csv_importer.load_stock_list(csv_path)
 
         if not stocks:
-            print(f"[ERROR] CSV中未找到股票代码")
+            print("[ERROR] CSV中未找到股票代码")
             return {'success': False, 'error': 'CSV中未找到股票代码'}
 
         print(f"[OK] 加载 {len(stocks)} 只股票")
@@ -153,11 +153,11 @@ class UniversalDataImporter:
 
     def import_custom_stocks(
         self,
-        stocks: List[str],
+        stocks: list[str],
         start_date: str,
         end_date: str,
         period: str = '1d'
-    ) -> Dict:
+    ) -> dict:
         """
         导入自定义股票列表
 
@@ -184,12 +184,12 @@ class UniversalDataImporter:
 
     def _import_stocks_batch(
         self,
-        stocks: List[str],
+        stocks: list[str],
         start_date: str,
         end_date: str,
         period: str,
         batch_size: int
-    ) -> Dict:
+    ) -> dict:
         """
         批量导入股票数据（内部方法）
 
@@ -204,9 +204,6 @@ class UniversalDataImporter:
             Dict: 导入结果
         """
         total_stocks = len(stocks)
-        success_count = 0
-        failed_count = 0
-        skipped_count = 0
 
         results = {
             'total': total_stocks,
@@ -248,7 +245,7 @@ class UniversalDataImporter:
                             'count': len(data)
                         })
                     else:
-                        print(f"[SKIP] 无数据")
+                        print("[SKIP] 无数据")
                         results['skipped'] += 1
                         results['details'].append({
                             'stock': stock,
@@ -267,7 +264,7 @@ class UniversalDataImporter:
 
         # 打印总结
         print(f"\n{'='*80}")
-        print(f"导入完成！")
+        print("导入完成！")
         print(f"{'='*80}")
         print(f"总计: {results['total']} 只")
         print(f"成功: {results['success']} 只")
@@ -278,7 +275,7 @@ class UniversalDataImporter:
 
     def check_missing_data(
         self,
-        stocks: List[str],
+        stocks: list[str],
         start_date: str,
         end_date: str,
         period: str = '1d'
@@ -295,7 +292,7 @@ class UniversalDataImporter:
         Returns:
             DataFrame: 缺失数据报告
         """
-        print(f"\n检查数据完整性...")
+        print("\n检查数据完整性...")
 
         if not self.detector:
             self.detector = SmartDataDetector()

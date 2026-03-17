@@ -1,0 +1,162 @@
+# =============================================================================
+# Stage 1 多标的宇宙定义  —  stage1_universe.yaml
+# =============================================================================
+#
+# 分组独立聚合（组内通过率 / 夏普中位数 / 最大回撤分位数 / Alpha & IR 中位数）
+# 每个 group 可覆盖 defaults 中的任意字段；asset 级字段再次覆盖 group 级别。
+#
+# rollover_note    : 换月处理说明（仅人工备忘，不改变程序行为）
+# continuous_symbol: 首选使用的连续主力代码；若数据不可用则回退到 symbol
+# benchmark_source : OOS 对比参考序列说明（人工备注，落到批量 Markdown 报告头部）
+#
+# ── 阈值变更卡控规范 ────────────────────────────────────────────────────────
+# 所有 thresholds.* 字段的变更必须在 _change_log 中附带：
+#   issue_ref: 指向 GitHub Issue 或 PR（如 #42 或 https://github.com/.../issues/42）
+#   evidence:  回测证据链接或描述（不能仅写"临时调整"）
+# CI 的 Threshold Change Freeze Check 步骤会在 PR 中检查此要求。
+# =============================================================================
+
+# ── 阈值变更历史（Threshold Change Log）─────────────────────────────────────
+# 每次修改 thresholds.* 值时，必须在此追加一条记录（CI 强制检查）
+# issue_ref: GitHub Issue / PR URL 或 #编号；不可留空或填 "init" 以外的占位符
+_change_log:
+  - date:      "2026-03-10"
+    author:    "ops-team"
+    change:    "初始 thresholds 配置：defaults accessibility_warn_pct=80%; index_futures 覆盖 90%"
+    issue_ref: "init"   # 初始建立，豁免检查
+    evidence:  "首次建立，无历史 batch 回测对比基线；下周完成第一周真实 batch 后按实证微调"
+
+defaults:
+  start:        "2020-01-01"
+  end:          "2024-12-31"
+  oos_split:    "2023-01-01"
+  short_period: 5
+  long_period:  20
+  thresholds:
+    accessibility_warn_pct: 80   # 数据可达率低于此值时触发 WARN（各组可覆盖）
+
+groups:
+
+  # ── A 股主动股票 ──────────────────────────────────────────────────────────
+  stocks:
+    label:       "A股主动股票"
+    benchmark:   "CSI300"
+    market_name: "A股标准"
+    buy_comm:    0.0003
+    sell_comm:   0.0013      # 含印花税 0.001
+    slippage:    0.001
+    tradeability:
+      slippage_tier:          "equity"
+      min_daily_turnover_cny: 50000000   # 5000 万，流动性准入门槛
+      max_participation_rate: 0.10       # 单笔不超过日均成交量 10%
+      max_position_cny:       1000000    # 单标的最大持仓 100 万 CNY
+    assets:
+      - symbol: "000001.SZ"
+        name:   "平安银行"
+      - symbol: "000002.SZ"
+        name:   "万科A"
+      - symbol: "600519.SH"
+        name:   "贵州茅台"
+      - symbol: "300750.SZ"
+        name:   "宁德时代"
+
+  # ── ETF（宽基 + 行业 + 债基）─────────────────────────────────────────────
+  etf:
+    label:       "ETF（宽基/行业/债基）"
+    benchmark:   "CSI300"
+    market_name: "ETF"
+    buy_comm:    0.0003
+    sell_comm:   0.0003      # ETF 无印花税
+    slippage:    0.0005
+    tradeability:
+      slippage_tier:          "etf"
+      min_daily_turnover_cny: 100000000  # 1 亿，ETF 流动性要求更高
+      max_participation_rate: 0.05       # 单笔占比 ≤ 5%（避免大幅冲击）
+      max_position_cny:       2000000    # 单标的最大持仓 200 万 CNY
+    assets:
+      - symbol: "510300.SH"
+        name:   "沪深300ETF"
+      - symbol: "159880.SZ"
+        name:   "有色金属ETF"
+      - symbol: "511380.SH"
+        name:   "城投债ETF"
+      - symbol: "159915.SZ"
+        name:   "创业板ETF"
+
+  # ── 商品期货（主力活跃合约）──────────────────────────────────────────────
+  commodity_futures:
+    label:       "商品期货（主力活跃）"
+    benchmark:   "none"        # 商品无股指基准，不做 Alpha 计算
+    market_name: "商品期货"
+    buy_comm:    0.00005       # 双边各万0.5（示例；实际按品种 vary）
+    sell_comm:   0.00005
+    slippage:    0.002         # 期货滑点更大（点差+冲击成本）
+    tradeability:
+      slippage_tier:          "commodity_futures"
+      min_daily_turnover_cny: 500000000  # 5 亿，商品期货成交量门槛
+      max_participation_rate: 0.08       # 单笔占比 ≤ 8%
+      max_position_cny:       5000000    # 单标的最大持仓 500 万 CNY
+    rollover:
+      method:                 "days_before_expiry"  # 主要方式：到期前 N 日强制切换
+      days_before_expiry:     5                     # 到期前 5 个交易日执行切换
+      volume_ratio_threshold: 1.2                   # 次月成交量 ≥ 近月×1.2 时提前切换
+      avoid_open_on_rollover: true                  # 换月日禁止新开仓
+      rollover_slippage_add:  0.001                 # 换月日附加双向各 0.1% 额外滑点
+    assets:
+      - symbol:            "RB2605"
+        name:              "螺纹钢2605"
+        continuous_symbol: "RB_MAIN"
+        buy_comm:          0.0001      # 螺纹手续费略高
+        sell_comm:         0.0001
+        benchmark_source:  "RB_MAIN 商品期货连续合约（无股指基准）；OOS 绝对收益考核"
+      - symbol:            "CU2605"
+        name:              "沪铜2605"
+        continuous_symbol: "CU_MAIN"
+        benchmark_source:  "CU_MAIN 商品期货连续合约（无股指基准）；OOS 绝对收益考核"
+      - symbol:            "AG2605"
+        name:              "沪银2605"
+        continuous_symbol: "AG_MAIN"
+        slippage:          0.003       # 银价波动更大，滑点更高
+        benchmark_source:  "AG_MAIN 商品期货连续合约（无股指基准）；OOS 绝对收益考核"
+      - symbol:            "AU2606"
+        name:              "沪金2606"
+        continuous_symbol: "AU_MAIN"
+        benchmark_source:  "AU_MAIN 商品期货连续合约（无股指基准）；OOS 绝对收益考核"
+
+  # ── 股指期货（主力连续）──────────────────────────────────────────────────
+  index_futures:
+    label:       "股指期货（主力连续）"
+    thresholds:
+      accessibility_warn_pct: 90   # 股指期货数据质量要求更严，高于默认 80%
+    benchmark:   "CSI300"      # IF 参考沪深300；IC/IM 可在 asset 级覆盖
+    market_name: "股指期货"
+    buy_comm:    0.000023      # 双边各万0.23（平今仓需额外加收，此处用隔夜口径）
+    sell_comm:   0.000023
+    slippage:    0.0005
+    tradeability:
+      slippage_tier:          "index_futures"
+      min_daily_turnover_cny: 2000000000 # 200 亿，股指期货流动性极高
+      max_participation_rate: 0.03       # 单笔占比 ≤ 3%（监管敏感，机构惯例）
+      max_position_cny:       10000000   # 单标的最大持仓 1000 万 CNY
+    rollover:
+      method:                 "days_before_expiry"  # 到期前 N 日强制换月
+      days_before_expiry:     3                     # 股指流动性好，T-3 换月足够
+      volume_ratio_threshold: 1.5                   # 次月成交量 ≥ 近月×1.5 时提前切换
+      avoid_open_on_rollover: true                  # 换月日禁止新开仓
+      rollover_slippage_add:  0.0005                # 换月附加双向各 0.05% 额外滑点
+    assets:
+      - symbol:            "IFM0"
+        name:              "IF 沪深300指数期货主力"
+        continuous_symbol: "IFM0"
+        benchmark:         "CSI300"
+        benchmark_source:  "IFM0 连续主力复权合约 vs CSI300 现货指数；OOS 期间含换月摩擦成本"
+      - symbol:            "ICM0"
+        name:              "IC 中证500指数期货主力"
+        continuous_symbol: "ICM0"
+        benchmark:         "CSI500"
+        benchmark_source:  "ICM0 连续主力复权合约 vs CSI500 现货指数；OOS 期间含换月摩擦成本"
+      - symbol:            "IMM0"
+        name:              "IM 中证1000指数期货主力"
+        continuous_symbol: "IMM0"
+        benchmark:         "CSI500"    # 近似基准；CSI1000 本地若无则降级
+        benchmark_source:  "IMM0 连续主力复权合约 vs CSI500（降级近似）；CSI1000 本地不可用时沿用；OOS 期间含换月摩擦成本"

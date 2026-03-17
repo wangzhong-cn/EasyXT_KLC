@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 EasyXT与JQ2QMT集成适配器
 提供EasyXT策略与JQ2QMT服务器的无缝集成
 """
 
-import sys
-import os
-import time
 import logging
-from typing import List, Dict, Optional, Any
+import os
+import sys
+import importlib
 from datetime import datetime
+from typing import Any, Optional
 
 # 添加 qka 包路径以便导入
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'jq2qmt'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'jq2qmt', 'qka'))
 
 from .data_converter import DataConverter
-from .order_converter import OrderConverter
 
 # 尝试导入QMTClient，如果不存在则设为None
 try:
-    from qka.client import QMTClient
+    _qka_client_mod = importlib.import_module("strategies.jq2qmt.qka.client")
+    QMTClient = getattr(_qka_client_mod, "QMTClient", None)
 except ImportError:
     QMTClient = None
 
 
 class EasyXTJQ2QMTAdapter:
     """EasyXT与JQ2QMT集成适配器"""
-    
-    def __init__(self, config: Dict[str, Any]):
+
+    def __init__(self, config: dict[str, Any]):
         """
         初始化适配器
-        
+
         Args:
             config: JQ2QMT配置字典
                 {
@@ -51,36 +50,36 @@ class EasyXTJQ2QMTAdapter:
         """
         self.config = config
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        
+
         # 初始化qka客户端（如果启用）
         self.qka_client = None
         self._init_qka_client()
-        
+
         # 同步设置
         self.sync_settings = config.get('sync_settings', {})
         self.auto_sync = self.sync_settings.get('auto_sync', True)
         self.sync_interval = self.sync_settings.get('sync_interval', 30)
         self.retry_times = self.sync_settings.get('retry_times', 3)
-        
+
         # 状态跟踪
         self.last_sync_time = None
         self.sync_status = 'idle'  # idle, syncing, success, error
         self.last_error = None
-        
+
         self.logger.info("EasyXT-JQ2QMT适配器初始化完成")
-    
+
     def _init_qka_client(self):
         """初始化qka客户端"""
         if QMTClient is None:
             self.logger.warning("QMTClient不可用，请检查qka包是否正确安装")
             return
-            
+
         try:
             qka_settings = self.config.get('qka_settings', {})
             if qka_settings.get('enabled', False):
                 base_url = qka_settings.get('base_url', 'http://localhost:8000')
                 token = qka_settings.get('token', '')
-                
+
                 if base_url and token:
                     self.qka_client = QMTClient(base_url=base_url, token=token)
                     self.logger.info("qka客户端初始化成功")
@@ -91,12 +90,12 @@ class EasyXTJQ2QMTAdapter:
         except Exception as e:
             self.logger.error(f"qka客户端初始化失败: {e}")
             self.qka_client = None
-    
+
     def is_available(self) -> bool:
         """检查适配器是否可用（qka 模式）"""
         return getattr(self, 'qka_client', None) is not None
-    
-    def get_strategy_positions(self, strategy_name: str) -> Optional[List[Dict]]:
+
+    def get_strategy_positions(self, strategy_name: str) -> Optional[list[dict]]:
         """在 qka 模式下，直接查询账户资产/持仓，并返回 EasyXT 格式"""
         if not self.is_available() or self.qka_client is None:
             return None
@@ -116,8 +115,8 @@ class EasyXTJQ2QMTAdapter:
         except Exception as e:
             self.logger.error(f"qka 查询持仓失败: {e}")
             return None
-    
-    def get_total_positions(self, strategy_names: Optional[List[str]] = None) -> Optional[List[Dict]]:
+
+    def get_total_positions(self, strategy_names: Optional[list[str]] = None) -> Optional[list[dict]]:
         """qka 模式下的总持仓与账户资产查询，返回 EasyXT 格式"""
         if not self.is_available() or self.qka_client is None:
             return None
@@ -136,8 +135,8 @@ class EasyXTJQ2QMTAdapter:
         except Exception as e:
             self.logger.error(f"qka 查询总持仓失败: {e}")
             return None
-    
-    def get_all_strategies(self) -> Optional[List[Dict]]:
+
+    def get_all_strategies(self) -> Optional[list[dict]]:
         """qka-only 模式不再区分多策略，返回当前账户的单一持仓信息列表"""
         result = []
         positions = self.get_total_positions() or []
@@ -147,21 +146,21 @@ class EasyXTJQ2QMTAdapter:
             'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         })
         return result
-    
+
     def test_connection(self) -> bool:
         """测试与 qka FastAPI 服务器的连接（校验 token 可用）"""
         if not self.is_available() or self.qka_client is None:
             return False
         try:
             # 调用一个轻量接口，比如查询资产（若存在）。若无，尝试访问基座 /api/query_stock_asset
-            resp = self.qka_client.api('query_stock_asset')
+            self.qka_client.api('query_stock_asset')
             self.logger.info("qka 服务器连接正常")
             return True
         except Exception as e:
             self.logger.error(f"qka 服务器连接失败: {e}")
             return False
-    
-    def submit_orders(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+    def submit_orders(self, orders: list[dict[str, Any]]) -> dict[str, Any]:
         """
         提交订单到服务端：
         - 若 order_settings.mode == 'qka' 且启用 qka_settings，则调用 qka FastAPI 接口 /api/order_stock 按单下发
@@ -180,7 +179,7 @@ class EasyXTJQ2QMTAdapter:
                 if not token:
                     return {"success": False, "message": "qka token missing"}
                 headers = {"Content-Type": "application/json", "X-Token": token}
-                results: List[Dict[str, Any]] = []
+                results: list[dict[str, Any]] = []
                 # xtconstant 映射
                 try:
                     from xtquant import xtconstant
@@ -215,10 +214,10 @@ class EasyXTJQ2QMTAdapter:
         except Exception as e:
             return {"success": False, "message": str(e)}
 
-    def get_sync_status(self) -> Dict[str, Any]:
+    def get_sync_status(self) -> dict[str, Any]:
         """
         获取同步状态信息
-        
+
         Returns:
             Dict: 同步状态信息
         """
@@ -230,12 +229,12 @@ class EasyXTJQ2QMTAdapter:
             'sync_interval': self.sync_interval,
             'is_available': self.is_available()
         }
-    
+
     def set_auto_sync(self, enabled: bool):
         """设置自动同步开关"""
         self.auto_sync = enabled
         self.logger.info(f"自动同步已{'启用' if enabled else '禁用'}")
-    
+
     def set_sync_interval(self, interval: int):
         """设置同步间隔"""
         self.sync_interval = max(10, interval)  # 最小10秒
@@ -244,19 +243,19 @@ class EasyXTJQ2QMTAdapter:
 
 class JQ2QMTManager:
     """JQ2QMT管理器 - 管理多个适配器实例"""
-    
+
     def __init__(self):
         self.adapters = {}  # strategy_name -> adapter
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-    
-    def add_adapter(self, strategy_name: str, config: Dict[str, Any]) -> bool:
+
+    def add_adapter(self, strategy_name: str, config: dict[str, Any]) -> bool:
         """
         为策略添加JQ2QMT适配器
-        
+
         Args:
             strategy_name: 策略名称
             config: JQ2QMT配置
-        
+
         Returns:
             bool: 是否添加成功
         """
@@ -272,18 +271,18 @@ class JQ2QMTManager:
         except Exception as e:
             self.logger.error(f"添加JQ2QMT适配器失败: {e}")
             return False
-    
+
     def remove_adapter(self, strategy_name: str):
         """移除策略的JQ2QMT适配器"""
         if strategy_name in self.adapters:
             del self.adapters[strategy_name]
             self.logger.info(f"策略 {strategy_name} 的JQ2QMT适配器已移除")
-    
+
     def get_adapter(self, strategy_name: str) -> Optional[EasyXTJQ2QMTAdapter]:
         """获取策略的JQ2QMT适配器"""
         return self.adapters.get(strategy_name)
-    
-    def sync_all_strategies(self) -> Dict[str, bool]:
+
+    def sync_all_strategies(self) -> dict[str, bool]:
         """同步所有策略的持仓"""
         results = {}
         for strategy_name, adapter in self.adapters.items():
@@ -291,8 +290,8 @@ class JQ2QMTManager:
             # 实际实现时需要与EasyXT的策略系统集成
             results[strategy_name] = False  # 占位符
         return results
-    
-    def get_all_sync_status(self) -> Dict[str, Dict]:
+
+    def get_all_sync_status(self) -> dict[str, dict]:
         """获取所有适配器的同步状态"""
         status = {}
         for strategy_name, adapter in self.adapters.items():

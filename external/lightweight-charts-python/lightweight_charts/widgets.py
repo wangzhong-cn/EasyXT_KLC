@@ -54,8 +54,18 @@ except ImportError:
 
 
 def emit_callback(window, string):
-    func, args = parse_event_message(window, string)
-    asyncio.create_task(func(*args)) if asyncio.iscoroutinefunction(func) else func(*args)
+    """T04 fix: 捕获 handler 异常，防止 QWebChannel 回调崩溃 Qt 事件循环。"""
+    try:
+        func, args = parse_event_message(window, string)
+        if asyncio.iscoroutinefunction(func):
+            asyncio.create_task(func(*args))
+        else:
+            func(*args)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "emit_callback error (message truncated): %s", string[:120]
+        )
 
 
 class WxChart(abstract.AbstractChart):

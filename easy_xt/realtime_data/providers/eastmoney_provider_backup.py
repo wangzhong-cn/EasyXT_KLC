@@ -5,48 +5,47 @@
 参考综合交易系统项目的成熟实现方案。
 """
 
-import json
-import time
-import requests
 import logging
-from typing import Dict, List, Any, Optional
-from urllib.parse import urlencode
+import time
+from typing import Any, Optional
+
+import requests
 
 from .base_provider import BaseDataProvider
 
 
 class EastmoneyDataProvider(BaseDataProvider):
     """东方财富数据提供者"""
-    
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+
+    def __init__(self, config: Optional[dict[str, Any]] = None):
         """初始化东方财富数据提供者
-        
+
         Args:
             config: 配置参数
         """
         super().__init__('eastmoney')
         self.config = config or {}
-        
+
         # 基础配置
         self.base_url = "https://push2.eastmoney.com"
         self.quote_url = "https://qt.gtimg.cn"
         self.fund_url = "https://push2his.eastmoney.com"
-        
+
         # 请求配置
         self.timeout = self.config.get('timeout', 10)
         self.max_retries = self.config.get('max_retries', 3)
         self.retry_delay = self.config.get('retry_delay', 1)
-        
+
         # 设置日志
         self.logger = logging.getLogger(__name__)
-        
+
         # 市场代码映射
         self.market_mapping = {
             'sh': '1',  # 上海
             'sz': '0',  # 深圳
             'bj': '0'   # 北京
         }
-        
+
         # 数据字段映射
         self.quote_fields = [
             'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10',
@@ -54,13 +53,13 @@ class EastmoneyDataProvider(BaseDataProvider):
             'f21', 'f23', 'f24', 'f25', 'f22', 'f33', 'f11', 'f62', 'f128',
             'f136', 'f115', 'f152'
         ]
-        
+
         self._connected = False
         self._last_connect_time: float = 0.0
-        
+
     def connect(self) -> bool:
         """连接到东方财富数据源
-        
+
         Returns:
             bool: 连接是否成功
         """
@@ -79,31 +78,31 @@ class EastmoneyDataProvider(BaseDataProvider):
                 'fs': 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23',
                 'fields': 'f12,f14'
             }
-            
+
             response = self._make_request(test_url, params)
             if response and response.status_code == 200:
                 self._connected = True
                 self._last_connect_time = time.time()
                 self.logger.info("东方财富数据源连接成功")
                 return True
-            
+
             self._connected = False
             self.logger.error("东方财富数据源连接失败")
             return False
-            
+
         except Exception as e:
             self._connected = False
             self.logger.error(f"连接东方财富数据源异常: {e}")
             return False
-    
+
     def disconnect(self) -> None:
         """断开连接"""
         self._connected = False
         self.logger.info("已断开东方财富数据源连接")
-    
+
     def is_connected(self) -> bool:
         """检查连接状态
-        
+
         Returns:
             bool: 是否已连接
         """
@@ -111,18 +110,18 @@ class EastmoneyDataProvider(BaseDataProvider):
         if self._connected and time.time() - self._last_connect_time > 300:
             return self.connect()
         return self._connected
-    
+
     def is_available(self) -> bool:
         """检查数据源是否可用
-        
+
         Returns:
             bool: 数据源是否可用
         """
         return self.is_connected()
-    
-    def get_provider_info(self) -> Dict[str, Any]:
+
+    def get_provider_info(self) -> dict[str, Any]:
         """获取数据源信息
-        
+
         Returns:
             Dict: 数据源信息
         """
@@ -135,16 +134,16 @@ class EastmoneyDataProvider(BaseDataProvider):
             'update_frequency': '实时',
             'connected': self.is_connected()
         }
-    
-    def _make_request(self, url: str, params: Optional[Dict] = None, 
-                     headers: Optional[Dict] = None) -> Optional[requests.Response]:
+
+    def _make_request(self, url: str, params: Optional[dict] = None,
+                     headers: Optional[dict] = None) -> Optional[requests.Response]:
         """发送HTTP请求
-        
+
         Args:
             url: 请求URL
             params: 请求参数
             headers: 请求头
-            
+
         Returns:
             requests.Response: 响应对象
         """
@@ -158,42 +157,42 @@ class EastmoneyDataProvider(BaseDataProvider):
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1'
             }
-        
+
         for attempt in range(self.max_retries):
             try:
                 response = requests.get(
-                    url, 
-                    params=params, 
-                    headers=headers, 
+                    url,
+                    params=params,
+                    headers=headers,
                     timeout=self.timeout
                 )
-                
+
                 if response.status_code == 200:
                     return response
                 else:
                     self.logger.warning(f"请求失败，状态码: {response.status_code}")
-                    
+
             except requests.exceptions.RequestException as e:
                 self.logger.warning(f"请求异常 (尝试 {attempt + 1}/{self.max_retries}): {e}")
-                
+
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay * (attempt + 1))
-        
+
         return None
-    
-    def get_realtime_quotes(self, codes: List[str]) -> List[Dict[str, Any]]:
+
+    def get_realtime_quotes(self, codes: list[str]) -> list[dict[str, Any]]:
         """获取实时行情数据
-        
+
         Args:
             codes: 股票代码列表，格式如 ['000001', '000002']
-            
+
         Returns:
             List[Dict]: 实时行情数据列表
         """
         if not self.is_connected():
             self.logger.error("数据源未连接")
             return []
-        
+
         try:
             # 构建股票代码字符串
             secids = []
@@ -204,10 +203,10 @@ class EastmoneyDataProvider(BaseDataProvider):
                     secids.append(f"0.{symbol}")  # 深市
                 elif symbol.startswith('8') or symbol.startswith('4'):
                     secids.append(f"0.{symbol}")  # 北交所
-            
+
             if not secids:
                 return []
-            
+
             # 构建请求URL
             url = f"{self.base_url}/api/qt/ulist.np/get"
             params = {
@@ -217,37 +216,37 @@ class EastmoneyDataProvider(BaseDataProvider):
                 'fields': ','.join(self.quote_fields),
                 'secids': ','.join(secids)
             }
-            
+
             response = self._make_request(url, params)
             if not response:
                 return []
-            
+
             # 解析响应数据
             data = response.json()
-            
+
             if data.get('rc') == 0 and 'data' in data and data['data']:
                 quotes = []
-                
+
                 for item in data['data']['diff']:
                     quote_info = self._parse_quote_data(item)
                     if quote_info:
                         quotes.append(quote_info)
-                
+
                 self.logger.info(f"成功获取实时行情: {len(quotes)}只股票")
                 return quotes
-            
+
             return []
-            
+
         except Exception as e:
             self.logger.error(f"获取实时行情失败: {e}")
             return []
-    
-    def _parse_quote_data(self, item: Dict) -> Optional[Dict[str, Any]]:
+
+    def _parse_quote_data(self, item: dict) -> Optional[dict[str, Any]]:
         """解析行情数据
-        
+
         Args:
             item: 原始行情数据
-            
+
         Returns:
             Dict: 格式化的行情数据
         """
@@ -260,7 +259,7 @@ class EastmoneyDataProvider(BaseDataProvider):
                     return float(value)
                 except (ValueError, TypeError):
                     return default
-            
+
             def safe_int(value, default=0):
                 """安全转换为整数"""
                 if value is None or value == '-' or value == '':
@@ -269,7 +268,7 @@ class EastmoneyDataProvider(BaseDataProvider):
                     return int(value)
                 except (ValueError, TypeError):
                     return default
-            
+
             return {
                 'symbol': item.get('f12', ''),
                 'name': item.get('f14', ''),
@@ -292,14 +291,14 @@ class EastmoneyDataProvider(BaseDataProvider):
         except Exception as e:
             self.logger.warning(f"解析行情数据失败: {e}")
             return None
-    
-    def get_hot_stocks(self, market: str = 'all', count: int = 50) -> List[Dict[str, Any]]:
+
+    def get_hot_stocks(self, market: str = 'all', count: int = 50) -> list[dict[str, Any]]:
         """获取热门股票
-        
+
         Args:
             market: 市场类型 ('all', 'sh', 'sz')
             count: 获取数量
-            
+
         Returns:
             List[Dict]: 热门股票数据
         """
@@ -311,7 +310,7 @@ class EastmoneyDataProvider(BaseDataProvider):
                 fs = 'm:0+t:6,m:0+t:80'
             else:
                 fs = 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23'
-            
+
             url = f"{self.base_url}/api/qt/clist/get"
             params = {
                 'pn': '1',
@@ -325,16 +324,16 @@ class EastmoneyDataProvider(BaseDataProvider):
                 'fs': fs,
                 'fields': 'f12,f14,f2,f3,f4,f5,f6,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87'
             }
-            
+
             response = self._make_request(url, params)
             if not response:
                 return []
-            
+
             data = response.json()
-            
+
             if data.get('rc') == 0 and 'data' in data and data['data']:
                 stocks = []
-                
+
                 def safe_float(value, default=0.0):
                     """安全转换为浮点数"""
                     if value is None or value == '-' or value == '':
@@ -343,7 +342,7 @@ class EastmoneyDataProvider(BaseDataProvider):
                         return float(value)
                     except (ValueError, TypeError):
                         return default
-                
+
                 def safe_int(value, default=0):
                     """安全转换为整数"""
                     if value is None or value == '-' or value == '':
@@ -352,7 +351,7 @@ class EastmoneyDataProvider(BaseDataProvider):
                         return int(value)
                     except (ValueError, TypeError):
                         return default
-                
+
                 for i, item in enumerate(data['data']['diff']):
                     stock_info = {
                         'rank': i + 1,
@@ -368,22 +367,22 @@ class EastmoneyDataProvider(BaseDataProvider):
                         'source': 'eastmoney'
                     }
                     stocks.append(stock_info)
-                
+
                 self.logger.info(f"成功获取热门股票: {len(stocks)}只")
                 return stocks
-            
+
             return []
-            
+
         except Exception as e:
             self.logger.error(f"获取热门股票失败: {e}")
             return []
-    
-    def get_sector_data(self, sector_type: str = 'concept') -> List[Dict[str, Any]]:
+
+    def get_sector_data(self, sector_type: str = 'concept') -> list[dict[str, Any]]:
         """获取板块数据
-        
+
         Args:
             sector_type: 板块类型 ('concept', 'industry')
-            
+
         Returns:
             List[Dict]: 板块数据
         """
@@ -397,7 +396,7 @@ class EastmoneyDataProvider(BaseDataProvider):
                 fid = 'f104'  # 行业板块按涨跌幅排序
             else:
                 return []
-            
+
             url = f"{self.base_url}/api/qt/clist/get"
             params = {
                 'pn': '1',
@@ -411,16 +410,16 @@ class EastmoneyDataProvider(BaseDataProvider):
                 'fs': fs,
                 'fields': 'f12,f14,f2,f3,f4,f104,f105,f106,f107,f108'
             }
-            
+
             response = self._make_request(url, params)
             if not response:
                 return []
-            
+
             data = response.json()
-            
+
             if data.get('rc') == 0 and 'data' in data and data['data']:
                 sectors = []
-                
+
                 def safe_float(value, default=0.0):
                     """安全转换为浮点数"""
                     if value is None or value == '-' or value == '':
@@ -429,7 +428,7 @@ class EastmoneyDataProvider(BaseDataProvider):
                         return float(value)
                     except (ValueError, TypeError):
                         return default
-                
+
                 def safe_int(value, default=0):
                     """安全转换为整数"""
                     if value is None or value == '-' or value == '':
@@ -438,7 +437,7 @@ class EastmoneyDataProvider(BaseDataProvider):
                         return int(value)
                     except (ValueError, TypeError):
                         return default
-                
+
                 for i, item in enumerate(data['data']['diff']):
                     sector_info = {
                         'rank': i + 1,
@@ -454,33 +453,33 @@ class EastmoneyDataProvider(BaseDataProvider):
                         'source': 'eastmoney'
                     }
                     sectors.append(sector_info)
-                
+
                 self.logger.info(f"成功获取{sector_type}板块数据: {len(sectors)}个")
                 return sectors
-            
+
             return []
-            
+
         except Exception as e:
             self.logger.error(f"获取板块数据失败: {e}")
             return []
-    
-    def get_market_status(self) -> Dict[str, Any]:
+
+    def get_market_status(self) -> dict[str, Any]:
         """获取市场状态
-        
+
         Returns:
             Dict: 市场状态信息
         """
         try:
             # 获取上证指数作为市场状态指标
             quotes = self.get_realtime_quotes(['000001'])
-            
+
             if quotes:
                 index_data = quotes[0]
-                
+
                 # 判断市场状态
                 current_time = time.strftime('%H:%M:%S')
                 is_trading = '09:30:00' <= current_time <= '11:30:00' or '13:00:00' <= current_time <= '15:00:00'
-                
+
                 return {
                     'market_status': 'trading' if is_trading else 'closed',
                     'index_price': index_data.get('price', 0),
@@ -489,13 +488,13 @@ class EastmoneyDataProvider(BaseDataProvider):
                     'timestamp': int(time.time()),
                     'source': 'eastmoney'
                 }
-            
+
             return {
                 'market_status': 'unknown',
                 'timestamp': int(time.time()),
                 'source': 'eastmoney'
             }
-            
+
         except Exception as e:
             self.logger.error(f"获取市场状态失败: {e}")
             return {

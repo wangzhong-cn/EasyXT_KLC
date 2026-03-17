@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 简单填充复权数据 - 使用现有数据
 不依赖分红数据，直接复制原始数据到复权列
 """
 
+
 import duckdb
-import pandas as pd
-from datetime import datetime
+
 
 def fill_adjustment_simple():
     """简单填充复权数据（直接复制原始数据）"""
@@ -48,12 +47,11 @@ def fill_adjustment_simple():
     for i, stock_code in enumerate(stocks, 1):
         try:
             # 检查是否已有复权数据
-            check = con.execute(f"""
-                SELECT COUNT(*) as cnt
-                FROM stock_daily
-                WHERE stock_code = '{stock_code}'
-                  AND open_front IS NOT NULL
-            """).fetchone()
+            check = con.execute(
+                "SELECT COUNT(*) as cnt FROM stock_daily"
+                " WHERE stock_code = ? AND open_front IS NOT NULL",
+                [stock_code]
+            ).fetchone()
 
             if check and check[0] > 0:
                 print(f"[{i}/{len(stocks)}] {stock_code}... [SKIP] 已有数据")
@@ -61,7 +59,8 @@ def fill_adjustment_simple():
                 continue
 
             # 直接更新：将原始数据复制到复权列
-            con.execute(f"""
+            con.execute(
+                """
                 UPDATE stock_daily
                 SET
                     open_front = open,
@@ -80,16 +79,19 @@ def fill_adjustment_simple():
                     high_geometric_back = high,
                     low_geometric_back = low,
                     close_geometric_back = close
-                WHERE stock_code = '{stock_code}'
+                WHERE stock_code = ?
                   AND adjust_type = 'none'
-            """)
+                """,
+                [stock_code]
+            )
 
-            affected = con.execute(f"""
-                SELECT COUNT(*) FROM stock_daily
-                WHERE stock_code = '{stock_code}' AND adjust_type = 'none'
-            """).fetchone()[0]
+            affected = con.execute(
+                "SELECT COUNT(*) FROM stock_daily WHERE stock_code = ? AND adjust_type = 'none'",
+                [stock_code]
+            ).fetchone()
+            affected_count = int(affected[0]) if affected else 0
 
-            print(f"[{i}/{len(stocks)}] {stock_code}... [OK] {affected}条")
+            print(f"[{i}/{len(stocks)}] {stock_code}... [OK] {affected_count}条")
             success_count += 1
 
         except Exception as e:

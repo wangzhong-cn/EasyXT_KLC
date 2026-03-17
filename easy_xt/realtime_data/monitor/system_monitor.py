@@ -4,13 +4,16 @@
 监控CPU、内存、磁盘、网络等系统资源使用情况。
 """
 
-import time
 import logging
 import threading
-from typing import Dict, Any, List, Optional
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_SH = ZoneInfo('Asia/Shanghai')
 from importlib import import_module
+from typing import Any, Optional
 
 psutil: Any = import_module("psutil")
 
@@ -31,38 +34,38 @@ class SystemMetrics:
     network_sent: int
     network_recv: int
     process_count: int
-    load_average: List[float]
+    load_average: list[float]
 
 
 class SystemMonitor:
     """系统性能监控器"""
-    
+
     def __init__(self, interval: int = 30, history_size: int = 1000):
         """初始化系统监控器
-        
+
         Args:
             interval: 监控间隔（秒）
             history_size: 历史数据保存数量
         """
         self.interval = interval
         self.history_size = history_size
-        self.metrics_history: List[SystemMetrics] = []
-        
+        self.metrics_history: list[SystemMetrics] = []
+
         self._running = False
         self._monitor_thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()
-        
+
         # 网络统计基准值
         self._last_network_stats: Optional[Any] = None
-        
+
         logger.info(f"系统监控器初始化完成，监控间隔: {interval}秒")
-    
+
     def start(self):
         """启动监控"""
         if self._running:
             logger.warning("系统监控器已在运行")
             return
-        
+
         self._running = True
         self._monitor_thread = threading.Thread(
             target=self._monitor_loop,
@@ -71,18 +74,18 @@ class SystemMonitor:
         )
         self._monitor_thread.start()
         logger.info("系统监控器已启动")
-    
+
     def stop(self):
         """停止监控"""
         if not self._running:
             return
-        
+
         self._running = False
         if self._monitor_thread and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=5)
-        
+
         logger.info("系统监控器已停止")
-    
+
     def _monitor_loop(self):
         """监控循环"""
         while self._running:
@@ -93,33 +96,33 @@ class SystemMonitor:
             except Exception as e:
                 logger.error(f"系统监控采集失败: {e}")
                 time.sleep(self.interval)
-    
+
     def _collect_metrics(self) -> SystemMetrics:
         """采集系统指标"""
         # CPU使用率
         cpu_percent = psutil.cpu_percent(interval=1)
-        
+
         # 内存使用情况
         memory = psutil.virtual_memory()
-        
+
         # 磁盘使用情况
         disk = psutil.disk_usage('/')
-        
+
         # 网络统计
         network = psutil.net_io_counters()
         network_sent = network.bytes_sent
         network_recv = network.bytes_recv
-        
+
         # 如果有上次的网络统计，计算增量
         if self._last_network_stats:
             network_sent = network.bytes_sent - self._last_network_stats.bytes_sent
             network_recv = network.bytes_recv - self._last_network_stats.bytes_recv
-        
+
         self._last_network_stats = network
-        
+
         # 进程数量
         process_count = len(psutil.pids())
-        
+
         # 系统负载（Linux/Unix）
         load_average = []
         try:
@@ -128,9 +131,9 @@ class SystemMonitor:
         except (AttributeError, OSError):
             # Windows系统没有load average
             load_average = [0.0, 0.0, 0.0]
-        
+
         return SystemMetrics(
-            timestamp=datetime.now(),
+            timestamp=datetime.now(tz=_SH),
             cpu_percent=cpu_percent,
             memory_percent=memory.percent,
             memory_used=memory.used,
@@ -143,82 +146,82 @@ class SystemMonitor:
             process_count=process_count,
             load_average=load_average
         )
-    
+
     def _add_metrics(self, metrics: SystemMetrics):
         """添加指标到历史记录"""
         with self._lock:
             self.metrics_history.append(metrics)
-            
+
             # 保持历史记录大小
             if len(self.metrics_history) > self.history_size:
                 self.metrics_history.pop(0)
-    
+
     def get_current_metrics(self) -> Optional[SystemMetrics]:
         """获取当前系统指标"""
         with self._lock:
             if self.metrics_history:
                 return self.metrics_history[-1]
             return None
-    
-    def get_metrics_history(self, duration: Optional[timedelta] = None) -> List[SystemMetrics]:
+
+    def get_metrics_history(self, duration: Optional[timedelta] = None) -> list[SystemMetrics]:
         """获取历史指标
-        
+
         Args:
             duration: 时间范围，None表示全部历史
-            
+
         Returns:
             List[SystemMetrics]: 指标列表
         """
         with self._lock:
             if duration is None:
                 return self.metrics_history.copy()
-            
-            cutoff_time = datetime.now() - duration
+
+            cutoff_time = datetime.now(tz=_SH) - duration
             return [
-                m for m in self.metrics_history 
+                m for m in self.metrics_history
                 if m.timestamp >= cutoff_time
             ]
-    
-    def get_average_metrics(self, duration: Optional[timedelta] = None) -> Dict[str, float]:
+
+    def get_average_metrics(self, duration: Optional[timedelta] = None) -> dict[str, float]:
         """获取平均指标
-        
+
         Args:
             duration: 时间范围
-            
+
         Returns:
             Dict: 平均指标
         """
         history = self.get_metrics_history(duration)
         if not history:
             return {}
-        
+
         total_cpu = sum(m.cpu_percent for m in history)
         total_memory = sum(m.memory_percent for m in history)
         total_disk = sum(m.disk_percent for m in history)
         count = len(history)
-        
+
         return {
             'avg_cpu_percent': total_cpu / count,
             'avg_memory_percent': total_memory / count,
             'avg_disk_percent': total_disk / count,
             'sample_count': count
         }
-    
-    def check_thresholds(self, thresholds: Dict[str, float]) -> List[Dict[str, Any]]:
+
+    def check_thresholds(self, thresholds: dict[str, float]) -> list[dict[str, Any]]:
         """检查阈值告警
-        
+
         Args:
             thresholds: 阈值配置 {'cpu': 80, 'memory': 85, 'disk': 90}
-            
+
         Returns:
             List: 告警列表
         """
         current = self.get_current_metrics()
         if not current:
             return []
-        
+
         alerts = []
-        
+
         # CPU告警
         if 'cpu' in thresholds and current.cpu_percent > thresholds['cpu']:
             alerts.append({
@@ -229,7 +232,7 @@ class SystemMonitor:
                 'threshold': thresholds['cpu'],
                 'timestamp': current.timestamp
             })
-        
+
         # 内存告警
         if 'memory' in thresholds and current.memory_percent > thresholds['memory']:
             alerts.append({
@@ -240,7 +243,7 @@ class SystemMonitor:
                 'threshold': thresholds['memory'],
                 'timestamp': current.timestamp
             })
-        
+
         # 磁盘告警
         if 'disk' in thresholds and current.disk_percent > thresholds['disk']:
             alerts.append({
@@ -251,15 +254,15 @@ class SystemMonitor:
                 'threshold': thresholds['disk'],
                 'timestamp': current.timestamp
             })
-        
+
         return alerts
-    
-    def get_system_info(self) -> Dict[str, Any]:
+
+    def get_system_info(self) -> dict[str, Any]:
         """获取系统信息"""
         try:
-            boot_time = datetime.fromtimestamp(psutil.boot_time())
-            uptime = datetime.now() - boot_time
-            
+            boot_time = datetime.fromtimestamp(psutil.boot_time(), tz=_SH)
+            uptime = datetime.now(tz=_SH) - boot_time
+
             return {
                 'platform': psutil.LINUX if hasattr(psutil, 'LINUX') else 'unknown',
                 'cpu_count': psutil.cpu_count(),
@@ -273,13 +276,13 @@ class SystemMonitor:
         except Exception as e:
             logger.error(f"获取系统信息失败: {e}")
             return {}
-    
-    def get_process_info(self, limit: int = 10) -> List[Dict[str, Any]]:
+
+    def get_process_info(self, limit: int = 10) -> list[dict[str, Any]]:
         """获取进程信息
-        
+
         Args:
             limit: 返回进程数量限制
-            
+
         Returns:
             List: 进程信息列表
         """
@@ -290,21 +293,21 @@ class SystemMonitor:
                     processes.append(proc.info)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-            
+
             # 按CPU使用率排序
             processes.sort(key=lambda x: x.get('cpu_percent', 0), reverse=True)
             return processes[:limit]
-            
+
         except Exception as e:
             logger.error(f"获取进程信息失败: {e}")
             return []
-    
-    def get_stats(self) -> Dict[str, Any]:
+
+    def get_stats(self) -> dict[str, Any]:
         """获取监控统计信息"""
         with self._lock:
             current = self.get_current_metrics()
             avg_1h = self.get_average_metrics(timedelta(hours=1))
-            
+
             return {
                 'monitor_info': {
                     'running': self._running,
@@ -321,10 +324,10 @@ class SystemMonitor:
 
 class ProcessMonitor:
     """进程监控器"""
-    
+
     def __init__(self, process_name: Optional[str] = None, pid: Optional[int] = None):
         """初始化进程监控器
-        
+
         Args:
             process_name: 进程名称
             pid: 进程ID
@@ -332,9 +335,9 @@ class ProcessMonitor:
         self.process_name = process_name
         self.pid = pid
         self.process: Optional[Any] = None
-        
+
         self._find_process()
-    
+
     def _find_process(self):
         """查找目标进程"""
         try:
@@ -347,15 +350,15 @@ class ProcessMonitor:
                         break
         except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
             logger.warning(f"查找进程失败: {e}")
-    
-    def get_process_metrics(self) -> Optional[Dict[str, Any]]:
+
+    def get_process_metrics(self) -> Optional[dict[str, Any]]:
         """获取进程指标"""
         if not self.process:
             self._find_process()
-        
+
         if not self.process:
             return None
-        
+
         try:
             with self.process.oneshot():
                 return {
@@ -372,15 +375,15 @@ class ProcessMonitor:
         except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
             logger.warning(f"获取进程指标失败: {e}")
             return None
-    
+
     def is_running(self) -> bool:
         """检查进程是否运行"""
         if not self.process:
             self._find_process()
-        
+
         if not self.process:
             return False
-        
+
         try:
             return self.process.is_running()
         except psutil.NoSuchProcess:

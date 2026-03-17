@@ -42,3 +42,71 @@ Source = "https://github.com/quant-king299/EasyXT"
 
 [tool.flit.module]
 name = "easy_xt"
+
+[tool.ruff]
+exclude = [
+  ".git",
+  ".venv",
+  "venv",
+  "__pycache__",
+  "external",
+  "myenv",
+  "notebooks",
+  "学习实例",
+  "学习案例",
+  "examples",
+  "*.ipynb"
+]
+line-length = 100
+target-version = "py39"
+lint.select = ["E", "W", "F", "I", "UP"]
+lint.ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "gui_app"]
+
+[tool.ruff.lint.per-file-ignores]
+"101因子/**" = ["E402", "E722", "F401", "F403", "F405", "F821"]
+"easy_xt/**" = ["E402", "E722", "F401"]
+"tools/**" = ["E402", "E722"]
+"PYPlugins/**" = ["E722"]
+"config/**" = ["E722"]
+"strategies/**" = ["E722"]
+"strategies/jq2qmt/**" = ["F403", "F405"]
+"gui_app/widgets/grid_trading_widget.py" = ["E402"]
+"data_manager/universal_data_importer.py" = ["E402"]
+"diagnose_grid_trades.py" = ["E402"]
+"launch_grid_backtest.py" = ["E402"]
+
+[tool.coverage.run]
+source = ["core", "gui_app", "tools", "easy_xt", "data_manager"]
+omit = [
+  "*/tests/*",
+  "*/__pycache__/*",
+  "*/venv/*",
+  "*/env/*",
+  "*/myenv/*"
+]
+
+[tool.coverage.report]
+fail_under = 25
+exclude_lines = [
+  "pragma: no cover",
+  "def __repr__",
+  "if self.debug:",
+  "if settings.DEBUG",
+  "raise AssertionError",
+  "raise NotImplementedError"
+]
+
+[tool.coverage.targets]
+short_term = 25
+mid_term = 35
+long_term = 50
+
+[tool.coverage.html]
+directory = "htmlcov"
+title = "EasyXT Coverage Report"
+
+[tool.coverage.xml]
+output = "coverage.xml"

@@ -29,9 +29,11 @@
 """
 
 import sys
-import pandas as pd
+import importlib
 from pathlib import Path
-from typing import List, Optional, Union, Dict
+from typing import Optional
+
+import pandas as pd
 
 
 class TdxClient:
@@ -53,11 +55,12 @@ class TdxClient:
 
         # 导入通达信接口模块
         try:
-            from tqcenter import tq
+            tq_module = importlib.import_module("tqcenter")
+            tq = getattr(tq_module, "tq")
             self.tq = tq
             # 初始化
             tq.initialize(__file__)
-            print(f"[OK] 通达信客户端初始化成功")
+            print("[OK] 通达信客户端初始化成功")
             print(f"  插件路径: {self.tdx_user_path}")
         except ImportError as e:
             raise ImportError(
@@ -126,14 +129,14 @@ class TdxClient:
 
     def get_market_data(
         self,
-        stock_list: List[str],
+        stock_list: list[str],
         start_time: str,
         end_time: str = "",
         count: int = -1,
         dividend_type: str = "front",
         period: str = "1d",
         fill_data: bool = False,
-        field_list: Optional[List[str]] = None
+        field_list: Optional[list[str]] = None
     ) -> pd.DataFrame:
         """
         获取行情数据
@@ -170,8 +173,8 @@ class TdxClient:
 
     def get_financial_data(
         self,
-        stock_list: List[str],
-        field_list: List[str],
+        stock_list: list[str],
+        field_list: list[str],
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
         report_type: str = "report_time"
@@ -203,7 +206,7 @@ class TdxClient:
         self,
         sector_name: str,
         block_type: int = 1
-    ) -> List[str]:
+    ) -> list[str]:
         """
         获取板块成分股
 
@@ -231,7 +234,7 @@ class TdxClient:
         else:
             return []
 
-    def get_stock_info(self, stock_code: str) -> Dict:
+    def get_stock_info(self, stock_code: str) -> dict:
         """
         获取股票基本信息
 
@@ -243,7 +246,7 @@ class TdxClient:
         """
         return self.tq.get_stock_info(stock_code)
 
-    def get_block_list(self, block_type: int = 1) -> List[Dict]:
+    def get_block_list(self, block_type: int = 1) -> list[dict]:
         """
         获取板块列表
 
@@ -259,7 +262,7 @@ class TdxClient:
         # 新API使用 get_sector_list()
         return self.tq.get_sector_list()
 
-    def get_sector_list(self) -> List[str]:
+    def get_sector_list(self) -> list[str]:
         """
         获取所有板块列表
 
@@ -269,7 +272,7 @@ class TdxClient:
         result = self.tq.get_sector_list()
         return result if isinstance(result, list) else []
 
-    def get_user_sector(self) -> List[str]:
+    def get_user_sector(self) -> list[str]:
         """
         获取用户自定义板块列表
 
@@ -283,7 +286,7 @@ class TdxClient:
         result = self.tq.get_user_sector()
         return result if isinstance(result, list) else []
 
-    def _data_to_df(self, data: Dict) -> pd.DataFrame:
+    def _data_to_df(self, data: dict) -> pd.DataFrame:
         """
         将tq.get_market_data返回的dict转换为DataFrame格式
 
@@ -325,7 +328,7 @@ class TdxClient:
 
 # 快捷函数
 def get_tdx_data(
-    stock_list: List[str],
+    stock_list: list[str],
     start_time: str,
     end_time: str = "",
     period: str = "1d",
@@ -373,7 +376,7 @@ if __name__ == "__main__":
     )
     print(f"数据形状: {df.shape}")
     print(f"数据列: {df.columns.tolist()}")
-    print(f"\n前5行数据:")
+    print("\n前5行数据:")
     print(df.head())
     print()
 
@@ -393,12 +396,12 @@ if __name__ == "__main__":
     try:
         fin_df = client.get_financial_data(
             stock_list=['000001.SZ'],
-            fields=['净资产收益率', '市盈率', '营业总收入'],
+            field_list=['净资产收益率', '市盈率', '营业总收入'],
             report_type='年报'
         )
         print(f"财务数据形状: {fin_df.shape}")
         if not fin_df.empty:
-            print(f"\n财务数据:")
+            print("\n财务数据:")
             print(fin_df.head())
     except Exception as e:
         print(f"获取财务数据失败: {e}")

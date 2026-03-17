@@ -1,20 +1,21 @@
-# -*- coding: utf-8 -*-
 """
 多数据源数据管理器
 负责获取、清洗和转换回测所需的历史数据
 支持多数据源：QMT → QStock → AKShare → 模拟数据
 """
 
-import os
-import sys
 import importlib
 import importlib.util
-from pathlib import Path
-import pandas as pd
-import numpy as np
+import os
+import sys
 from datetime import datetime
-from typing import Dict, List, Optional, Any, cast
 from enum import Enum
+from pathlib import Path
+from typing import Any, Optional, cast
+
+import numpy as np
+import pandas as pd
+
 
 class DataSource(Enum):
     """数据源枚举"""
@@ -28,7 +29,7 @@ class DataSource(Enum):
 class DataManager:
     """
     多数据源数据管理器
-    
+
     功能特性：
     1. 多数据源支持：QMT → QStock → AKShare → 模拟数据
     2. 自动数据源切换和手动指定
@@ -36,9 +37,13 @@ class DataManager:
     4. 格式转换和标准化
     5. 数据源状态监控
     """
-    
-    def __init__(self, preferred_source: Optional[DataSource] = None,
-                 use_local_cache: bool = True):
+
+    def __init__(
+        self,
+        preferred_source: Optional[DataSource] = None,
+        use_local_cache: bool = True,
+        defer_checks: bool = False,
+    ):
         """
         初始化数据管理器
 
@@ -49,11 +54,13 @@ class DataManager:
         self.preferred_source = preferred_source
         self.use_local_cache = use_local_cache
         self.last_source: Optional[str] = None
-        self.last_data_info: Dict[str, Any] = {}
+        self.last_data_info: dict[str, Any] = {}
 
         # 初始化DuckDB数据库（最高优先级）
         self.duckdb_connection = None
-        self.duckdb_path = 'D:/StockData/stock_data.ddb'
+        from data_manager.duckdb_connection_pool import resolve_duckdb_path
+
+        self.duckdb_path = resolve_duckdb_path()
         self._duckdb_enabled = False  # 标记DuckDB是否可用
         if importlib.util.find_spec("duckdb") is not None:
             self._duckdb_enabled = True
@@ -63,13 +70,24 @@ class DataManager:
 
         self.local_data_manager = None
         if self.use_local_cache:
+            # NOTE: 使用保存/恢复机制防止 sys.modules["data_manager"] 全局污染。
+            # 101因子 平台内部有独立的 data_manager 包，与本项目根包同名。
+            # 以下 try/finally 确保临时替换不会泄漏到调用方的 sys.modules 中。
+            _dm_backup: dict = {
+                k: v for k, v in sys.modules.items()
+                if k == "data_manager" or k.startswith("data_manager.")
+            }
+            _path_inserted = False
             try:
                 factor_platform_path = Path(__file__).parents[2] / "101因子" / "101因子分析平台" / "src"
-                if str(factor_platform_path) not in sys.path:
-                    sys.path.insert(0, str(factor_platform_path))
-                module_path = getattr(sys.modules.get("data_manager"), "__file__", "")
-                if module_path and str(factor_platform_path).replace("\\", "/") not in module_path.replace("\\", "/"):
-                    del sys.modules["data_manager"]
+                factor_path_str = str(factor_platform_path)
+                if factor_path_str not in sys.path:
+                    sys.path.insert(0, factor_path_str)
+                    _path_inserted = True
+                # 暂时移除当前 data_manager，让下方 import 解析到 101因子 版本
+                for k in list(sys.modules.keys()):
+                    if k == "data_manager" or k.startswith("data_manager."):
+                        del sys.modules[k]
                 importlib.invalidate_caches()
                 module = importlib.import_module("data_manager.local_data_manager_with_adjustment")
                 LocalDataManagerWithAdjustment = getattr(module, "LocalDataManager", None)
@@ -77,17 +95,54 @@ class DataManager:
                     self.local_data_manager = LocalDataManagerWithAdjustment()
             except Exception as e:
                 print(f"[INFO] 本地缓存初始化失败: {str(e)[:120]}")
+            finally:
+                # 清理 101因子 版本，恢复项目根 data_manager
+                for k in list(sys.modules.keys()):
+                    if k == "data_manager" or k.startswith("data_manager."):
+                        del sys.modules[k]
+                sys.modules.update(_dm_backup)
+                if _path_inserted and factor_path_str in sys.path:
+                    sys.path.remove(factor_path_str)
 
         # 检查各数据源可用性
-        self.source_status = self._check_all_sources()
+        if defer_checks:
+            self.source_status = self._build_initial_status()
+        else:
+            self.source_status = self._check_all_sources()
 
         # 确定数据源优先级
         self.source_priority = self._get_source_priority()
 
         # 显示初始化状态
         self._print_initialization_status()
-        
-    def _check_all_sources(self) -> Dict[DataSource, Dict[str, Any]]:
+
+    def _build_initial_status(self) -> dict[DataSource, dict[str, Any]]:
+        status = {}
+        status[DataSource.DUCKDB] = self._check_duckdb_status()
+        status[DataSource.LOCAL] = self._check_local_status()
+        status[DataSource.QMT] = {
+            'available': True,
+            'connected': False,
+            'message': '延迟检测'
+        }
+        status[DataSource.QSTOCK] = {
+            'available': True,
+            'connected': False,
+            'message': '延迟检测'
+        }
+        status[DataSource.AKSHARE] = {
+            'available': True,
+            'connected': False,
+            'message': '延迟检测'
+        }
+        status[DataSource.MOCK] = {
+            'available': True,
+            'connected': True,
+            'message': '模拟数据生成器'
+        }
+        return status
+
+    def _check_all_sources(self) -> dict[DataSource, dict[str, Any]]:
         """检查所有数据源的可用性"""
         status = {}
 
@@ -115,7 +170,7 @@ class DataManager:
 
         return status
 
-    def _check_duckdb_status(self) -> Dict[str, Any]:
+    def _check_duckdb_status(self) -> dict[str, Any]:
         """检查DuckDB数据库状态"""
         if not self._duckdb_enabled:
             return {
@@ -132,9 +187,8 @@ class DataManager:
             }
 
         try:
-            import duckdb
-            con = duckdb.connect(self.duckdb_path, read_only=True)
-            try:
+            from data_manager.duckdb_connection_pool import get_db_manager
+            with get_db_manager(self.duckdb_path).get_read_connection() as con:
                 result = con.execute("""
                     SELECT COUNT(*) as count FROM stock_daily LIMIT 1
                 """).fetchone()
@@ -150,8 +204,6 @@ class DataManager:
                     'connected': False,
                     'message': 'DuckDB数据库为空'
                 }
-            finally:
-                con.close()
         except Exception as e:
             return {
                 'available': False,
@@ -159,7 +211,7 @@ class DataManager:
                 'message': f'DuckDB查询失败: {str(e)[:50]}'
             }
 
-    def _check_local_status(self) -> Dict[str, Any]:
+    def _check_local_status(self) -> dict[str, Any]:
         """检查本地缓存状态"""
         if self.local_data_manager is not None:
             stats = self.local_data_manager.get_statistics()
@@ -174,16 +226,16 @@ class DataManager:
             'connected': False,
             'message': '本地缓存未启用'
         }
-        
-    def _check_qmt_status(self) -> Dict[str, Any]:
+
+    def _check_qmt_status(self) -> dict[str, Any]:
         """检查QMT状态"""
         try:
-            import xtquant.xtdata as xt_data
-            
             # 快速连接检测
             import threading
+
+            import xtquant.xtdata as xt_data
             result = {'connected': False}
-            
+
             def quick_check():
                 try:
                     info = xt_data.get_instrument_detail('000001.SZ')
@@ -191,18 +243,18 @@ class DataManager:
                         result['connected'] = True
                 except Exception:
                     result['connected'] = False
-            
+
             check_thread = threading.Thread(target=quick_check)
             check_thread.daemon = True
             check_thread.start()
             check_thread.join(timeout=5.0)  # 增加超时时间到5秒
-            
+
             return {
                 'available': True,
                 'connected': result['connected'],
                 'message': 'QMT已连接' if result['connected'] else 'QMT未连接'
             }
-            
+
         except ImportError:
             return {
                 'available': False,
@@ -215,8 +267,8 @@ class DataManager:
                 'connected': False,
                 'message': f'QMT连接检测失败: {str(e)}'
             }
-    
-    def _check_qstock_status(self) -> Dict[str, Any]:
+
+    def _check_qstock_status(self) -> dict[str, Any]:
         """检查QStock状态"""
         try:
             qs = importlib.import_module("qstock")
@@ -267,7 +319,7 @@ class DataManager:
                     'connected': False,
                     'message': f'QStock连接测试失败: {str(e)}'
                 }
-                
+
         except ImportError:
             return {
                 'available': False,
@@ -280,25 +332,25 @@ class DataManager:
                 'connected': False,
                 'message': f'qstock初始化失败: {str(e)[:80]}'
             }
-    
-    def _check_akshare_status(self) -> Dict[str, Any]:
+
+    def _check_akshare_status(self) -> dict[str, Any]:
         """检查AKShare状态 - 优化版本"""
         try:
             ak = importlib.import_module("akshare")
-            
+
             # AKShare模块已安装，标记为可用
             # 不进行实时连接测试，避免网络问题影响启动
             try:
                 # 尝试一个轻量级的测试，如果失败也不影响可用性
                 # 只是简单检查模块是否正常导入
                 version = getattr(ak, '__version__', 'unknown')
-                
+
                 return {
                     'available': True,
                     'connected': True,  # 假设连接正常，实际使用时再处理错误
                     'message': f'AKShare模块已安装 (v{version})'
                 }
-                
+
             except Exception:
                 # 即使测试失败，也标记为可用，因为模块已安装
                 return {
@@ -306,15 +358,15 @@ class DataManager:
                     'connected': True,  # 乐观假设，实际使用时处理错误
                     'message': 'AKShare模块已安装，连接状态未知'
                 }
-                
+
         except ImportError:
             return {
                 'available': False,
                 'connected': False,
                 'message': 'akshare模块未安装'
             }
-    
-    def _get_source_priority(self) -> List[DataSource]:
+
+    def _get_source_priority(self) -> list[DataSource]:
         """获取数据源优先级列表"""
         if self.preferred_source:
             # 如果指定了首选数据源，将其放在首位
@@ -344,12 +396,12 @@ class DataManager:
                     priority.insert(0, DataSource.LOCAL)
 
             return priority
-    
+
     def _print_initialization_status(self):
         """打印初始化状态"""
         print("[DATA] 多数据源管理器初始化完成")
         print("=" * 50)
-        
+
         for source in DataSource:
             status = self.source_status[source]
             if status['available']:
@@ -368,33 +420,33 @@ class DataManager:
                     color_status = "不可用"
 
             print(f"   {icon} {source.value.upper():<8}: {color_status} - {status['message']}")
-        
+
         print("=" * 50)
-        
+
         # 显示当前可用的数据源
-        available_sources = [s.value.upper() for s in self.source_priority 
+        available_sources = [s.value.upper() for s in self.source_priority
                            if self.source_status[s]['available'] and self.source_status[s]['connected']]
-        
+
         if available_sources:
             print(f"[TARGET] 可用数据源: {' → '.join(available_sources)}")
         else:
             print("[INFO] 仅模拟数据可用")
-        
+
         print("=" * 50)
-    
-    def get_connection_status(self) -> Dict[str, Any]:
+
+    def get_connection_status(self) -> dict[str, Any]:
         """获取连接状态信息"""
         # 找到第一个可用且已连接的数据源
         active_source = None
         for source in self.source_priority:
-            if (self.source_status[source]['available'] and 
+            if (self.source_status[source]['available'] and
                 self.source_status[source]['connected']):
                 active_source = source
                 break
-        
+
         if not active_source:
             active_source = DataSource.MOCK
-        
+
         return {
             'active_source': active_source.value,
             'source_status': {s.value: status for s, status in self.source_status.items()},
@@ -403,7 +455,7 @@ class DataManager:
             'data_source': 'real' if active_source != DataSource.MOCK else 'mock',
             'status_message': self._get_status_message(active_source)
         }
-    
+
     def _get_status_message(self, active_source: DataSource) -> str:
         """获取状态消息"""
         if active_source == DataSource.DUCKDB:
@@ -418,19 +470,19 @@ class DataManager:
             return "[OK] 已连接到AKShare，使用真实市场数据"
         else:
             return "[INFO] 使用模拟数据"
-    
+
     def set_preferred_source(self, source: DataSource):
         """设置首选数据源"""
         self.preferred_source = source
         self.source_priority = self._get_source_priority()
         print(f"[INFO] 首选数据源已设置为: {source.value.upper()}")
-    
+
     def refresh_source_status(self):
         """刷新所有数据源状态"""
         print("[RELOAD] 刷新数据源状态...")
         self.source_status = self._check_all_sources()
         self._print_initialization_status()
-    
+
     def get_stock_data(self,
                       stock_code: str,
                       start_date: str,
@@ -546,7 +598,7 @@ class DataManager:
                 print("[SAVE] 数据已缓存到本地")
         except Exception as e:
             print(f"[WARNING] 保存到本地缓存失败: {e}")
-    
+
     def _get_data_from_source(self, source: DataSource, stock_code: str,
                             start_date: str, end_date: str, period: str, adjust: str = 'none') -> pd.DataFrame:
         """从指定数据源获取数据（支持复权）"""
@@ -569,11 +621,10 @@ class DataManager:
             if not self._duckdb_enabled:
                 return pd.DataFrame()
 
-            import duckdb
+            from data_manager.duckdb_connection_pool import get_db_manager
 
-            # 按需打开连接，使用后立即关闭
-            con = duckdb.connect(self.duckdb_path, read_only=True)
-            try:
+            # 通过连接管理器获取只读连接，自动处理 WAL 自愈与重试
+            with get_db_manager(self.duckdb_path).get_read_connection() as con:
                 # 构建SQL查询
                 query = f"""
                     SELECT date, open, high, low, close, volume, amount
@@ -600,19 +651,10 @@ class DataManager:
                 df = self._clean_data(df)
 
                 print(f"[OK] DuckDB获取 {len(df)} 条数据")
-
                 return df
-
-            finally:
-                # 立即关闭连接
-                con.close()
 
         except Exception as e:
             print(f"[ERROR] DuckDB查询失败: {e}")
-            return pd.DataFrame()
-
-        except Exception as e:
-            print(f"[WARNING] DuckDB获取数据失败: {e}")
             return pd.DataFrame()
 
     def _get_local_data(self, stock_code: str, start_date: str, end_date: str, period: str = '1d', adjust: str = 'none') -> pd.DataFrame:
@@ -664,11 +706,11 @@ class DataManager:
         """通过QMT获取真实数据（支持复权）"""
         try:
             import xtquant.xtdata as xt_data
-            
+
             # 转换日期格式
             start_time = datetime.strptime(start_date, '%Y-%m-%d').strftime('%Y%m%d')
             end_time = datetime.strptime(end_date, '%Y-%m-%d').strftime('%Y%m%d')
-            
+
             # 映射复权类型
             dividend_map = {
                 'none': 'none',
@@ -686,65 +728,65 @@ class DataManager:
                 dividend_type=dividend_type,  # ← 添加复权参数
                 fill_data=True
             )
-            
+
             if data and stock_code in data:
                 df = data[stock_code]
-                
+
                 # 标准化列名
                 df = self._standardize_columns(df)
-                
+
                 # 数据清洗
                 df = self._clean_data(df)
-                
+
                 print(f"[OK] QMT获取 {len(df)} 条数据")
                 return df
             else:
                 return pd.DataFrame()
-                
+
         except Exception as e:
             print(f"[WARNING] QMT获取数据失败: {e}")
             return pd.DataFrame()
-    
+
     def _get_qstock_data(self, stock_code: str, start_date: str, end_date: str, period: str) -> pd.DataFrame:
         """通过QStock获取数据"""
         try:
             qs = importlib.import_module("qstock")
-            
+
             # 转换股票代码格式 (去掉后缀)
             code = stock_code.split('.')[0]
-            
+
             # 获取数据
             data = qs.get_data(code, start=start_date, end=end_date)
-            
+
             if data is not None and not data.empty:
                 # QStock返回的数据格式通常是标准的OHLCV格式
                 df = data.copy()
-                
+
                 # 标准化列名
                 df = self._standardize_columns(df)
-                
+
                 # 数据清洗
                 df = self._clean_data(df)
-                
+
                 print(f"[OK] QStock获取 {len(df)} 条数据")
                 return df
             else:
                 return pd.DataFrame()
-                
+
         except Exception as e:
             print(f"[WARNING] QStock获取数据失败: {e}")
             return pd.DataFrame()
-    
+
     def _get_akshare_data(self, stock_code: str, start_date: str, end_date: str, period: str) -> pd.DataFrame:
         """通过AKShare获取数据 - 增强错误处理版本"""
         import time
-        
+
         try:
             ak = importlib.import_module("akshare")
-            
+
             # 转换股票代码格式
             code = stock_code.split('.')[0]
-            
+
             # 根据代码后缀确定市场
             if stock_code.endswith('.SZ'):
                 symbol = code
@@ -752,13 +794,13 @@ class DataManager:
                 symbol = code
             else:
                 symbol = code
-            
+
             print(f"[RELOAD] 尝试通过AKShare获取 {stock_code} 数据...")
-            
+
             # 重试机制：最多尝试3次
             max_retries = 3
             retry_delay = 2  # 秒
-            
+
             for attempt in range(max_retries):
                 try:
                     # 获取历史数据
@@ -769,13 +811,13 @@ class DataManager:
                         end_date=end_date.replace('-', ''),
                         adjust="qfq"  # 前复权
                     )
-                    
+
                     if data is not None and not data.empty:
                         # AKShare返回的列名通常是中文，需要转换
                         column_mapping = {
                             '日期': 'date',
                             '开盘': 'open',
-                            '收盘': 'close', 
+                            '收盘': 'close',
                             '最高': 'high',
                             '最低': 'low',
                             '成交量': 'volume',
@@ -785,28 +827,28 @@ class DataManager:
                             '涨跌额': 'change',
                             '换手率': 'turnover'
                         }
-                        
+
                         df = data.rename(columns=column_mapping)
-                        
+
                         # 设置日期索引
                         if 'date' in df.columns:
                             df['date'] = pd.to_datetime(df['date'])
                             df.set_index('date', inplace=True)
-                        
+
                         # 标准化列名
                         df = self._standardize_columns(df)
-                        
+
                         # 数据清洗
                         df = self._clean_data(df)
-                        
+
                         print(f"[OK] AKShare获取 {len(df)} 条数据 (尝试 {attempt + 1}/{max_retries})")
                         return df
                     else:
                         print(f"[WARNING] AKShare返回空数据 (尝试 {attempt + 1}/{max_retries})")
-                        
+
                 except Exception as retry_e:
                     print(f"[WARNING] AKShare获取失败 (尝试 {attempt + 1}/{max_retries}): {str(retry_e)}")
-                    
+
                     # 如果不是最后一次尝试，等待后重试
                     if attempt < max_retries - 1:
                         print(f"[WAIT] 等待 {retry_delay} 秒后重试...")
@@ -823,59 +865,59 @@ class DataManager:
                             print("[INFO] 提示：访问被拒绝，可能触发了反爬虫机制")
                         else:
                             print(f"[INFO] 提示：AKShare数据获取失败，错误详情：{error_msg}")
-            
+
             # 所有重试都失败了
             print(f"[ERROR] AKShare获取 {stock_code} 数据失败，已尝试 {max_retries} 次")
             return pd.DataFrame()
-                
+
         except ImportError:
             print("[WARNING] akshare模块未安装，请运行: pip install akshare")
             return pd.DataFrame()
         except Exception as e:
             print(f"[ERROR] AKShare模块加载失败: {str(e)}")
             return pd.DataFrame()
-    
+
     def _generate_mock_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """生成模拟数据"""
         print(f"[INFO] 生成模拟数据: {stock_code}")
-        
+
         # 创建日期范围
         dates = pd.date_range(start=start_date, end=end_date, freq='D')
         dates = dates[dates.weekday < 5]  # 只保留工作日
-        
+
         # 生成价格数据
         np.random.seed(hash(stock_code) % 2**32)  # 基于股票代码的固定种子
-        
+
         # 基础价格
         base_price = 10.0 + (hash(stock_code) % 100)
-        
+
         # 生成收盘价（随机游走）
         returns = np.random.normal(0.001, 0.02, len(dates))  # 日收益率
-        close_prices_list: List[float] = [base_price]
-        
+        close_prices_list: list[float] = [base_price]
+
         for ret in returns[1:]:
             new_price = close_prices_list[-1] * (1 + ret)
             close_prices_list.append(max(float(new_price), 0.1))
-        
+
         close_prices = np.array(close_prices_list)
-        
+
         # 生成其他价格数据
         high_prices = close_prices * (1 + np.abs(np.random.normal(0, 0.01, len(dates))))
         low_prices = close_prices * (1 - np.abs(np.random.normal(0, 0.01, len(dates))))
-        
+
         # 开盘价基于前一日收盘价
         open_prices = np.roll(close_prices, 1)
         open_prices[0] = base_price
         open_prices = open_prices * (1 + np.random.normal(0, 0.005, len(dates)))
-        
+
         # 确保价格关系合理 (low <= open,close <= high)
         for i in range(len(dates)):
             low_prices[i] = min(low_prices[i], open_prices[i], close_prices[i])
             high_prices[i] = max(high_prices[i], open_prices[i], close_prices[i])
-        
+
         # 生成成交量
         volumes = np.random.lognormal(10, 1, len(dates)).astype(int) * 100
-        
+
         # 创建DataFrame
         df = pd.DataFrame({
             'open': open_prices,
@@ -884,24 +926,24 @@ class DataManager:
             'close': close_prices,
             'volume': volumes
         }, index=dates)
-        
+
         print(f"[OK] 生成 {len(df)} 条模拟数据")
         return df
-    
+
     def _standardize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """标准化列名"""
         column_mapping = {
             'Open': 'open',
-            'High': 'high', 
+            'High': 'high',
             'Low': 'low',
             'Close': 'close',
             'Volume': 'volume',
             'Adj Close': 'adj_close'
         }
-        
+
         # 重命名列
         df = df.rename(columns=column_mapping)
-        
+
         # 确保必要列存在
         required_columns = ['open', 'high', 'low', 'close', 'volume']
         for col in required_columns:
@@ -911,26 +953,26 @@ class DataManager:
                 else:
                     # 如果缺少价格列，用close价格填充
                     df[col] = df.get('close', 0)
-        
+
         return df
-    
+
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """数据清洗"""
         print("[WIZARD] 开始数据清洗...")
-        
+
         original_length = len(df)
         if isinstance(self.last_data_info, dict):
             self.last_data_info['raw_rows'] = int(original_length)
-        
+
         # 1. 删除空值
         df = df.dropna()
-        
+
         # 2. 删除价格为0或负数的数据
         price_columns = ['open', 'high', 'low', 'close']
         for col in price_columns:
             if col in df.columns:
-                df = df[df[col] > 0]
-        
+                df = cast(pd.DataFrame, df.loc[df[col] > 0])
+
         # 3. 检查价格关系的合理性
         if all(col in df.columns for col in price_columns):
             # high >= max(open, close) and low <= min(open, close)
@@ -938,46 +980,46 @@ class DataManager:
                 (df['high'] >= df[['open', 'close']].max(axis=1)) &
                 (df['low'] <= df[['open', 'close']].min(axis=1))
             )
-            df = df[valid_mask]
-        
+            df = cast(pd.DataFrame, df.loc[valid_mask])
+
         # 4. 删除异常波动的数据（日涨跌幅超过20%）
         if 'close' in df.columns and len(df) > 1:
             returns = df['close'].pct_change()
             normal_mask = (returns.abs() <= 0.2) | returns.isna()
-            df = df[normal_mask]
-        
+            df = cast(pd.DataFrame, df.loc[normal_mask])
+
         # 5. 确保成交量为正数
         if 'volume' in df.columns:
-            df = df[df['volume'] >= 0]
-        
+            df = cast(pd.DataFrame, df.loc[df['volume'] >= 0])
+
         cleaned_length = len(df)
         removed_count = original_length - cleaned_length
         if isinstance(self.last_data_info, dict):
             self.last_data_info['clean_rows'] = int(cleaned_length)
             self.last_data_info['removed_rows'] = int(removed_count)
-        
+
         if removed_count > 0:
             print(f"[WIZARD] 数据清洗完成，删除 {removed_count} 条异常数据")
-        
+
         return df
-    
-    def get_multiple_stocks_data(self, 
-                               stock_codes: List[str], 
-                               start_date: str, 
-                               end_date: str) -> Dict[str, pd.DataFrame]:
+
+    def get_multiple_stocks_data(self,
+                               stock_codes: list[str],
+                               start_date: str,
+                               end_date: str) -> dict[str, pd.DataFrame]:
         """
         获取多只股票的数据
-        
+
         Args:
             stock_codes: 股票代码列表
             start_date: 开始日期
             end_date: 结束日期
-            
+
         Returns:
             股票代码到DataFrame的字典
         """
         print(f"[DATA] 批量获取 {len(stock_codes)} 只股票数据...")
-        
+
         results = {}
         for stock_code in stock_codes:
             try:
@@ -988,22 +1030,22 @@ class DataManager:
                     print(f"[WARNING] {stock_code} 数据为空")
             except Exception as e:
                 print(f"[WARNING] 获取 {stock_code} 数据失败: {e}")
-        
+
         print(f"[OK] 成功获取 {len(results)} 只股票数据")
         return results
-    
-    def validate_data_quality(self, df: pd.DataFrame) -> Dict[str, Any]:
+
+    def validate_data_quality(self, df: pd.DataFrame) -> dict[str, Any]:
         """
         验证数据质量
-        
+
         Args:
             df: 待验证的数据
-            
+
         Returns:
             数据质量报告
         """
-        report_issues: List[str] = []
-        report: Dict[str, Any] = {
+        report_issues: list[str] = []
+        report: dict[str, Any] = {
             'total_records': len(df),
             'date_range': {
                 'start': self._safe_format_date(df.index.min() if not df.empty else None),
@@ -1014,11 +1056,11 @@ class DataManager:
             'price_statistics': {},
             'issues': report_issues
         }
-        
+
         if df.empty:
             report_issues.append('数据为空')
             return report
-        
+
         # 价格统计
         price_columns = ['open', 'high', 'low', 'close']
         for col in price_columns:
@@ -1029,66 +1071,66 @@ class DataManager:
                     'mean': float(df[col].mean()),
                     'std': float(df[col].std())
                 }
-        
+
         # 检查数据问题
         if df.isnull().any().any():
             report_issues.append('存在缺失值')
-        
+
         if 'close' in df.columns:
             returns = df['close'].pct_change().dropna()
             if (returns.abs() > 0.2).any():
                 report_issues.append('存在异常波动（单日涨跌幅>20%）')
-        
+
         # 检查价格关系
         if all(col in df.columns for col in price_columns):
             invalid_high = (df['high'] < df[['open', 'close']].max(axis=1)).any()
             invalid_low = (df['low'] > df[['open', 'close']].min(axis=1)).any()
-            
+
             if invalid_high or invalid_low:
                 report_issues.append('存在不合理的价格关系')
-        
+
         return report
-    
+
     def resample_data(self, df: pd.DataFrame, freq: str) -> pd.DataFrame:
         """
         重采样数据到不同频率
-        
+
         Args:
             df: 原始数据
             freq: 目标频率 ('1H', '4H', '1D', '1W', '1M')
-            
+
         Returns:
             重采样后的数据
         """
         if df.empty:
             return df
-        
+
         # OHLCV数据的重采样规则
         agg_dict = {
             'open': 'first',
             'high': 'max',
-            'low': 'min', 
+            'low': 'min',
             'close': 'last',
             'volume': 'sum'
         }
-        
+
         # 只对存在的列进行重采样
         available_agg = {k: v for k, v in agg_dict.items() if k in df.columns}
-        
+
         resampled = df.resample(freq).agg(cast(Any, available_agg))
-        
+
         # 删除空值行
         resampled = resampled.dropna()
-        
+
         print(f"[DATA] 数据重采样完成: {len(df)} -> {len(resampled)} 条记录 (频率: {freq})")
-        
+
         return resampled
-    
+
     def _safe_format_date(self, date_obj) -> Optional[str]:
         """安全地格式化日期对象"""
         if date_obj is None:
             return None
-        
+
         try:
             # 如果是pandas Timestamp对象
             if hasattr(date_obj, 'strftime'):
@@ -1105,7 +1147,7 @@ class DataManager:
 
     # ========== 本地缓存管理方法 ==========
 
-    def update_local_cache(self, symbols: Optional[List[str]] = None, days_back: int = 5):
+    def update_local_cache(self, symbols: Optional[list[str]] = None, days_back: int = 5):
         """
         更新本地缓存数据
 
@@ -1124,7 +1166,7 @@ class DataManager:
         # 刷新本地缓存状态
         self.source_status[DataSource.LOCAL] = self._check_local_status()
 
-    def get_local_cache_status(self) -> Dict[str, Any]:
+    def get_local_cache_status(self) -> dict[str, Any]:
         """获取本地缓存状态"""
         if self.local_data_manager is None:
             return {'enabled': False}
@@ -1161,10 +1203,33 @@ class DataManager:
             print("[WARNING] 本地缓存未启用")
             return
 
-        # TODO: 实现清除功能
-        print("[WARNING] 清除本地缓存功能待实现")
+        storage = self.local_data_manager.storage
+        if symbol is not None:
+            # 清除单只股票
+            removed = storage.delete_data(symbol, 'daily')
+            if removed:
+                print(f"[OK] 已清除本地缓存: {symbol}")
+            else:
+                print(f"[INFO] 本地缓存中无 {symbol} 的数据")
+        else:
+            # 清除全部：glob root_dir/daily/*.parquet
+            from pathlib import Path
+            daily_dir: Path = storage.root_dir / 'daily'
+            if daily_dir.exists():
+                parquet_files = list(daily_dir.glob('*.parquet'))
+                for f in parquet_files:
+                    try:
+                        f.unlink()
+                    except Exception as e:
+                        print(f"[WARNING] 删除 {f.name} 失败: {e}")
+                print(f"[OK] 已清除本地缓存，共删除 {len(parquet_files)} 个文件")
+            else:
+                print("[INFO] 本地缓存目录不存在，无需清除")
 
-    def preload_data(self, symbols: List[str], start_date: str, end_date: str):
+        # 刷新本地缓存状态
+        self.source_status[DataSource.LOCAL] = self._check_local_status()
+
+    def preload_data(self, symbols: list[str], start_date: str, end_date: str):
         """
         预加载数据到本地缓存
 
@@ -1193,16 +1258,16 @@ class DataManager:
 if __name__ == "__main__":
     # 测试数据管理器
     dm = DataManager()
-    
+
     # 测试单只股票数据获取
     data = dm.get_stock_data('000001.SZ', '2023-01-01', '2023-12-31')
     print(f"[DATA] 获取数据形状: {data.shape}")
     print(f"[DATA] 数据列: {list(data.columns)}")
-    
+
     # 测试数据质量验证
     quality_report = dm.validate_data_quality(data)
     print(f"[DATA] 数据质量报告: {quality_report}")
-    
+
     # 测试数据重采样
     weekly_data = dm.resample_data(data, '1W')
     print(f"[DATA] 周线数据形状: {weekly_data.shape}")

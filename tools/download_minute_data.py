@@ -1,15 +1,14 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
 Minute Data Download Tool
 Supports 1min, 5min, 15min, 30min, 60min data download
 """
 
+import argparse
 import os
 import sys
-import argparse
-from datetime import datetime, timedelta
 import time
+from datetime import datetime, timedelta
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)

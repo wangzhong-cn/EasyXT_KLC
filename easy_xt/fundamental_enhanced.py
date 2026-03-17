@@ -12,11 +12,17 @@
 5. 波动率因子：风险度量
 """
 
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+import logging
 import warnings
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_SH = ZoneInfo('Asia/Shanghai')
+
+import numpy as np
+import pandas as pd
+
+log = logging.getLogger(__name__)
 
 warnings.filterwarnings('ignore')
 
@@ -49,8 +55,8 @@ class FundamentalAnalyzerEnhanced:
             return pd.DataFrame()
 
         try:
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=days * 2)).strftime('%Y-%m-%d')
+            end_date = datetime.now(tz=_SH).strftime('%Y-%m-%d')
+            start_date = (datetime.now(tz=_SH) - timedelta(days=days * 2)).strftime('%Y-%m-%d')
 
             df = self.duckdb_reader.get_market_data(
                 stock_list=[stock_code],
@@ -74,7 +80,7 @@ class FundamentalAnalyzerEnhanced:
     # 估值因子
     # ============================================================
 
-    def calculate_valuation_factors(self, df_price: pd.DataFrame) -> Dict:
+    def calculate_valuation_factors(self, df_price: pd.DataFrame) -> dict:
         """
         计算估值因子
 
@@ -110,7 +116,7 @@ class FundamentalAnalyzerEnhanced:
                 factors['dist_from_high_252'] = (df_price['close'].iloc[-1] / high_252 - 1) * 100
 
         except Exception as e:
-            print(f"[INFO] 计算估值因子失败: {e}")
+            log.debug("计算估值因子失败: %s", e)
 
         return factors
 
@@ -118,7 +124,7 @@ class FundamentalAnalyzerEnhanced:
     # 动量因子
     # ============================================================
 
-    def calculate_momentum_factors(self, df_price: pd.DataFrame) -> Dict:
+    def calculate_momentum_factors(self, df_price: pd.DataFrame) -> dict:
         """
         计算动量因子
 
@@ -168,7 +174,7 @@ class FundamentalAnalyzerEnhanced:
                     factors['rsi_14'] = 100
 
         except Exception as e:
-            print(f"[INFO] 计算动量因子失败: {e}")
+            log.debug("计算动量因子失败: %s", e)
 
         return factors
 
@@ -176,7 +182,7 @@ class FundamentalAnalyzerEnhanced:
     # 波动率因子
     # ============================================================
 
-    def calculate_volatility_factors(self, df_price: pd.DataFrame) -> Dict:
+    def calculate_volatility_factors(self, df_price: pd.DataFrame) -> dict:
         """
         计算波动率因子
 
@@ -203,8 +209,8 @@ class FundamentalAnalyzerEnhanced:
             # 2. ATR（平均真实波幅）
             if len(df_price) >= 14:
                 high_low = df_price['high'] - df_price['low']
-                high_close = np.abs(df_price['high'] - df_price['close'].shift(1))
-                low_close = np.abs(df_price['low'] - df_price['close'].shift(1))
+                high_close = (df_price['high'] - df_price['close'].shift(1)).abs()
+                low_close = (df_price['low'] - df_price['close'].shift(1)).abs()
 
                 tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
                 atr = tr.rolling(14).mean().iloc[-1]
@@ -217,11 +223,13 @@ class FundamentalAnalyzerEnhanced:
             # 3. 波动率分位数
             if len(returns) >= 60:
                 current_vol = returns.tail(20).std()
-                vol_percentile = (returns.tail(252).std() <= current_vol).sum() / min(len(returns), 252)
-                factors['volatility_percentile'] = vol_percentile
+                hist_vol_series = returns.tail(252).rolling(20).std().dropna()
+                if len(hist_vol_series) > 0:
+                    vol_percentile = (hist_vol_series <= current_vol).sum() / len(hist_vol_series)
+                    factors['volatility_percentile'] = vol_percentile
 
         except Exception as e:
-            print(f"[INFO] 计算波动率因子失败: {e}")
+            log.debug("计算波动率因子失败: %s", e)
 
         return factors
 
@@ -229,7 +237,7 @@ class FundamentalAnalyzerEnhanced:
     # 质量因子
     # ============================================================
 
-    def calculate_quality_factors(self, df_price: pd.DataFrame) -> Dict:
+    def calculate_quality_factors(self, df_price: pd.DataFrame) -> dict:
         """
         计算质量因子
 
@@ -253,10 +261,11 @@ class FundamentalAnalyzerEnhanced:
 
             # 2. 趋势强度（线性回归斜率）
             if len(df_price) >= 60:
-                prices = df_price['close'].tail(60).values
+                prices = np.asarray(df_price['close'].tail(60), dtype=float)
                 x = np.arange(len(prices))
                 slope, _ = np.polyfit(x, prices, 1)
-                factors['trend_strength_60d'] = slope / prices.mean() if prices.mean() > 0 else np.nan
+                prices_mean = float(np.mean(prices)) if len(prices) > 0 else 0.0
+                factors['trend_strength_60d'] = slope / prices_mean if prices_mean > 0 else np.nan
 
             # 3. 连续上涨/下跌天数
             if len(df_price) >= 20:
@@ -284,7 +293,7 @@ class FundamentalAnalyzerEnhanced:
                 factors['price_position_52w'] = (latest - low_52w) / (high_52w - low_52w) if (high_52w - low_52w) > 0 else np.nan
 
         except Exception as e:
-            print(f"[INFO] 计算质量因子失败: {e}")
+            log.debug("计算质量因子失败: %s", e)
 
         return factors
 
@@ -292,7 +301,7 @@ class FundamentalAnalyzerEnhanced:
     # 流动性因子
     # ============================================================
 
-    def calculate_liquidity_factors(self, df_price: pd.DataFrame) -> Dict:
+    def calculate_liquidity_factors(self, df_price: pd.DataFrame) -> dict:
         """
         计算流动性因子
 
@@ -335,7 +344,7 @@ class FundamentalAnalyzerEnhanced:
                                 factors[f'turnover_{period}d'] = turnover
 
         except Exception as e:
-            print(f"[INFO] 计算流动性因子失败: {e}")
+            log.debug("计算流动性因子失败: %s", e)
 
         return factors
 
@@ -354,7 +363,6 @@ class FundamentalAnalyzerEnhanced:
         返回:
             pd.DataFrame: 所有基本面因子
         """
-        reader = duckdb_reader or self.duckdb_reader
 
         # 获取价格数据
         df_price = self.get_price_data(stock_code, days=252)
@@ -396,7 +404,7 @@ class FundamentalAnalyzerEnhanced:
         else:
             return pd.DataFrame()
 
-    def get_batch_fundamental_factors(self, stock_list: List[str],
+    def get_batch_fundamental_factors(self, stock_list: list[str],
                                     duckdb_reader=None) -> pd.DataFrame:
         """
         批量获取基本面因子
@@ -444,7 +452,7 @@ def get_enhanced_fundamental_factors(stock_code: str, duckdb_reader=None) -> pd.
     return analyzer.get_all_fundamental_factors(stock_code, duckdb_reader)
 
 
-def get_batch_enhanced_factors(stock_list: List[str], duckdb_reader=None) -> pd.DataFrame:
+def get_batch_enhanced_factors(stock_list: list[str], duckdb_reader=None) -> pd.DataFrame:
     """
     批量获取增强版基本面因子
 

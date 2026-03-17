@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 安全数据更新工具
 可以在GUI运行时安全更新数据
 """
 
 import sys
-import os
-import psutil
 import time
-import duckdb
-import pandas as pd
 from pathlib import Path
+
+import duckdb
+import psutil
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / 'data_manager'))
 
-from duckdb_connection_pool import get_db_manager
+from data_manager.duckdb_connection_pool import get_db_manager
 
 
 class SafeDataUpdater:
@@ -209,7 +207,7 @@ def fill_adjustment_batch():
         affected_rows = result.rowcount
         elapsed = time.time() - start_time
 
-        print(f"\n[OK] 更新完成！")
+        print("\n[OK] 更新完成！")
         print(f"更新记录数: {affected_rows:,}")
         print(f"耗时: {elapsed:.1f} 秒")
 

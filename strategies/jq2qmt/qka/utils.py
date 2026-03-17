@@ -1,6 +1,8 @@
-from xtquant import xtconstant
 from datetime import datetime
-from qka.anis import RED, GREEN, YELLOW, BLUE, RESET
+
+from qka.anis import GREEN, RED, RESET
+from xtquant import xtconstant
+
 
 def add_stock_suffix(stock_code):
     """
@@ -17,7 +19,7 @@ def add_stock_suffix(stock_code):
         return f"{stock_code}.SH"  # 上海证券交易所
     elif stock_code.startswith("83") or stock_code.startswith("43"):
         return f"{stock_code}.BJ"  # 北京证券交易所
-    
+
     return f"{stock_code}.SH"
 
 def timestamp_to_datetime_string(timestamp):
@@ -40,10 +42,10 @@ def parse_order_type(order_type):
 def convert_to_current_date(timestamp):
     # 将时间戳转换为 datetime 对象
     dt = datetime.fromtimestamp(timestamp)
-    
+
     # 获取当前日期
     current_date = datetime.now().date()
-    
+
     # 创建一个新的 datetime 对象，使用当前日期和原始时间戳的时间部分
     new_dt = datetime.combine(current_date, dt.time())
 

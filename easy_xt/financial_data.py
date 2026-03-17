@@ -4,9 +4,8 @@
 整合通达信行情数据 + akshare财务数据
 """
 
+
 import pandas as pd
-from typing import List, Optional, Dict
-from datetime import datetime
 
 
 class FinancialDataClient:
@@ -22,7 +21,7 @@ class FinancialDataClient:
             self.available = False
             print("[WARNING] 未安装akshare，请运行: pip install akshare")
 
-    def get_stock_info(self, symbol: str) -> Dict:
+    def get_stock_info(self, symbol: str) -> dict:
         """
         获取个股基本信息
 
@@ -57,8 +56,11 @@ class FinancialDataClient:
         if not self.available:
             raise ImportError("请先安装akshare: pip install akshare")
 
-        df = self.ak.stock_financial_analysis_indicator_em(symbol=symbol)
-        return df
+        api_func = getattr(self.ak, "stock_financial_analysis_indicator_em", None)
+        if not callable(api_func):
+            return pd.DataFrame()
+        df = api_func(symbol=symbol)
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
     def get_balance_sheet(self, symbol: str) -> pd.DataFrame:
         """
@@ -73,8 +75,11 @@ class FinancialDataClient:
         if not self.available:
             raise ImportError("请先安装akshare: pip install akshare")
 
-        df = self.ak.stock_balance_sheet_by_em(symbol=symbol)
-        return df
+        api_func = getattr(self.ak, "stock_balance_sheet_by_em", None)
+        if not callable(api_func):
+            return pd.DataFrame()
+        df = api_func(symbol=symbol)
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
     def get_profit_sheet(self, symbol: str) -> pd.DataFrame:
         """
@@ -89,8 +94,11 @@ class FinancialDataClient:
         if not self.available:
             raise ImportError("请先安装akshare: pip install akshare")
 
-        df = self.ak.stock_profit_sheet_by_em(symbol=symbol)
-        return df
+        api_func = getattr(self.ak, "stock_profit_sheet_by_em", None)
+        if not callable(api_func):
+            return pd.DataFrame()
+        df = api_func(symbol=symbol)
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
     def get_cash_flow(self, symbol: str) -> pd.DataFrame:
         """
@@ -105,8 +113,11 @@ class FinancialDataClient:
         if not self.available:
             raise ImportError("请先安装akshare: pip install akshare")
 
-        df = self.ak.stock_cash_flow_sheet_by_em(symbol=symbol)
-        return df
+        api_func = getattr(self.ak, "stock_cash_flow_sheet_by_em", None)
+        if not callable(api_func):
+            return pd.DataFrame()
+        df = api_func(symbol=symbol)
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
     def get_financial_abstract(self, symbol: str) -> pd.DataFrame:
         """
@@ -124,7 +135,7 @@ class FinancialDataClient:
         df = self.ak.stock_financial_abstract(symbol=symbol)
         return df
 
-    def get_key_ratios(self, symbol: str) -> Dict:
+    def get_key_ratios(self, symbol: str) -> dict:
         """
         获取关键财务指标（最新一期）
 
@@ -197,10 +208,10 @@ def convert_akshare_to_tdx_code(ak_code: str, market: str = 'SZ') -> str:
 
 
 def get_combined_data(
-    tdx_codes: List[str],
+    tdx_codes: list[str],
     start_time: str,
     include_financial: bool = True
-) -> Dict[str, pd.DataFrame]:
+) -> dict[str, pd.DataFrame]:
     """
     获取综合数据：行情数据 + 财务数据
 
@@ -248,7 +259,7 @@ def get_combined_data(
 
 
 # 快捷函数
-def get_stock_financial_quick(tdx_code: str) -> Dict:
+def get_stock_financial_quick(tdx_code: str) -> dict:
     """
     快捷函数：获取单只股票的财务数据
 
@@ -291,7 +302,7 @@ if __name__ == "__main__":
         if not df.empty:
             print("[OK] 成功!")
             print(f"  数据形状: {df.shape}")
-            print(f"\n  最新财务指标:")
+            print("\n  最新财务指标:")
             print(df.tail(3).to_string(max_cols=10))
         else:
             print("[FAIL] 数据为空")
@@ -321,7 +332,7 @@ if __name__ == "__main__":
 
         print("[OK] 成功!")
         print(f"  行情数据形状: {data['market_data'].shape}")
-        print(f"  财务数据:")
+        print("  财务数据:")
         for code, financial in data['financial_data'].items():
             print(f"    {code}: {len(financial)} 个指标")
 

@@ -11,9 +11,13 @@
 5. 综合选股接口
 """
 
-import pandas as pd
-from typing import Dict, List, Optional, Union
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_SH = ZoneInfo('Asia/Shanghai')
+from typing import Any, Optional, Union, cast
+
+import pandas as pd
 
 
 class EnhancedDataAPI:
@@ -21,12 +25,14 @@ class EnhancedDataAPI:
 
     def __init__(self):
         """初始化所有数据模块"""
-        from factor_library import FactorLibrary
-        from sector_data import SectorData
-        from money_flow import MoneyFlowAnalyzer
+        import os
         from dragon_tiger import DragonTigerData
+        from factor_library import EasyFactor
+        from money_flow import MoneyFlowAnalyzer
+        from sector_data import SectorData
 
-        self.factor_lib = FactorLibrary()
+        duckdb_path = os.environ.get("EASYXT_DUCKDB_PATH", "D:/StockData/stock_data.ddb")
+        self.factor_lib = EasyFactor(duckdb_path=duckdb_path)
         self.sector_data = SectorData()
         self.money_flow = MoneyFlowAnalyzer()
         self.dragon_tiger = DragonTigerData()
@@ -39,8 +45,8 @@ class EnhancedDataAPI:
     # ============================================================
 
     def get_factors(self,
-                   stock_codes: Union[str, List[str]],
-                   factor_types: List[str] = None) -> pd.DataFrame:
+                   stock_codes: Union[str, list[str]],
+                   factor_types: Optional[list[str]] = None) -> pd.DataFrame:
         """
         获取多因子数据
 
@@ -66,22 +72,39 @@ class EnhancedDataAPI:
         """
         if factor_types is None:
             factor_types = ['value', 'quality', 'momentum']
+        end_date = datetime.now(tz=_SH).strftime('%Y-%m-%d')
+        start_date = (datetime.now(tz=_SH) - pd.Timedelta(days=240)).strftime('%Y-%m-%d')
+        stock_list = [stock_codes] if isinstance(stock_codes, str) else stock_codes
+        frames: list[pd.DataFrame] = []
+        for code in stock_list:
+            df = self.factor_lib.get_all_factors(str(code), start_date, end_date)
+            if not df.empty:
+                df = df.copy()
+                df["stock_code"] = str(code)
+                frames.append(df)
+        if not frames:
+            return pd.DataFrame()
+        merged = pd.concat(frames, axis=0)
+        keywords = set(factor_types)
+        keep_cols = [
+            col for col in merged.columns
+            if col in {"stock_code", "date"} or any(k in str(col).lower() for k in keywords)
+        ]
+        return merged[keep_cols] if keep_cols else merged
 
-        return self.factor_lib.get_all_factors(stock_codes, factor_types)
-
-    def get_value_factors(self, stock_codes: Union[str, List[str]]) -> pd.DataFrame:
+    def get_value_factors(self, stock_codes: Union[str, list[str]]) -> pd.DataFrame:
         """获取估值因子"""
-        return self.factor_lib.get_value_factors(stock_codes)
+        return self.get_factors(stock_codes, factor_types=['value'])
 
-    def get_quality_factors(self, stock_codes: Union[str, List[str]]) -> pd.DataFrame:
+    def get_quality_factors(self, stock_codes: Union[str, list[str]]) -> pd.DataFrame:
         """获取质量因子"""
-        return self.factor_lib.get_quality_factors(stock_codes)
+        return self.get_factors(stock_codes, factor_types=['quality'])
 
     def get_momentum_factors(self,
-                            stock_codes: Union[str, List[str]],
-                            periods: List[int] = [5, 20, 60]) -> pd.DataFrame:
+                            stock_codes: Union[str, list[str]],
+                            periods: list[int] = [5, 20, 60]) -> pd.DataFrame:
         """获取动量因子"""
-        return self.factor_lib.get_momentum_factors(stock_codes, periods)
+        return self.get_factors(stock_codes, factor_types=['momentum'])
 
     # ============================================================
     # 板块数据接口
@@ -123,7 +146,7 @@ class EnhancedDataAPI:
         """获取板块资金流向排行"""
         return self.sector_data.get_sector_flow_rank(sector_type, top_n)
 
-    def search_sector(self, keyword: str) -> Dict[str, pd.DataFrame]:
+    def search_sector(self, keyword: str) -> dict[str, pd.DataFrame]:
         """搜索板块"""
         return self.sector_data.search_sector(keyword)
 
@@ -135,61 +158,65 @@ class EnhancedDataAPI:
                             stock_code: str,
                             days: int = 5) -> pd.DataFrame:
         """获取个股资金流向"""
-        return self.money_flow.get_stock_money_flow(stock_code, days)
+        flow = cast(Any, self.money_flow)
+        return flow.get_stock_money_flow(stock_code, days)
 
     def get_flow_rank(self,
-                     stock_pool: List[str] = None,
+                     stock_pool: Optional[list[str]] = None,
                      by: str = 'net_flow_main_5d_sum',
                      top_n: int = 50) -> pd.DataFrame:
         """获取资金流向排行"""
-        return self.money_flow.get_flow_rank(stock_pool, by, False, top_n)
+        flow = cast(Any, self.money_flow)
+        return flow.get_flow_rank(stock_pool or [], by, False, top_n)
 
     def get_continuous_flow_stocks(self,
                                    days: int = 3,
                                    min_amount: float = 0) -> pd.DataFrame:
         """获取连续净流入股票"""
-        return self.money_flow.get_continuous_flow_stocks(days, min_amount)
+        flow = cast(Any, self.money_flow)
+        return flow.get_continuous_flow_stocks(days, min_amount)
 
     def calculate_flow_factors(self,
-                              stock_codes: Union[str, List[str]],
-                              periods: List[int] = [1, 3, 5, 10]) -> pd.DataFrame:
+                              stock_codes: Union[str, list[str]],
+                              periods: list[int] = [1, 3, 5, 10]) -> pd.DataFrame:
         """计算资金流向因子"""
-        return self.money_flow.calculate_flow_factors(stock_codes, periods)
+        flow = cast(Any, self.money_flow)
+        return flow.calculate_flow_factors(stock_codes, periods)
 
     # ============================================================
     # 龙虎榜接口
     # ============================================================
 
-    def get_daily_dragon_tiger(self, date: str = None) -> pd.DataFrame:
+    def get_daily_dragon_tiger(self, date: Optional[str] = None) -> pd.DataFrame:
         """获取每日龙虎榜"""
-        return self.dragon_tiger.get_daily_list(date)
+        return self.dragon_tiger.get_daily_list(date or "")
 
     def get_institutional_rank(self,
-                              date: str = None,
+                              date: Optional[str] = None,
                               top_n: int = 50) -> pd.DataFrame:
         """获取机构净买入排行"""
-        return self.dragon_tiger.get_institutional_rank(date, top_n)
+        return self.dragon_tiger.get_institutional_rank(date or "", top_n)
 
     def get_broker_rank(self,
-                       date: str = None,
+                       date: Optional[str] = None,
                        top_n: int = 30) -> pd.DataFrame:
         """获取营业部排行"""
-        return self.dragon_tiger.get_broker_rank(date, 'net_buy_total', top_n)
+        return self.dragon_tiger.get_broker_rank(date or "", 'net_buy_total', top_n)
 
     def select_by_institutional(self,
-                               date: str = None,
+                               date: Optional[str] = None,
                                min_net_buy: float = 0,
                                top_n: int = 50) -> pd.DataFrame:
         """基于机构席位选股"""
-        return self.dragon_tiger.select_by_institutional(date, min_net_buy, top_n)
+        return self.dragon_tiger.select_by_institutional(date or "", min_net_buy, top_n)
 
     # ============================================================
     # 综合选股策略
     # ============================================================
 
     def select_stocks_multi_factor(self,
-                                   stock_pool: List[str],
-                                   factor_types: List[str] = None,
+                                   stock_pool: list[str],
+                                   factor_types: Optional[list[str]] = None,
                                    top_n: int = 50) -> pd.DataFrame:
         """
         多因子选股
@@ -247,7 +274,7 @@ class EnhancedDataAPI:
     def select_stocks_sector_flow(self,
                                  sector_type: str = 'industry',
                                  top_n_sectors: int = 5,
-                                 top_n_stocks: int = 10) -> Dict[str, pd.DataFrame]:
+                                 top_n_stocks: int = 10) -> dict[str, pd.DataFrame]:
         """
         基于板块资金流向选股
 
@@ -286,7 +313,7 @@ class EnhancedDataAPI:
         return result
 
     def select_stocks_dragon_tiger(self,
-                                  date: str = None,
+                                  date: Optional[str] = None,
                                   min_net_buy: float = 1000,
                                   top_n: int = 20) -> pd.DataFrame:
         """
@@ -306,7 +333,7 @@ class EnhancedDataAPI:
     # 快速分析功能
     # ============================================================
 
-    def quick_analysis(self, stock_code: str) -> Dict:
+    def quick_analysis(self, stock_code: str) -> dict:
         """
         快速分析一只股票
 
@@ -322,9 +349,9 @@ class EnhancedDataAPI:
         Returns:
             Dict: 分析结果
         """
-        result = {
+        result: dict[str, Any] = {
             'stock_code': stock_code,
-            'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            'update_time': datetime.now(tz=_SH).strftime('%Y-%m-%d %H:%M:%S')
         }
 
         # 1. 基本面因子

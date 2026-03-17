@@ -1,22 +1,19 @@
-import json
+import atexit
 import ctypes
+import inspect
+import json
+import os
+import re
+import shutil
+import sys
+import weakref
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
 import pandas as pd
-import weakref
-import sys
-import os
-import shutil
-import time
-from pathlib import Path
-from typing import Dict, List, Optional, Union
-from collections import defaultdict
-from datetime import datetime, timedelta
-import re
-import atexit
-import inspect
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
 # 优先从通达信安装目录加载DLL
 _tdx_install_paths = [
@@ -42,7 +39,7 @@ dll.GetCWDATAInStr.restype = ctypes.c_char_p    # 复权数据
 dll.Register_DataTransferFunc.restype=None      # 注册外套回调函数
 dll.SubscribeGPData.restype=ctypes.c_char_p     # 订阅单股数据
 dll.SubscribeHQDUpdate.restype=ctypes.c_char_p     # 订阅单股行情更新
-dll.SetNewOrder.restype=ctypes.c_char_p         # 下单接口 
+dll.SetNewOrder.restype=ctypes.c_char_p         # 下单接口
 dll.GetSTOCKInStr.restype=ctypes.c_char_p       # 获取股票详细信息
 dll.GetREPORTInStr.restype=ctypes.c_char_p      # 获取行情数据
 dll.SetResToMain.restype=ctypes.c_char_p        # 获取行情数据
@@ -89,23 +86,23 @@ def convert_or_validate(data):
     """
     如果输入是list，则根据后缀(SZ=0, SH=1, BJ=2)转换为“0#600000|1#600001|2#600002”格式的字符串
     如果输入是字符串，则验证是否符合指定格式
-    
+
     Args:
         data: list或str类型的数据
-        
+
     Returns:
         str: 转换后的字符串或验证结果
     """
     # 定义后缀到编号的映射
     suffix_map = {
         'SZ': '0',
-        'SH': '1', 
+        'SH': '1',
         'BJ': '2',
         '0': '0',
         '1': '1',
         '2': '2'
     }
-    
+
     if isinstance(data, list):
         # 处理列表转换
         result = []
@@ -114,53 +111,53 @@ def convert_or_validate(data):
             if '.' not in item:
                 print(f"无效的格式: {item}，需要包含后缀(.SZ/.SH/.BJ)")
                 return ""
-            
+
             code, suffix = item.split('.', 1)
-            
+
             if suffix not in suffix_map:
                 print(f"不支持的后缀: {suffix}, 只支持SZ/SH/BJ")
                 return ""
-            
+
             # 根据后缀获取对应的编号
             num = suffix_map[suffix]
             result.append(f"{num}#{code}")
-        
+
         return "|".join(result)
-    
+
     elif isinstance(data, str):
         # 验证字符串格式
         parts = data.split("|")
-        
+
         # 检查是否包含所有必要的部分
         if len(parts) < 1:
             return ""
-        
+
         # 检查每个部分的格式
         for part in parts:
             if '#' not in part:
                 return ""
-            
+
             num, code = part.split('#', 1)
-            
+
             # 检查编号是否有效
             if num not in ['0', '1', '2']:
                 return ""
-            
+
             # 检查代码是否为6位数字
             if not code.isdigit() or len(code) != 6:
                 return ""
-        
+
         return data
-    
+
     else:
         # 不支持的类型
         print("输入必须是list或str类型")
         return ""
-    
+
 def get_python_version_number() -> int:
     """
     获取当前Python版本号，提取主、次版本拼接为数字（如3.13.7返回313）
-    
+
     Returns:
         int: 主+次版本拼接的数字
     """
@@ -168,17 +165,17 @@ def get_python_version_number() -> int:
     major = version_info.major  # 主版本（如3）
     minor = version_info.minor  # 次版本（如13）
     version_num = major * 100 + minor  # 拼接为数字（3*100+13=313）
-    
+
     return version_num
 
-def get_warn_struct_str(stock_list:        List[str] = [],
-                  time_list:         List[str] = [],
-                  price_list:        List[str] = [],
-                  close_list:        List[str] = [],
-                  volum_list:        List[str] = [],
-                  bs_flag_list:      List[str] = [],
-                  warn_type_list:    List[str] = [],
-                  reason_list:       List[str] = [],
+def get_warn_struct_str(stock_list:        list[str] = [],
+                  time_list:         list[str] = [],
+                  price_list:        list[str] = [],
+                  close_list:        list[str] = [],
+                  volum_list:        list[str] = [],
+                  bs_flag_list:      list[str] = [],
+                  warn_type_list:    list[str] = [],
+                  reason_list:       list[str] = [],
                   count:        int  = 1) -> str:
     """
     获取预警结构字符串
@@ -201,7 +198,7 @@ def get_warn_struct_str(stock_list:        List[str] = [],
         if len(lst) < count:
             tq.close()
             raise ValueError(f"{name}元素数量不足（当前{len(lst)}，需要{count}）")
-        
+
     time_list = [_convert_time_format(time_str) for time_str in time_list]
     # 3. 补全其他列表
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -228,9 +225,9 @@ def get_warn_struct_str(stock_list:        List[str] = [],
 
     # 5. 拼接结果（不同元素用||分隔）
     return "|".join(parts)
-        
-def get_bt_struct_str(time_list:         List[str] = [],
-                      data_list:       List[List[str]] = [],
+
+def get_bt_struct_str(time_list:         list[str] = [],
+                      data_list:       list[list[str]] = [],
                       count:        int  = 1) -> str:
     """
     获取回测结构字符串
@@ -244,7 +241,7 @@ def get_bt_struct_str(time_list:         List[str] = [],
     filled_data = data_list[:count] + ['0'] * max(0, count - len(data_list))  # 不足补0
     num_pattern = re.compile(r'^-?[0-9.]+$')  # 匹配纯数字（含整数/浮点数）
     processed_data = []
-    
+
     for item in filled_data:
         truncated = item[:16]  # 取前16位
         for item2 in truncated:
@@ -270,7 +267,7 @@ def check_stock_code_format(input_data):
 
     # 正则表达式：6位数字 + . + 2-3位大写字母（匹配.SH/.SZ/.JJ等）
     pattern = re.compile(r'^\d{6}\.[A-Z]{2,3}$')
-    
+
     # 统一转为列表处理（兼容单个字符串/列表入参）
     if isinstance(input_data, str):
         check_list = [input_data]
@@ -280,12 +277,12 @@ def check_stock_code_format(input_data):
     else:
         print("入参仅支持字符串或字符串列表")
         return False
-    
+
     for code in check_list:
         if not bool(pattern.match(code)):
             print(f"股票代码格式错误: {code}（需6位数字+市场后缀，如688318.SH）")
             return False
-    
+
     return True
 
 def is_callback_func(func):
@@ -295,12 +292,12 @@ def is_callback_func(func):
     # 校验是否为可调用对象
     if not callable(func):
         return False
-    
+
     try:
         # 获取函数的参数签名
         sig = inspect.signature(func)
         params = list(sig.parameters.values())
-        
+
         # 筛选必填参数（无默认值、非*/*kwargs的参数）
         required_params = []
         for param in params:
@@ -309,12 +306,12 @@ def is_callback_func(func):
                 continue
             if param.default is inspect.Parameter.empty:
                 required_params.append(param)
-        
+
         # 校验必填参数数量为1（核心规则）
         if len(required_params) != 1:
             return False
         return True
-    
+
     except (ValueError, TypeError):
         return False
 
@@ -352,11 +349,12 @@ class tq:
             cls._initialized = False
 
     @classmethod
-    def initialize(cls, 
+    def initialize(cls,
                    path:str,
                    dll_path:str=''):
         cls._connection_path = path
-        if dll_path: cls.dll_path = dll_path
+        if dll_path:
+            cls.dll_path = dll_path
         cls._auto_initialize()
 
         # 注册finalizer（如果尚未注册）
@@ -380,7 +378,7 @@ class tq:
     def close(cls):
         """手动关闭连接"""
         cls._auto_close()
-        
+
         # 清理finalizer
         if cls._finalizer is not None and cls._finalizer.alive:
             cls._finalizer()
@@ -392,7 +390,7 @@ class tq:
         if not hasattr(tq, '_atexit_registered'):
             atexit.register(tq._auto_close)
             tq._atexit_registered = True
-    
+
     @classmethod
     def _ensure_cleanup_registered(cls):
         """确保清理机制已注册"""
@@ -445,7 +443,7 @@ class tq:
                     raise RuntimeError("TQ数据接口初始化失败或已有同名策略运行")
                 cls._initialized = True
                 print(f"TQ数据接口初始化成功，使用路径: {cls._connection_path}")
-            except Exception as e:
+            except Exception:
                 raise RuntimeError("TQ数据接口初始化失败")
 
             if not cls._initialized:
@@ -493,16 +491,16 @@ class tq:
             print(f"警告：自定义列名数量（{len(column_names)}）与数据列数（{len(df_price.columns)}）不匹配")
 
         return df_price
-    
+
     @staticmethod
-    def print_to_tdx(df_list, sp_name="", xml_filename="", jsn_filenames=None, 
+    def print_to_tdx(df_list, sp_name="", xml_filename="", jsn_filenames=None,
                         vertical=None, horizontal=None, height=None, table_names=None):
         """
         将多组因子DataFrame导出为通达信所需的 .xml, .jsn, 和 .sp 文件，并移动到指定目录。
         核心改进：
         1. 每组table对应独立的DataFrame和JSON文件（独立表头+独立数据）
         2. 显示函数调用时的运行时间（格式：YYYY-MM-DD HH:MM:SS）
-        
+
         df_list: DataFrame列表，每组table对应1个DataFrame（必须与组数一致）
                 每个DF要求：第一列是日期（datetime64[ns] 类型或字符串），后续列是指标/因子名称
         sp_name: 因子名称，用于生成.sp文件名
@@ -524,13 +522,13 @@ class tq:
         for idx, df in enumerate(df_list):
             if not isinstance(df, pd.DataFrame) or df.empty:
                 raise ValueError(f"❌ df_list第{idx+1}个元素必须是非空的DataFrame！")
-        
+
         # 校验jsn_filenames
         if jsn_filenames is None:
             jsn_filenames = []
         if not isinstance(jsn_filenames, list) or len(jsn_filenames) == 0:
             raise ValueError("❌ jsn_filenames必须是非空列表类型！")
-        
+
         # 确定排列方向、组数，并校验数量匹配
         if horizontal is not None and isinstance(horizontal, int) and horizontal >= 1:
             hdirection = "false"
@@ -541,20 +539,20 @@ class tq:
         else:
             hdirection = "true"
             group_count = 1  # 默认1组
-        
+
         # 关键校验：df_list长度 ≡ 组数 ≡ jsn_filenames长度
         if len(df_list) != group_count:
             raise ValueError(f"❌ df_list长度({len(df_list)})必须等于组数({group_count})！")
         if len(jsn_filenames) != group_count:
             raise ValueError(f"❌ jsn_filenames长度({len(jsn_filenames)})必须等于组数({group_count})！")
-        
+
         # 校验height参数（长度需等于组数）
         custom_height = []
         if height is not None:
             if not isinstance(height, list) or len(height) != group_count:
                 raise ValueError(f"❌ height参数必须是长度为{group_count}的列表（如height=['0.4', '0.6']）！")
             custom_height = [str(h) for h in height]
-        
+
         # 处理table_names参数
         table_title_list = []
         if table_names is not None:
@@ -563,7 +561,7 @@ class tq:
             table_title_list = [name.strip() if isinstance(name, str) and name.strip() else "" for name in table_names]
         else:
             table_title_list = [""] * group_count
-        
+
         # 生成最终的列表标题：优先用table_names，否则用jsn_filenames前缀
         final_table_titles = []
         for idx in range(group_count):
@@ -573,7 +571,7 @@ class tq:
                 jsn_name = jsn_filenames[idx]
                 final_title = os.path.splitext(jsn_name)[0]
             final_table_titles.append(final_title)
-        
+
         # 获取函数调用时的运行时间（核心新增）
         run_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"📌 函数运行时间：{run_time}")
@@ -581,12 +579,12 @@ class tq:
 
         # ===================== 2. 通达信路径配置 =====================
         # default_tdx_path = r'D:\new_tdx_test'
-        
-        
+
+
         current_dir = os.path.dirname(os.path.abspath(__file__))
         target_dir = os.path.dirname(os.path.dirname(current_dir))  # 等价于 parent.parent
         default_tdx_path=target_dir
-        
+
         tdx_root_path = getattr(tq, 'tdx_path', default_tdx_path) if tq is not None else default_tdx_path
         print(f"ℹ️ 通达信根目录路径: {tdx_root_path}")
 
@@ -598,24 +596,24 @@ class tq:
                 <branchpanel hdirection="{hdirection}">
 
     '''
-        
+
         current_table_id = 1  # table id从1开始递增
         auto_height_base = 1.0 / group_count  # 自动高度基数
-        
+
         for group_idx in range(group_count):
             # 当前组的核心配置
             current_df = df_list[group_idx]
             current_jsn = jsn_filenames[group_idx]
             is_last_group = (group_idx == group_count - 1)
             current_title = final_table_titles[group_idx]  # 当前组的列表标题
-            
+
             # -------- 生成当前组的condpanel（移除日期筛选，显示运行时间） --------
             cond_id = current_table_id
             xml_content += f'''
                         <table X="0" Y="-1" width="1" height="36" isleaf="true" id="{cond_id}" name="condpanel">
                             <condpanel>
                                 <ctrls rowcount="1" frameline="10">
-                                    <ctrl rowindex="0" index="1" text="{current_title}" type="static" hoffset="10" align="L" width="120" fontsize="-14"></ctrl>	
+                                    <ctrl rowindex="0" index="1" text="{current_title}" type="static" hoffset="10" align="L" width="120" fontsize="-14"></ctrl>
                                     <ctrl rowindex="0" index="2" text="运行时间：{run_time}" type="static" hoffset="10" align="L" width="200" fontsize="-14"></ctrl>
                                     <ctrl rowindex="0" index="97" text="导出" type="button" hoffset="5" align="R" width="50" bindparam="$M_EXP" fontsize="-14"></ctrl>
                                     <ctrl rowindex="0" index="98" text="刷新" type="button" hoffset="5" align="R" width="50" bindparam="IDOK" fontsize="-14"></ctrl>
@@ -628,18 +626,18 @@ class tq:
             # -------- 生成当前组的gridctrl（数据展示面板） --------
             current_table_id += 1
             grid_id = current_table_id
-            
+
             # 计算grid高度
             if custom_height:
                 grid_h = custom_height[group_idx]
             else:
                 grid_h = 0 if is_last_group else auto_height_base
-            
+
             xml_content += f'''
                         <table X="0" Y="-1" width="1" height="{grid_h}" isleaf="true" id="{grid_id}" name="gridctrl">
                             <gridctrl >
                                 <gridcols fixednum="1" rowchgmsg="true" postslave="true" showtip="1" defsort="date" expandfull="1">
-                                    
+
     '''
             # 生成当前组的列头
             sp_names = current_df.columns[1:].tolist()
@@ -657,7 +655,7 @@ class tq:
             current_table_id += 1
 
         # 闭合XML标签
-        xml_content += f'''			</branchpanel>
+        xml_content += '''			</branchpanel>
             </table>
         </table>
     </root>'''
@@ -670,14 +668,14 @@ class tq:
         # ===================== 4. 生成JSON文件（保留原有逻辑） =====================
         json_dir = os.path.join(tdx_root_path, r"T0002\cloud_cache\list")
         os.makedirs(json_dir, exist_ok=True)
-        
+
         for g_idx in range(group_count):
             current_df = df_list[g_idx]
             jsn_file = jsn_filenames[g_idx]
-            
+
             # 生成列头
             col_header = ["date"] + [f"code_g{g_idx+1}_t1_{j}" for j, _ in enumerate(current_df.columns[1:], 1)]
-            
+
             # 生成数据行
             data_rows = []
             for _, row in current_df.iterrows():
@@ -691,11 +689,11 @@ class tq:
                     except:
                         vals.append(str(v) if pd.notna(v) else "")
                 data_rows.append([date_str] + vals)
-            
+
             # 写入JSON
             with open(jsn_file, "w", encoding="utf-8") as f:
                 json.dump([{"colheader": col_header, "data": data_rows}], f, ensure_ascii=False, indent=2)
-            
+
             # 移动到通达信目录
             jsn_target = os.path.join(json_dir, jsn_file)
             if os.path.exists(jsn_target):
@@ -786,16 +784,16 @@ class tq:
             print("No callback function registered for code:", codes)
             return None
         return cls.data_callback_func[cls._get_run_id()][codes](data_str)
-        
+
     @classmethod
-    def filter_dict_by_fields(cls, data: Dict = {}, field_list: List = []) -> Dict:
+    def filter_dict_by_fields(cls, data: dict = {}, field_list: list = []) -> dict:
         """
         根据指定的字段列表筛选字典中的键值对（不区分大小写）
 
         Args:
             data: 原始字典数据
             field_list: 需要保留的字段列表（大小写不敏感）
-            
+
         Returns:
             筛选后的新字典（保留原始键名的大小写）
         """
@@ -810,18 +808,18 @@ class tq:
                 original_key = key_lower_map[field_lower]
                 filtered_data[original_key] = data[original_key]
 
-        return filtered_data    
+        return filtered_data
 
     @classmethod
     def get_market_data(cls,
-                        field_list: List[str] = [],
-                        stock_list: List[str] = [],
+                        field_list: list[str] = [],
+                        stock_list: list[str] = [],
                         period: str = '',
                         start_time: str = '',
                         end_time: str = '',
                         count: int = -1,
                         dividend_type: Optional[str] = None,
-                        fill_data: bool = True) -> Dict:
+                        fill_data: bool = True) -> dict:
 
         # 初始化连接
         cls._auto_initialize()
@@ -863,7 +861,7 @@ class tq:
             # 如果没有提供end_time，使用当前时间
             if not end_time:
                 end_time = datetime.now().strftime('%Y%m%d%H%M%S')
-                
+
             start_time_fmt = _convert_time_format(start_time)
             end_time_fmt = _convert_time_format(end_time)
 
@@ -874,7 +872,7 @@ class tq:
 
         # 获取数据
         all_data = cls._fetch_market_data_batch(
-            stock_list, period_bytes, start_bytes, end_bytes, 
+            stock_list, period_bytes, start_bytes, end_bytes,
             dividend_type_int, count, timeout_ms=60000
         )
 
@@ -891,7 +889,7 @@ class tq:
             return {f: result_data[f].copy() for f in selected}
         else:
             return {k: v.copy() for k, v in result_data.items() if k != "ErrorId"}
-            
+
 
     @classmethod
     def _check_stock_code_format_batch(cls, stock_list):
@@ -900,15 +898,15 @@ class tq:
         return all(pattern.match(stock) for stock in stock_list)
 
     @classmethod
-    def _fetch_market_data_batch(cls, stock_list, period_bytes, start_bytes, end_bytes, 
+    def _fetch_market_data_batch(cls, stock_list, period_bytes, start_bytes, end_bytes,
                                 dividend_type_int, count, timeout_ms=60000):
         """批量获取市场数据"""
         all_data = {}
-        
+
         for stock in stock_list:
             try:
                 stock_bytes = stock.encode('utf-8')
-                
+
                 ptr = dll.GetHISDATsInStr(
                     cls._get_run_id(),
                     stock_bytes,
@@ -919,17 +917,17 @@ class tq:
                     count,
                     timeout_ms
                 )
-                
+
                 if ptr and len(ptr) > 0:
                     data_dict = json.loads(ptr)
                     if data_dict.get("ErrorId") == "0":
                         all_data[stock] = data_dict
-                        
+
             except Exception:
                 continue
-                
+
         return all_data
-    
+
     @classmethod
     def _calculate_forward_factors_from_dividends(cls, df_factors: pd.DataFrame, price_series: pd.Series) -> pd.Series:
         """
@@ -956,12 +954,19 @@ class tq:
             row = df_sorted.loc[date]
 
             # 获取前一日的价格
-            prev_date_idx = price_dates.get_loc(date) - 1
+            loc = price_dates.get_loc(date)
+            if not isinstance(loc, int):
+                continue
+            prev_date_idx = loc - 1
             if prev_date_idx < 0:
                 continue
 
-            prev_date = price_dates[prev_date_idx]
-            prev_close = price_series.iloc[prev_date_idx]
+            price_dates[prev_date_idx]
+            prev_close_raw = price_series.iloc[prev_date_idx]
+            try:
+                prev_close = float(prev_close_raw)
+            except Exception:
+                continue
 
             if prev_close <= 0:
                 continue
@@ -971,7 +976,7 @@ class tq:
             bonus_per_share = bonus_per_10 / 10.0  # 每股分红
             share_bonus_ratio = row['ShareBonus'] / 10.0  # 送股比例
             allotment_ratio = row['Allotment'] / 10.0  # 配股比例
-            allot_price = row['AllotPrice']  # 配股价
+            row['AllotPrice']  # 配股价
 
             # 计算除权除息价
             # 除权价 = (前收盘价 - 现金分红) / (1 + 送股比例 + 转增比例)
@@ -995,7 +1000,7 @@ class tq:
 
 
     @classmethod
-    def _fast_format_kline_data(cls, all_data: Dict, stock_list: List[str], fill_data: bool) -> Dict:
+    def _fast_format_kline_data(cls, all_data: dict, stock_list: list[str], fill_data: bool) -> dict:
         if not all_data:
             return {}
 
@@ -1022,18 +1027,18 @@ class tq:
         # 批量处理字段
         fields = set().union(*(d.keys() for d in all_data.values())) - {'Date', 'Time', 'ErrorId'}
         result = {}
-        
+
         for field in fields:
-            # 使用numpy数组直接操作   
+            # 使用numpy数组直接操作
             data_arr = np.full((n_time, len(stock_list)), np.nan, dtype=np.float64)
-            
+
             for s_idx, stock in enumerate(stock_list):
                 if stock in all_data and field in all_data[stock]:
                     data = all_data[stock]
                     dates = data.get('Date', [])
                     values = data.get(field, [])
                     times = data.get('Time', [])
-                    
+
                     # 极速数据处理
                     indices, vals = [], []
                     for i, date in enumerate(dates):
@@ -1047,20 +1052,20 @@ class tq:
                                         vals.append(v)
                                 except:
                                     pass
-                    
+
                     if indices:
                         data_arr[indices, s_idx] = vals
-                        
+
                         if fill_data:
-                            col = data_arr[:, s_idx] 
+                            col = data_arr[:, s_idx]
                             mask = ~np.isnan(col)
                             if mask.any():  # 列中至少有一个非NaN值才执行填充
                                 idx_arr = np.where(mask, np.arange(len(col)), 0)
                                 np.maximum.accumulate(idx_arr, out=idx_arr)
                                 col[:] = col[idx_arr]
-            
+
             result[field] = pd.DataFrame(data_arr, index=time_index, columns=stock_list)
-    
+
         return result
 
 
@@ -1068,7 +1073,7 @@ class tq:
 
 
     @classmethod
-    def _fast_format_tick_data(cls, all_data: Dict, field_list: List[str]) -> Dict:
+    def _fast_format_tick_data(cls, all_data: dict, field_list: list[str]) -> dict:
         """优化版tick数据格式化"""
         result = {}
 
@@ -1076,7 +1081,7 @@ class tq:
             if 'Date' in stock_data and 'Time' in stock_data:
                 dates = stock_data['Date']
                 times = stock_data['Time']
-                
+
                 # 批量处理时间戳
                 timestamps = []
                 for i, date in enumerate(dates):
@@ -1085,38 +1090,39 @@ class tq:
                         timestamps.append(f"{date}{int(time_val):06d}")
                     else:
                         timestamps.append(date)
-                
+
                 # 筛选字段
                 if field_list:
                     selected_fields = [f for f in field_list if f in stock_data and f not in ['Date', 'Time', 'ErrorId']]
                 else:
                     selected_fields = [f for f in stock_data.keys() if f not in ['Date', 'Time', 'ErrorId']]
-                
+
                 if selected_fields and timestamps:
                     # 创建结构化数组（优化版）
                     dtype = [('datetime', 'U14')]
                     for field in selected_fields:
                         sample = stock_data[field][0] if stock_data[field] else "0"
-                        dtype.append((field, np.float64 if '.' in sample else np.int32))
-                    
+                        sample_text = str(sample)
+                        dtype.append((field, 'f8' if '.' in sample_text else 'i4'))
+
                     arr = np.zeros(len(timestamps), dtype=dtype)
                     arr['datetime'] = timestamps
-                    
+
                     for field in selected_fields:
                         if field in stock_data:
                             try:
                                 arr[field] = pd.to_numeric(stock_data[field], errors='coerce')
                             except:
                                 pass
-                    
+
                     result[stock] = arr
 
         return result
-    
 
-    
-    
-        
+
+
+
+
 
     @classmethod
     def get_divid_factors(cls,
@@ -1131,7 +1137,7 @@ class tq:
 
         if not end_time:
             end_time = datetime.now().strftime('%Y%m%d%H%M%S')
-        
+
         if start_time:
             start_time = _convert_time_format(start_time)
         if end_time:
@@ -1211,11 +1217,11 @@ class tq:
 
         except json.JSONDecodeError:
             return pd.DataFrame()
-    
+
     @classmethod
     def get_stock_info(cls,
-                        stock_code:str, 
-                        field_list: List = []) -> Dict:
+                        stock_code:str,
+                        field_list: list = []) -> dict:
         """获取基础财务数据"""
         # 初始化连接
         cls._auto_initialize()
@@ -1240,17 +1246,17 @@ class tq:
             if field_list:
                 json_res = cls.filter_dict_by_fields(json_res, field_list)
             return json_res
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError("获取合约详情异常")
-        
+
     @classmethod
     def get_market_snapshot(cls,
-                    stock_code: str) -> Dict:
+                    stock_code: str) -> dict:
         """获取报表数据"""
         # 初始化连接
         cls._auto_initialize()
-        
+
         if not check_stock_code_format(stock_code):
             tq.close()
             raise ValueError(f"{stock_code}异常")
@@ -1270,13 +1276,13 @@ class tq:
                 print(f"获取报表数据错误: {json_res.get('Error')}")
                 return {}
             return json_res
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError("获取报表数据异常")
-        
+
     @classmethod
     def send_message(cls,
-                    msg_str: str) -> Dict:
+                    msg_str: str) -> dict:
         """策略管理输出字符串"""
         # 初始化连接
         cls._auto_initialize()
@@ -1297,13 +1303,13 @@ class tq:
                 print(f"发送信息到主程序错误: {json_res.get('Error')}")
                 return {}
             return json_res
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError("发送信息到主程序异常")
 
     @classmethod
     def send_file(cls,
-                    file_path: str) -> Dict:
+                    file_path: str) -> dict:
         """策略管理输出字符串"""
         # 初始化连接
         cls._auto_initialize()
@@ -1324,21 +1330,21 @@ class tq:
                 print(f"发送文件路径到主程序错误: {json_res.get('Error')}")
                 return {}
             return json_res
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError("发送文件路径到主程序异常")
 
     @classmethod
     def send_warn(cls,
-                  stock_list:        List[str] = [],
-                  time_list:         List[str] = [],
-                  price_list:        List[str] = [],
-                  close_list:        List[str] = [],
-                  volum_list:        List[str] = [],
-                  bs_flag_list:      List[str] = [],
-                  warn_type_list:    List[str] = [],
-                  reason_list:       List[str] = [],
-                  count:        int  = 1) -> Dict:
+                  stock_list:        list[str] = [],
+                  time_list:         list[str] = [],
+                  price_list:        list[str] = [],
+                  close_list:        list[str] = [],
+                  volum_list:        list[str] = [],
+                  bs_flag_list:      list[str] = [],
+                  warn_type_list:    list[str] = [],
+                  reason_list:       list[str] = [],
+                  count:        int  = 1) -> dict:
         """发送预警信息到主程序"""
         if count <= 0:
             cls.close()
@@ -1376,16 +1382,16 @@ class tq:
                 print(f"发送预警信息到主程序错误: {json_res.get('Error')}")
                 return {}
             return json_res
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError("发送预警信息到主程序异常")
 
     @classmethod
     def send_bt_data(cls,
                      stock_code:          str  = '',
-                     time_list:         List[str] = [],
-                     data_list:         List[List[str]] = [],
-                     count:        int  = 1) -> Dict:
+                     time_list:         list[str] = [],
+                     data_list:         list[list[str]] = [],
+                     count:        int  = 1) -> dict:
         """策略管理输出回测数据"""
         if count <= 0:
             cls.close()
@@ -1398,7 +1404,7 @@ class tq:
 
         bt_data = get_bt_struct_str(time_list,
                                     data_list,
-                                    count)  
+                                    count)
         bt_data = 'BTR||' + stock_code + '||' + bt_data
         bt_data = bt_data.encode('utf-8')
         timeout_ms = 5000
@@ -1415,15 +1421,15 @@ class tq:
                 print(f"发送回测数据到主程序错误: {json_res.get('Error')}")
                 return {}
             return json_res
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError("发送回测数据到主程序异常")
 
     @classmethod
     def send_user_block(cls,
                 block_code: str = '',
-                stocks: List[str] = [],
-                show: bool = False) -> Dict:
+                stocks: list[str] = [],
+                show: bool = False) -> dict:
         """客户端添加自选股"""
         # 初始化连接
         cls._auto_initialize()
@@ -1446,12 +1452,12 @@ class tq:
                 print(f"发送自选股到主程序错误: {json_res.get('Error')}")
                 return {}
             return json_res
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError("发送自选股到主程序异常")
 
     @classmethod
-    def get_sector_list(cls) -> List:
+    def get_sector_list(cls) -> list:
         """获取板块列表"""
         # 初始化连接
         cls._auto_initialize()
@@ -1471,12 +1477,12 @@ class tq:
                 return []
             result = [item.replace('.1', '.SH').replace('.0', '.SZ').replace('.2', '.BJ') for item in json_res['Value']]
             return result
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError("获取板块列表异常")
-        
+
     @classmethod
-    def get_user_sector(cls) -> List:
+    def get_user_sector(cls) -> list:
         """获取用户自选股板块列表"""
         # 初始化连接
         cls._auto_initialize()
@@ -1495,14 +1501,14 @@ class tq:
                 print(f"获取用户自选股板块列表错误: {json_res.get('Error')}")
                 return []
             return json_res['Value']
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError("获取用户自选股板块列表异常")
-        
+
     @classmethod
     def get_stock_list_in_sector(cls,
                          block_code: str,
-                         block_type: int = 0) -> List:
+                         block_type: int = 0) -> list:
         """获取板块成分股"""
         # 初始化连接
         cls._auto_initialize()
@@ -1523,20 +1529,20 @@ class tq:
             if json_res.get("ErrorId") != "0":
                 print(f"获取板块成分股错误: {json_res.get('Error')}")
                 return []
-            
+
             result = [item.replace('.1', '.SH').replace('.0', '.SZ').replace('.2', '.BJ') for item in json_res['Value']]
             return result
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError("获取板块成分股异常")
 
     @classmethod
     def get_financial_data(cls,
-                            stock_list: List[str] = [], 
-                            field_list: List[str] = [], 
-                            start_time: str = '', 
-                            end_time: str = '', 
-                            report_type: str = 'report_time') -> Dict:
+                            stock_list: list[str] = [],
+                            field_list: list[str] = [],
+                            start_time: str = '',
+                            end_time: str = '',
+                            report_type: str = 'report_time') -> dict:
         """获取财务数据"""
         # 初始化连接
         cls._auto_initialize()
@@ -1544,7 +1550,7 @@ class tq:
         if not stock_list:
             cls.close()
             raise ValueError("必传参数缺失：stock_list不能为空，请提供合约代码列表")
-        
+
         if not check_stock_code_format(stock_list):
             tq.close()
             raise ValueError(f"{stock_list}异常")
@@ -1596,7 +1602,7 @@ class tq:
                 if len(set(list_lengths)) != 1:
                     print("输入字典中各字段的列表长度不一致，返回当前数据。")
                     return data_dict['Data']
-                
+
                 # 2. 转换为DataFrame
                 df = pd.DataFrame(data_dict['Data'])
                 result_dict[stock] = df
@@ -1608,13 +1614,13 @@ class tq:
                 continue
 
         return result_dict
-    
+
     @classmethod
     def get_financial_data_by_date(cls,
-                                    stock_list: List[str] = [], 
-                                    field_list: List[str] = [],  
+                                    stock_list: list[str] = [],
+                                    field_list: list[str] = [],
                                     year: int = 0,
-                                    mmdd: int = 0) -> Dict:
+                                    mmdd: int = 0) -> dict:
         """获取财务数据"""
         # 初始化连接
         cls._auto_initialize()
@@ -1622,7 +1628,7 @@ class tq:
         if not stock_list:
             cls.close()
             raise ValueError("必传参数缺失：stock_list不能为空，请提供合约代码列表")
-        
+
         if not check_stock_code_format(stock_list):
             tq.close()
             raise ValueError(f"{stock_list}异常")
@@ -1668,13 +1674,13 @@ class tq:
                 continue
 
         return result_dict
-    
+
     @classmethod
     def get_gpjy_value(cls,
-                        stock_list: List[str] = [], 
-                        field_list: List[str] = [], 
-                        start_time: str = '', 
-                        end_time: str = '') -> Dict:
+                        stock_list: list[str] = [],
+                        field_list: list[str] = [],
+                        start_time: str = '',
+                        end_time: str = '') -> dict:
         """获取股票交易数据"""
         # 初始化连接
         cls._auto_initialize()
@@ -1682,7 +1688,7 @@ class tq:
         if not stock_list:
             cls.close()
             raise ValueError("必传参数缺失：stock_list不能为空，请提供合约代码列表")
-        
+
         if not check_stock_code_format(stock_list):
             tq.close()
             raise ValueError(f"{stock_list}异常")
@@ -1737,13 +1743,13 @@ class tq:
                 continue
 
         return result_dict
-    
+
     @classmethod
     def get_gpjy_value_by_date(cls,
-                                stock_list: List[str] = [], 
-                                field_list: List[str] = [],  
+                                stock_list: list[str] = [],
+                                field_list: list[str] = [],
                                 year: int = 0,
-                                mmdd: int = 0) -> Dict:
+                                mmdd: int = 0) -> dict:
         """获取股票交易数据"""
         # 初始化连接
         cls._auto_initialize()
@@ -1751,7 +1757,7 @@ class tq:
         if not stock_list:
             cls.close()
             raise ValueError("必传参数缺失：stock_list不能为空，请提供合约代码列表")
-        
+
         if not check_stock_code_format(stock_list):
             tq.close()
             raise ValueError(f"{stock_list}异常")
@@ -1797,13 +1803,13 @@ class tq:
                 continue
 
         return result_dict
-    
+
     @classmethod
     def get_bkjy_value(cls,
-                        stock_list: List[str] = [], 
-                        field_list: List[str] = [], 
-                        start_time: str = '', 
-                        end_time: str = '') -> Dict:
+                        stock_list: list[str] = [],
+                        field_list: list[str] = [],
+                        start_time: str = '',
+                        end_time: str = '') -> dict:
         """获取板块交易数据"""
         # 初始化连接
         cls._auto_initialize()
@@ -1811,7 +1817,7 @@ class tq:
         if not stock_list:
             cls.close()
             raise ValueError("必传参数缺失：stock_list不能为空，请提供合约代码列表")
-        
+
         if not check_stock_code_format(stock_list):
             tq.close()
             raise ValueError(f"{stock_list}异常")
@@ -1866,13 +1872,13 @@ class tq:
                 continue
 
         return result_dict
-    
+
     @classmethod
     def get_bkjy_value_by_date(cls,
-                                stock_list: List[str] = [], 
-                                field_list: List[str] = [],  
+                                stock_list: list[str] = [],
+                                field_list: list[str] = [],
                                 year: int = 0,
-                                mmdd: int = 0) -> Dict:
+                                mmdd: int = 0) -> dict:
         """获取板块交易数据"""
         # 初始化连接
         cls._auto_initialize()
@@ -1880,7 +1886,7 @@ class tq:
         if not stock_list:
             cls.close()
             raise ValueError("必传参数缺失：stock_list不能为空，请提供合约代码列表")
-        
+
         if not check_stock_code_format(stock_list):
             tq.close()
             raise ValueError(f"{stock_list}异常")
@@ -1929,9 +1935,9 @@ class tq:
 
     @classmethod
     def get_scjy_value(cls,
-                        field_list: List[str] = [], 
-                        start_time: str = '', 
-                        end_time: str = '') -> Dict:
+                        field_list: list[str] = [],
+                        start_time: str = '',
+                        end_time: str = '') -> dict:
         """获取市场交易数据"""
         # 初始化连接
         cls._auto_initialize()
@@ -1958,7 +1964,7 @@ class tq:
             ptr = dll.GetProDataInStr(cls._get_run_id(),json_str,timeout_ms)
             # 检查返回的指针
             if ptr is None or len(ptr) == 0:
-                print(f"获取市场交易数据失败: 返回空指针")
+                print("获取市场交易数据失败: 返回空指针")
                 return {}
 
             # 解析JSON数据
@@ -1978,12 +1984,12 @@ class tq:
             import traceback
             traceback.print_exc()
         return data_dict['Data']
-    
+
     @classmethod
     def get_scjy_value_by_date(cls,
-                                field_list: List[str] = [],  
+                                field_list: list[str] = [],
                                 year: int = 0,
-                                mmdd: int = 0) -> Dict:
+                                mmdd: int = 0) -> dict:
         """获取市场交易数据"""
         # 初始化连接
         cls._auto_initialize()
@@ -2001,7 +2007,7 @@ class tq:
             ptr = dll.GetProDataInStr(cls._get_run_id(),json_str,timeout_ms)
             # 检查返回的指针
             if ptr is None or len(ptr) == 0:
-                print(f"获取市场交易数据失败: 返回空指针")
+                print("获取市场交易数据失败: 返回空指针")
                 return {}
 
             # 解析JSON数据
@@ -2021,11 +2027,11 @@ class tq:
             import traceback
             traceback.print_exc()
         return data_dict['Data']
-    
+
     @classmethod
     def get_gp_one_data(cls,
-                        stock_list: List[str] = [], 
-                        field_list: List[str] = []) -> Dict:
+                        stock_list: list[str] = [],
+                        field_list: list[str] = []) -> dict:
         """获取股票单个数据"""
         # 初始化连接
         cls._auto_initialize()
@@ -2033,7 +2039,7 @@ class tq:
         if not stock_list:
             cls.close()
             raise ValueError("必传参数缺失：stock_list不能为空，请提供合约代码列表")
-        
+
         if not check_stock_code_format(stock_list):
             tq.close()
             raise ValueError(f"{stock_list}异常")
@@ -2077,16 +2083,16 @@ class tq:
                 continue
 
         return result_dict
-    
+
     @classmethod
     def get_trading_calendar(cls,
                             market: str,
                             start_time: str,
-                            end_time: str) -> List:
+                            end_time: str) -> list:
         """获取交易日历"""
         # 初始化连接
         cls._auto_initialize()
-        
+
         # 格式化时间参数
         if start_time:
             start_time = _convert_time_format(start_time)
@@ -2109,20 +2115,20 @@ class tq:
                 print(f"获取交易日历错误: {json_res.get('Error')}")
                 return []
             return json_res.get("Date", [])
-        except Exception as e:
+        except Exception:
             print("获取交易日历异常")
             return []
-        
+
     @classmethod
     def get_trading_dates(cls,
                             market: str,
                             start_time: str,
                             end_time: str,
-                            count:int = -1) -> List:
+                            count:int = -1) -> list:
         """获取交易日列表"""
         # 初始化连接
         cls._auto_initialize()
-        
+
         # 格式化时间参数
         if start_time:
             start_time = _convert_time_format(start_time)
@@ -2145,13 +2151,13 @@ class tq:
                 print(f"获取交易日历错误: {json_res.get('Error')}")
                 return []
             return json_res.get("Date", [])
-        except Exception as e:
+        except Exception:
             print("获取交易日历异常")
             return []
 
     @classmethod
     def get_stock_list(cls,
-                       market = None) -> List:
+                       market = None) -> list:
         """获取股票列表"""
         # 初始化连接
         cls._auto_initialize()
@@ -2174,20 +2180,20 @@ class tq:
                 return []
             result = [item.replace('.1', '.SH').replace('.0', '.SZ').replace('.2', '.BJ') for item in json_res['Value']]
             return result
-        except Exception as e:
+        except Exception:
             print("获取股票列表异常")
             return []
-        
+
 
     @classmethod
     def order_stock(cls,
-                    account:str, 
-                    stock_code:str, 
-                    order_type:int, 
-                    order_volume:int, 
-                    price_type:int, 
-                    price:float, 
-                    strategy_name:str, 
+                    account:str,
+                    stock_code:str,
+                    order_type:int,
+                    order_volume:int,
+                    price_type:int,
+                    price:float,
+                    strategy_name:str,
                     order_remark: str = ''):
         """下单接口 暂无实际功能"""
         # 初始化连接
@@ -2200,13 +2206,13 @@ class tq:
         if not stock_code:
             cls.close()
             raise ValueError("必传参数缺失：stock_code不能为空，请提供合约代码")
-        
+
         if not check_stock_code_format(stock_code):
             tq.close()
             raise ValueError(f"{stock_code}异常")
 
         try:
-            account_str = account.encode('utf-8') 
+            account_str = account.encode('utf-8')
             code = stock_code.encode('utf-8')
             if order_remark is not None:
                 remark = order_remark.encode('utf-8')
@@ -2220,7 +2226,7 @@ class tq:
                 data_json = json.loads(result_str)
                 if data_json.get("ErrorId") != "0":
                     print(f"下单{stock_code}数据错误: {data_json}")
-                    return -1;
+                    return -1
                 return data_json
             return -1
         except Exception as e:
@@ -2230,12 +2236,12 @@ class tq:
             return -1
 
     @classmethod
-    def subscribe_quote(cls, 
-                        stock_code: str, 
-                        period: str = '1d', 
-                        start_time: str = '', 
-                        end_time: str = '', 
-                        count: int = 0, 
+    def subscribe_quote(cls,
+                        stock_code: str,
+                        period: str = '1d',
+                        start_time: str = '',
+                        end_time: str = '',
+                        count: int = 0,
                         dividend_type: Optional[str] = None,  # 改为Optional类型
                         callback = None):
         """订阅单股行情数据回调 暂无实际功能"""
@@ -2248,7 +2254,7 @@ class tq:
         if not period:
             cls.close()
             raise ValueError("必传参数缺失：period不能为空，请指定数据周期（如'1d','1m','tick'等）")
-        
+
         if not check_stock_code_format(stock_code):
             tq.close()
             raise ValueError(f"{stock_code}异常")
@@ -2287,7 +2293,7 @@ class tq:
             raise ValueError("回调函数不能为空，请提供有效的回调函数")
 
         # 注册外套回调函数
-        if cls.m_is_init_data_transfer == False:
+        if not cls.m_is_init_data_transfer:
             CALLBACK_FUNC_TYPE = ctypes.CFUNCTYPE(None, ctypes.c_char_p)
             cls.data_transfer = CALLBACK_FUNC_TYPE(cls._data_callback_transfer)
             dll.Register_DataTransferFunc(cls._get_run_id(), cls.data_transfer)
@@ -2301,7 +2307,7 @@ class tq:
         cls.data_callback_func[cls._get_run_id()][stock_code] = callback
         try:
             timeout_ms = 5000
-            ptr = dll.SubscribeGPData(cls._get_run_id(), codestr, startimestr, endtimestr, periodstr, 
+            ptr = dll.SubscribeGPData(cls._get_run_id(), codestr, startimestr, endtimestr, periodstr,
             dividend_type_int, count, timeout_ms)
             if len(ptr) > 0:
                 result_str = ptr.decode('utf-8')
@@ -2313,13 +2319,13 @@ class tq:
                 cls.close()
                 raise ValueError(f"订阅{stock_code}失败: {json_res.get('Error')}")
             return result_str
-        except Exception as e:
+        except Exception:
             cls.close()
             raise ValueError(f"订阅{stock_code}异常")
-    
+
     @classmethod
-    def subscribe_hq(cls, 
-                     stock_list: List[str] = [], 
+    def subscribe_hq(cls,
+                     stock_list: list[str] = [],
                      callback = None):
         """订阅单股行情更新"""
         # 初始化连接
@@ -2328,28 +2334,28 @@ class tq:
         if not stock_list:
             cls.close()
             raise ValueError("必传参数缺失：stock_list不能为空，请提供合约代码")
-        
+
         if not check_stock_code_format(stock_list):
             tq.close()
             raise ValueError(f"{stock_list}异常")
-        
+
         _sub_hq_update = cls._sub_hq_update
         combined = list(set(cls._sub_hq_update) | set(stock_list))
         cls._sub_hq_update.clear()
         cls._sub_hq_update.extend(combined)
-      
+
         if len( cls._sub_hq_update) > 100:
             cls._sub_hq_update = _sub_hq_update
             tq.close()
             raise ValueError("订阅数大于100")
-        
+
         # 判断回调函数是否合法
-        if is_callback_func(callback) == False:
+        if not is_callback_func(callback):
             cls.close()
             raise ValueError("回调函数格式错误，请提供有效的回调函数")
 
         # 注册外套回调函数
-        if cls.m_is_init_data_transfer == False:
+        if not cls.m_is_init_data_transfer:
             CALLBACK_FUNC_TYPE = ctypes.CFUNCTYPE(None, ctypes.c_char_p)
             cls.data_transfer = CALLBACK_FUNC_TYPE(cls._data_callback_transfer)
             dll.Register_DataTransferFunc(cls._get_run_id(), cls.data_transfer)
@@ -2373,13 +2379,13 @@ class tq:
             for stock in stock_list:
                 cls.data_callback_func[cls._get_run_id()][stock] = callback
             return result_str
-        except Exception as e:
+        except Exception:
             print(f"订阅{stock_list}异常")
             return
 
     @classmethod
-    def unsubscribe_hq(cls, 
-                     stock_list: List[str] = []):
+    def unsubscribe_hq(cls,
+                     stock_list: list[str] = []):
         """订阅单股行情更新"""
         # 初始化连接
         cls._auto_initialize()
@@ -2387,11 +2393,11 @@ class tq:
         if not stock_list:
             cls.close()
             raise ValueError("必传参数缺失：stock_list不能为空，请提供合约代码")
-        
+
         if not check_stock_code_format(stock_list):
             tq.close()
             raise ValueError(f"{stock_list}异常")
-        
+
         a_set = set(cls._sub_hq_update)
         b_set = set(stock_list)
         _sub_hq_update = cls._sub_hq_update
@@ -2403,7 +2409,7 @@ class tq:
             tq.close()
             raise ValueError("订阅数大于100")
 
-        
+
         codestr = ','.join(stock_list)
         codestr = codestr.encode('utf-8')
         try:
@@ -2418,7 +2424,7 @@ class tq:
             if json_res.get("ErrorId") != "0":
                 print(f"取消订阅{stock_list}失败: {json_res.get('Error')}")
                 return
-            
+
             #去掉对应保存的回调函数
             for run_id in list(cls.data_callback_func.keys()):  # 用list()避免遍历中修改字典导致的异常
                 stock_dict = cls.data_callback_func[run_id]
@@ -2427,9 +2433,9 @@ class tq:
                     if stock in stock_dict:
                         del stock_dict[stock]
             return result_str
-        except Exception as e:
+        except Exception:
             return(f"取消订阅{stock_list}异常")
-        
+
     @classmethod
     def get_subscribe_hq_stock_list(cls):
         return cls._sub_hq_update
@@ -2450,12 +2456,12 @@ class tq:
             if json_res.get("ErrorId") != "0":
                 print(f"刷新缓存行情失败: {json_res.get('Error')}")
             return result_str
-        except Exception as e:
+        except Exception:
             return("刷新缓存行情异常")
-        
+
     @classmethod
     def refresh_kline(cls,
-                      stock_list: List[str] = [],
+                      stock_list: list[str] = [],
                       period: str = ''):
         """刷新K线缓存"""
         if not check_stock_code_format(stock_list):
@@ -2485,9 +2491,9 @@ class tq:
                 print(f"刷新K线缓存失败: {json_res.get('Error')}")
                 return
             return result_str
-        except Exception as e:
+        except Exception:
             print("刷新数据缓存异常")
-        
+
     @classmethod
     def download_file(cls,
                       stock_code: str = '',
@@ -2502,9 +2508,9 @@ class tq:
         if not down_time:
             cls.close()
             raise ValueError("下载日期不能为空")
-        
+
         down_time = _convert_time_format(down_time)
-        
+
         code_str = stock_code.encode('utf-8')
         time_str = down_time.encode('utf-8')
         try:
@@ -2520,9 +2526,9 @@ class tq:
                 print(f"下载文件失败: {json_res.get('Error')}")
                 return
             return result_str
-        except Exception as e:
+        except Exception:
             print("下载文件异常")
-        
+
     @classmethod
     def create_sector(cls,
                       block_code:str = '',
@@ -2551,9 +2557,9 @@ class tq:
             if json_res.get("ErrorId") != "0":
                 print(f"创建板块失败: {json_res.get('Error')}")
             return result_str
-        except Exception as e:
+        except Exception:
             print("创建板块异常")
-        
+
     @classmethod
     def delete_sector(cls,
                       block_code:str = ''):
@@ -2564,7 +2570,7 @@ class tq:
             print("板块简称不能未空")
             return
         code_str = block_code.encode('utf-8')
-        name_str = 'none'.encode('utf-8')
+        name_str = b'none'
         try:
             timeout_ms = 10000
             ptr = dll.UserBlockControl(cls._get_run_id(), 2, code_str, name_str, timeout_ms)
@@ -2577,9 +2583,9 @@ class tq:
             if json_res.get("ErrorId") != "0":
                 print(f"删除板块失败: {json_res.get('Error')}")
             return result_str
-        except Exception as e:
+        except Exception:
             print("删除板块异常")
-        
+
     @classmethod
     def rename_sector(cls,
                       block_code:str = '',
@@ -2593,7 +2599,7 @@ class tq:
         if not block_name:
             print("板块名称不能为空")
             return
-        
+
         code_str = block_code.encode('utf-8')
         name_str = block_name.encode('utf-8')
         try:
@@ -2608,9 +2614,9 @@ class tq:
             if json_res.get("ErrorId") != "0":
                 print(f"重命名板块失败: {json_res.get('Error')}")
             return result_str
-        except Exception as e:
+        except Exception:
             print("重命名板块异常")
-        
+
     @classmethod
     def clear_sector(cls,
                       block_code:str = ''):
@@ -2622,7 +2628,7 @@ class tq:
             return
 
         code_str = block_code.encode('utf-8')
-        name_str = 'none'.encode('utf-8')
+        name_str = b'none'
         try:
             timeout_ms = 10000
             ptr = dll.UserBlockControl(cls._get_run_id(), 4, code_str, name_str, timeout_ms)
@@ -2635,7 +2641,7 @@ class tq:
             if json_res.get("ErrorId") != "0":
                 print(f"清空板块失败: {json_res.get('Error')}")
             return result_str
-        except Exception as e:
+        except Exception:
             print("清空板块异常")
 
     @classmethod
@@ -2662,7 +2668,7 @@ class tq:
                 print(f"获取可转债信息失败: {json_res.get('Error')}")
                 return {}
             return json_res["Data"][0]
-        except Exception as e:
+        except Exception:
             print("获取可转债信息异常")
             return {}
 
@@ -2685,9 +2691,9 @@ class tq:
                 print(f"获取新股申购信息失败: {json_res.get('Error')}")
                 return []
             return json_res["Data"]
-        except Exception as e:
+        except Exception:
             print("获取新股申购信息异常")
             return []
-        
+
 
 

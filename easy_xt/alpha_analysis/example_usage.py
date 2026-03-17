@@ -11,11 +11,12 @@
 作者：王者quant
 """
 
+import os
+
 import numpy as np
 import pandas as pd
-import os
-from ic_ir_analysis import ICIRAnalyzer
 from factor_correlation import FactorCorrelationAnalyzer
+from ic_ir_analysis import ICIRAnalyzer
 from layered_backtest import LayeredBacktester
 
 # 配置报告输出目录

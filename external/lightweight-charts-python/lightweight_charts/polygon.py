@@ -1,13 +1,17 @@
 import asyncio
-import logging
 import datetime as dt
-import re
 import json
+import logging
+import re
 import urllib.request
-from typing import Literal, Union, List
+from typing import Any, Literal, Union
+
 import pandas as pd
 
-from .chart import Chart
+try:
+    from .chart import Chart
+except Exception:
+    Chart = Any
 
 try:
     import websockets
@@ -176,7 +180,7 @@ async def _websocket_connect(sec_type):
         await _send(sec_type, 'auth', api_key)
         while 1:
             response = await ws.recv()
-            data_list: List[dict] = json.loads(response)
+            data_list: list[dict] = json.loads(response)
             for i, data in enumerate(data_list):
                 if data['ev'] == 'status':
                     _log.info(f'{data["message"]}')

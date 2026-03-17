@@ -10,12 +10,13 @@
 4. 智能缓存（DuckDB）
 """
 
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Optional, Union
-from datetime import datetime, timedelta
 import warnings
+from zoneinfo import ZoneInfo
+from typing import Any, Optional, cast
 
+import pandas as pd
+
+_SH = ZoneInfo('Asia/Shanghai')
 warnings.filterwarnings('ignore')
 
 
@@ -84,7 +85,7 @@ class MoneyFlowAnalyzer:
                     result = duckdb_reader.conn.execute(query).fetchdf()
 
                     if not result.empty:
-                        print(f"[OK] 从DuckDB缓存读取行业资金流向数据")
+                        print("[OK] 从DuckDB缓存读取行业资金流向数据")
                         data_json = result.iloc[0]['raw_data']
                         df = pd.DataFrame(json.loads(data_json))
                         return df.head(top_n)
@@ -93,7 +94,7 @@ class MoneyFlowAnalyzer:
 
         # 从qstock获取数据
         try:
-            df = self.qs.ths_industry_money()
+            df = cast(Any, self.qs).ths_industry_money()
 
             if df.empty:
                 print("[INFO] 行业资金流向数据为空")
@@ -106,7 +107,7 @@ class MoneyFlowAnalyzer:
                 try:
                     import json
                     from datetime import datetime
-                    today = datetime.now().strftime('%Y-%m-%d')
+                    today = datetime.now(tz=_SH).strftime('%Y-%m-%d')
 
                     # 创建表（如果不存在）
                     create_table_sql = """
@@ -119,14 +120,13 @@ class MoneyFlowAnalyzer:
                     duckdb_reader.conn.execute(create_table_sql)
 
                     # 删除今日旧数据
-                    duckdb_reader.conn.execute(f"DELETE FROM ths_industry_money_flow WHERE date = '{today}'")
+                    duckdb_reader.conn.execute("DELETE FROM ths_industry_money_flow WHERE date = ?", [today])
 
                     # 保存为JSON字符串
                     data_json = df.to_json(orient='records', force_ascii=False)
-                    insert_sql = f"INSERT INTO ths_industry_money_flow VALUES ('{today}', '{data_json}')"
-                    duckdb_reader.conn.execute(insert_sql)
+                    duckdb_reader.conn.execute("INSERT INTO ths_industry_money_flow VALUES (?, ?)", [today, data_json])
 
-                    print(f"[OK] 已保存到DuckDB")
+                    print("[OK] 已保存到DuckDB")
                 except Exception as e:
                     print(f"[WARNING] 保存到DuckDB失败: {e}")
 
@@ -180,7 +180,7 @@ class MoneyFlowAnalyzer:
                     result = duckdb_reader.conn.execute(query).fetchdf()
 
                     if not result.empty:
-                        print(f"[OK] 从DuckDB缓存读取概念资金流向数据")
+                        print("[OK] 从DuckDB缓存读取概念资金流向数据")
                         data_json = result.iloc[0]['raw_data']
                         df = pd.DataFrame(json.loads(data_json))
                         return df.head(top_n)
@@ -189,7 +189,7 @@ class MoneyFlowAnalyzer:
 
         # 从qstock获取数据
         try:
-            df = self.qs.ths_concept_money()
+            df = cast(Any, self.qs).ths_concept_money()
 
             if df.empty:
                 print("[INFO] 概念资金流向数据为空")
@@ -202,7 +202,7 @@ class MoneyFlowAnalyzer:
                 try:
                     import json
                     from datetime import datetime
-                    today = datetime.now().strftime('%Y-%m-%d')
+                    today = datetime.now(tz=_SH).strftime('%Y-%m-%d')
 
                     # 创建表（如果不存在）
                     create_table_sql = """
@@ -215,14 +215,13 @@ class MoneyFlowAnalyzer:
                     duckdb_reader.conn.execute(create_table_sql)
 
                     # 删除今日旧数据
-                    duckdb_reader.conn.execute(f"DELETE FROM ths_concept_money_flow WHERE date = '{today}'")
+                    duckdb_reader.conn.execute("DELETE FROM ths_concept_money_flow WHERE date = ?", [today])
 
                     # 保存为JSON字符串
                     data_json = df.to_json(orient='records', force_ascii=False)
-                    insert_sql = f"INSERT INTO ths_concept_money_flow VALUES ('{today}', '{data_json}')"
-                    duckdb_reader.conn.execute(insert_sql)
+                    duckdb_reader.conn.execute("INSERT INTO ths_concept_money_flow VALUES (?, ?)", [today, data_json])
 
-                    print(f"[OK] 已保存到DuckDB")
+                    print("[OK] 已保存到DuckDB")
                 except Exception as e:
                     print(f"[WARNING] 保存到DuckDB失败: {e}")
 
@@ -232,7 +231,7 @@ class MoneyFlowAnalyzer:
             print(f"[ERROR] 获取概念资金流向失败: {e}")
             return pd.DataFrame()
 
-    def update_ths_money_flow(self, duckdb_reader=None) -> Dict[str, int]:
+    def update_ths_money_flow(self, duckdb_reader=None) -> dict[str, int]:
         """
         更新同花顺行业/概念资金流向数据到DuckDB
 
@@ -253,16 +252,15 @@ class MoneyFlowAnalyzer:
         print("\n[1] 更新行业资金流向")
         print("-" * 70)
         try:
-            df_industry = self.qs.ths_industry_money()
+            df_industry = cast(Any, self.qs).ths_industry_money()
 
             if not df_industry.empty:
                 print(f"[OK] 下载成功！共 {len(df_industry)} 个行业")
 
                 # 保存到DuckDB
                 if duckdb_reader is not None and duckdb_reader.conn is not None:
-                    import json
                     from datetime import datetime
-                    today = datetime.now().strftime('%Y-%m-%d')
+                    today = datetime.now(tz=_SH).strftime('%Y-%m-%d')
 
                     # 创建表
                     create_table_sql = """
@@ -275,14 +273,13 @@ class MoneyFlowAnalyzer:
                     duckdb_reader.conn.execute(create_table_sql)
 
                     # 删除今日旧数据
-                    duckdb_reader.conn.execute(f"DELETE FROM ths_industry_money_flow WHERE date = '{today}'")
+                    duckdb_reader.conn.execute("DELETE FROM ths_industry_money_flow WHERE date = ?", [today])
 
                     # 保存为JSON字符串
                     data_json = df_industry.to_json(orient='records', force_ascii=False)
-                    insert_sql = f"INSERT INTO ths_industry_money_flow VALUES ('{today}', '{data_json}')"
-                    duckdb_reader.conn.execute(insert_sql)
+                    duckdb_reader.conn.execute("INSERT INTO ths_industry_money_flow VALUES (?, ?)", [today, data_json])
 
-                    print(f"[OK] 已保存到DuckDB")
+                    print("[OK] 已保存到DuckDB")
                     result['industry'] = len(df_industry)
 
                     # 显示TOP10
@@ -302,16 +299,15 @@ class MoneyFlowAnalyzer:
         print("\n\n[2] 更新概念资金流向")
         print("-" * 70)
         try:
-            df_concept = self.qs.ths_concept_money()
+            df_concept = cast(Any, self.qs).ths_concept_money()
 
             if not df_concept.empty:
                 print(f"[OK] 下载成功！共 {len(df_concept)} 个概念")
 
                 # 保存到DuckDB
                 if duckdb_reader is not None and duckdb_reader.conn is not None:
-                    import json
                     from datetime import datetime
-                    today = datetime.now().strftime('%Y-%m-%d')
+                    today = datetime.now(tz=_SH).strftime('%Y-%m-%d')
 
                     # 创建表
                     create_table_sql = """
@@ -324,14 +320,13 @@ class MoneyFlowAnalyzer:
                     duckdb_reader.conn.execute(create_table_sql)
 
                     # 删除今日旧数据
-                    duckdb_reader.conn.execute(f"DELETE FROM ths_concept_money_flow WHERE date = '{today}'")
+                    duckdb_reader.conn.execute("DELETE FROM ths_concept_money_flow WHERE date = ?", [today])
 
                     # 保存为JSON字符串
                     data_json = df_concept.to_json(orient='records', force_ascii=False)
-                    insert_sql = f"INSERT INTO ths_concept_money_flow VALUES ('{today}', '{data_json}')"
-                    duckdb_reader.conn.execute(insert_sql)
+                    duckdb_reader.conn.execute("INSERT INTO ths_concept_money_flow VALUES (?, ?)", [today, data_json])
 
-                    print(f"[OK] 已保存到DuckDB")
+                    print("[OK] 已保存到DuckDB")
                     result['concept'] = len(df_concept)
 
                     # 显示TOP10
@@ -382,11 +377,10 @@ class MoneyFlowAnalyzer:
                 """).fetchdf()
 
                 if not check_table.empty:
-                    query = f"""
-                    SELECT * FROM north_money_flow
-                    ORDER BY date DESC
-                    LIMIT {days}
-                    """
+                    query = (
+                    "SELECT * FROM north_money_flow ORDER BY date DESC LIMIT " + str(days)
+
+    )
                     df_cached = duckdb_reader.conn.execute(query).fetchdf()
 
                     if not df_cached.empty and len(df_cached) >= days:
@@ -397,7 +391,7 @@ class MoneyFlowAnalyzer:
 
         # 从qstock获取数据
         try:
-            df = self.qs.north_money_flow()
+            df = cast(Any, self.qs).north_money_flow()
 
             if df.empty:
                 print("[INFO] 北向资金流向数据为空")
@@ -408,7 +402,6 @@ class MoneyFlowAnalyzer:
             # 保存到DuckDB
             if use_cache and duckdb_reader is not None and duckdb_reader.conn is not None:
                 try:
-                    from datetime import datetime
 
                     # 创建表
                     create_table_sql = """
@@ -422,13 +415,12 @@ class MoneyFlowAnalyzer:
 
                     # 插入数据
                     for _, row in df.iterrows():
-                        insert_sql = f"""
-                        INSERT OR REPLACE INTO north_money_flow VALUES
-                        ('{row['date']}', {row['净流入(亿)']})
-                        """
-                        duckdb_reader.conn.execute(insert_sql)
+                        duckdb_reader.conn.execute(
+                        "INSERT OR REPLACE INTO north_money_flow VALUES (?, ?)",
+                        [row['date'], row['净流入(亿)']],
+                    )
 
-                    print(f"[OK] 已保存到DuckDB")
+                    print("[OK] 已保存到DuckDB")
                 except Exception as e:
                     print(f"[WARNING] 保存到DuckDB失败: {e}")
 
@@ -466,7 +458,7 @@ class MoneyFlowAnalyzer:
             raise ImportError("请先安装qstock: pip install qstock")
 
         try:
-            df = self.qs.north_money_sector()
+            df = cast(Any, self.qs).north_money_sector()
 
             if df.empty:
                 print("[INFO] 北向资金行业流向数据为空")
@@ -480,7 +472,7 @@ class MoneyFlowAnalyzer:
             print(f"[ERROR] 获取北向资金行业流向失败: {e}")
             return pd.DataFrame()
 
-    def get_north_money_stock(self, stock_code: str = None, top_n: int = 20) -> pd.DataFrame:
+    def get_north_money_stock(self, stock_code: Optional[str] = None, top_n: int = 20) -> pd.DataFrame:
         """
         获取北向资金个股流向
 
@@ -503,7 +495,7 @@ class MoneyFlowAnalyzer:
             raise ImportError("请先安装qstock: pip install qstock")
 
         try:
-            df = self.qs.north_money_stock()
+            df = cast(Any, self.qs).north_money_stock()
 
             if df.empty:
                 print("[INFO] 北向资金个股流向数据为空")
@@ -526,7 +518,7 @@ class MoneyFlowAnalyzer:
     # 同花顺个股资金流向
     # ============================================================
 
-    def get_ths_stock_money_flow(self, stock_code: str = None,
+    def get_ths_stock_money_flow(self, stock_code: Optional[str] = None,
                                   top_n: int = 20,
                                   use_cache: bool = True,
                                   duckdb_reader=None) -> pd.DataFrame:
@@ -564,16 +556,12 @@ class MoneyFlowAnalyzer:
 
                     if not check_table.empty:
                         from datetime import datetime
-                        today = datetime.now().strftime('%Y-%m-%d')
-                        query = f"""
-                        SELECT raw_data FROM ths_stock_money_flow
-                        WHERE date = '{today}'
-                        LIMIT 1
-                        """
-                        result = duckdb_reader.conn.execute(query).fetchdf()
+                        today = datetime.now(tz=_SH).strftime('%Y-%m-%d')
+                        query = "SELECT raw_data FROM ths_stock_money_flow WHERE date = ? LIMIT 1"
+                        result = duckdb_reader.conn.execute(query, [today]).fetchdf()
 
                         if not result.empty:
-                            print(f"[OK] 从DuckDB缓存读取个股资金流向数据")
+                            print("[OK] 从DuckDB缓存读取个股资金流向数据")
                             import json
                             data_json = result.iloc[0]['raw_data']
                             df = pd.DataFrame(json.loads(data_json))
@@ -583,7 +571,7 @@ class MoneyFlowAnalyzer:
 
             # 从qstock获取全市场数据
             try:
-                df = self.qs.ths_stock_money()
+                df = cast(Any, self.qs).ths_stock_money()
 
                 if df.empty:
                     print("[INFO] 个股资金流向数据为空")
@@ -596,7 +584,7 @@ class MoneyFlowAnalyzer:
                     try:
                         import json
                         from datetime import datetime
-                        today = datetime.now().strftime('%Y-%m-%d')
+                        today = datetime.now(tz=_SH).strftime('%Y-%m-%d')
 
                         # 创建表
                         create_table_sql = """
@@ -609,14 +597,14 @@ class MoneyFlowAnalyzer:
                         duckdb_reader.conn.execute(create_table_sql)
 
                         # 删除今日旧数据
-                        duckdb_reader.conn.execute(f"DELETE FROM ths_stock_money_flow WHERE date = '{today}'")
+                        duckdb_reader.conn.execute("DELETE FROM ths_stock_money_flow WHERE date = ?", [today])
 
                         # 保存为JSON字符串
                         data_json = df.to_json(orient='records', force_ascii=False)
-                        insert_sql = f"INSERT INTO ths_stock_money_flow VALUES ('{today}', '{data_json}')"
-                        duckdb_reader.conn.execute(insert_sql)
+                        insert_sql = "INSERT INTO ths_stock_money_flow VALUES (?, ?)"
+                        duckdb_reader.conn.execute(insert_sql, [today, data_json])
 
-                        print(f"[OK] 已保存到DuckDB")
+                        print("[OK] 已保存到DuckDB")
                     except Exception as e:
                         print(f"[WARNING] 保存到DuckDB失败: {e}")
 
@@ -628,7 +616,7 @@ class MoneyFlowAnalyzer:
         else:
             # 指定了股票代码，从全市场数据中筛选
             try:
-                df_all = self.qs.ths_stock_money()
+                df_all = cast(Any, self.qs).ths_stock_money()
 
                 if df_all.empty:
                     return pd.DataFrame()
@@ -675,13 +663,13 @@ def get_north_money_sector(top_n: int = 20) -> pd.DataFrame:
     return analyzer.get_north_money_sector(top_n)
 
 
-def get_north_money_stock(stock_code: str = None, top_n: int = 20) -> pd.DataFrame:
+def get_north_money_stock(stock_code: Optional[str] = None, top_n: int = 20) -> pd.DataFrame:
     """快捷函数：获取北向资金个股流向"""
     analyzer = MoneyFlowAnalyzer()
     return analyzer.get_north_money_stock(stock_code, top_n)
 
 
-def get_ths_stock_money_flow(stock_code: str = None, top_n: int = 20) -> pd.DataFrame:
+def get_ths_stock_money_flow(stock_code: Optional[str] = None, top_n: int = 20) -> pd.DataFrame:
     """快捷函数：获取同花顺个股资金流向"""
     analyzer = MoneyFlowAnalyzer()
     return analyzer.get_ths_stock_money_flow(stock_code, top_n)

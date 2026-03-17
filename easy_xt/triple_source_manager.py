@@ -16,12 +16,15 @@
 5. 性能监控
 """
 
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Optional, Union
-from datetime import datetime, timedelta
-from functools import wraps
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_SH = ZoneInfo('Asia/Shanghai')
+from functools import wraps
+from typing import Any, Optional, Union, cast
+
+import pandas as pd
 
 
 def cache_result(ttl_seconds=3600):
@@ -92,7 +95,7 @@ class TripleSourceDataManager:
     def _check_qmt(self) -> bool:
         """检查QMT是否可用"""
         try:
-            import xtdata
+            import xtquant.xtdata as xtdata  # noqa: F401
             return True
         except ImportError:
             return False
@@ -130,7 +133,7 @@ class TripleSourceDataManager:
         # QMT
         if self.sources['qmt']:
             try:
-                import xtdata
+                import xtquant.xtdata as xtdata
                 self.xt = xtdata
                 self.xt.connect()
             except Exception as e:
@@ -169,7 +172,7 @@ class TripleSourceDataManager:
 
     @cache_result(ttl_seconds=60)
     def get_market_data(self,
-                       stock_codes: Union[str, List[str]],
+                       stock_codes: Union[str, list[str]],
                        start_time: str,
                        end_time: str,
                        period: str = '1d') -> pd.DataFrame:
@@ -210,7 +213,8 @@ class TripleSourceDataManager:
             try:
                 if isinstance(stock_codes, str):
                     code = stock_codes.split('.')[0]
-                    df = self.qs.get_data(code, start=start_time, end=end_time)
+                    qs_mod = cast(Any, self.qs)
+                    df = qs_mod.get_data(code, start=start_time, end=end_time)
                     if df is not None and not df.empty:
                         df['stock_code'] = stock_codes
                         self.stats['qstock_hits'] += 1
@@ -245,7 +249,7 @@ class TripleSourceDataManager:
     # ============================================================
 
     @cache_result(ttl_seconds=3600)
-    def get_sector_list(self) -> Dict[str, List[str]]:
+    def get_sector_list(self) -> dict[str, list[str]]:
         """
         获取板块列表
 
@@ -259,7 +263,8 @@ class TripleSourceDataManager:
         # QMT行业板块
         if self.sources['qmt']:
             try:
-                sectors = self.xt.get_sector_list()
+                xt_mod = cast(Any, self.xt)
+                sectors = xt_mod.get_sector_list()
                 if sectors:
                     result['industry'] = sectors
                     self.stats['qmt_hits'] += 1
@@ -275,7 +280,8 @@ class TripleSourceDataManager:
         # akshare
         if self.sources['akshare']:
             try:
-                df = self.ak.stock_board_industry_name_em()
+                ak_mod = cast(Any, self.ak)
+                df = ak_mod.stock_board_industry_name_em()
                 if not df.empty:
                     result['industry'] = df['板块名称'].tolist()
                     self.stats['akshare_hits'] += 1
@@ -304,11 +310,12 @@ class TripleSourceDataManager:
         # QMT
         if self.sources['qmt']:
             try:
-                stock_list = self.xt.get_stock_list_in_sector(sector_name)
+                xt_mod = cast(Any, self.xt)
+                stock_list = xt_mod.get_stock_list_in_sector(sector_name)
                 if stock_list:
                     df = self.get_market_data(stock_list,
-                                           datetime.now().strftime('%Y%m%d'),
-                                           datetime.now().strftime('%Y%m%d'))
+                                           datetime.now(tz=_SH).strftime('%Y%m%d'),
+                                           datetime.now(tz=_SH).strftime('%Y%m%d'))
                     self.stats['qmt_hits'] += 1
                     return df
             except Exception:
@@ -317,7 +324,8 @@ class TripleSourceDataManager:
         # qstock (指数成分股)
         if self.sources['qstock'] and sector_type == 'index':
             try:
-                df = self.qs.index_member(sector_name)
+                qs_mod = cast(Any, self.qs)
+                df = qs_mod.index_member(sector_name)
                 if df is not None and not df.empty:
                     self.stats['qstock_hits'] += 1
                     return df
@@ -327,10 +335,11 @@ class TripleSourceDataManager:
         # akshare
         if self.sources['akshare']:
             try:
+                ak_mod = cast(Any, self.ak)
                 if sector_type == 'industry':
-                    df = self.ak.stock_board_industry_cons_em(symbol=sector_name)
+                    df = ak_mod.stock_board_industry_cons_em(symbol=sector_name)
                 else:
-                    df = self.ak.stock_board_concept_cons_em(symbol=sector_name)
+                    df = ak_mod.stock_board_concept_cons_em(symbol=sector_name)
 
                 if not df.empty:
                     df = df.rename(columns={'代码': 'stock_code', '名称': 'stock_name'})
@@ -366,7 +375,8 @@ class TripleSourceDataManager:
             try:
                 from money_flow import MoneyFlowAnalyzer
                 analyzer = MoneyFlowAnalyzer()
-                df = analyzer.get_stock_money_flow(stock_code, days)
+                analyzer_obj = cast(Any, analyzer)
+                df = analyzer_obj.get_stock_money_flow(stock_code, days)
                 if not df.empty:
                     self.stats['akshare_hits'] += 1
                     return df
@@ -378,7 +388,8 @@ class TripleSourceDataManager:
             try:
                 code = stock_code.split('.')[0]
                 # qstock的接口：需要w_list参数
-                df = self.qs.moneyflow_stock(code, w_list=[5, 10, 20])
+                qs_mod = cast(Any, self.qs)
+                df = qs_mod.moneyflow_stock(code, w_list=[5, 10, 20])
                 if df is not None and not df.empty:
                     df['stock_code'] = stock_code
                     self.stats['qstock_hits'] += 1
@@ -393,7 +404,7 @@ class TripleSourceDataManager:
     # ============================================================
 
     @cache_result(ttl_seconds=43200)  # 12小时
-    def get_dragon_tiger(self, date: str = None) -> pd.DataFrame:
+    def get_dragon_tiger(self, date: Optional[str] = None) -> pd.DataFrame:
         """
         获取龙虎榜
 
@@ -408,7 +419,8 @@ class TripleSourceDataManager:
         # qstock优先
         if self.sources['qstock'] and 'qstock' in self.priority:
             try:
-                df = self.qs.stock_billboard()
+                qs_mod = cast(Any, self.qs)
+                df = qs_mod.stock_billboard()
                 if df is not None and not df.empty:
                     self.stats['qstock_hits'] += 1
                     return df
@@ -420,7 +432,7 @@ class TripleSourceDataManager:
             try:
                 from dragon_tiger import DragonTigerData
                 dt = DragonTigerData()
-                df = dt.get_daily_list(date)
+                df = dt.get_daily_list(date or "")
                 if not df.empty:
                     self.stats['akshare_hits'] += 1
                     return df
@@ -450,7 +462,8 @@ class TripleSourceDataManager:
         if self.sources['qstock']:
             try:
                 code = stock_code.split('.')[0]
-                df = self.qs.stock_indicator(code)
+                qs_mod = cast(Any, self.qs)
+                df = qs_mod.stock_indicator(code)
                 if df is not None and not df.empty:
                     df['stock_code'] = stock_code
                     self.stats['qstock_hits'] += 1
@@ -461,9 +474,9 @@ class TripleSourceDataManager:
         # akshare备用
         if self.sources['akshare']:
             try:
-                from factor_library import FactorLibrary
-                lib = FactorLibrary()
-                df = lib.get_quality_factors([stock_code])
+                from factor_library import EasyFactor
+                lib = EasyFactor(duckdb_path='D:/StockData/stock_data.ddb')
+                df = lib.get_all_factors(stock_code, '20240101')
                 if not df.empty:
                     self.stats['akshare_hits'] += 1
                     return df
@@ -477,7 +490,7 @@ class TripleSourceDataManager:
     # ============================================================
 
     @cache_result(ttl_seconds=10)  # 10秒缓存
-    def get_realtime_data(self, stock_codes: Union[str, List[str]] = None) -> pd.DataFrame:
+    def get_realtime_data(self, stock_codes: Optional[Union[str, list[str]]] = None) -> pd.DataFrame:
         """
         获取实时行情
 
@@ -495,17 +508,29 @@ class TripleSourceDataManager:
                 if stock_codes:
                     if isinstance(stock_codes, str):
                         stock_codes = [stock_codes]
-                    df = self.xt.get_market_data_ex(stock_codes, period='tick')
-                    if not df.empty:
+                    xt_mod = cast(Any, self.xt)
+                    df_any = xt_mod.get_market_data_ex(stock_codes, period='tick')
+                    if isinstance(df_any, pd.DataFrame) and not df_any.empty:
                         self.stats['qmt_hits'] += 1
-                        return df
+                        return df_any
+                    if isinstance(df_any, dict) and df_any:
+                        frames = [v for v in df_any.values() if isinstance(v, pd.DataFrame) and not v.empty]
+                        if frames:
+                            df_merged = pd.concat(frames, axis=0)
+                            self.stats['qmt_hits'] += 1
+                            return df_merged
+                    if isinstance(df_any, pd.Series) and not df_any.empty:
+                        df_series = df_any.to_frame().T
+                        self.stats['qmt_hits'] += 1
+                        return df_series
             except Exception:
                 pass
 
         # qstock备用
         if self.sources['qstock']:
             try:
-                df = self.qs.realtime_data()
+                qs_mod = cast(Any, self.qs)
+                df = qs_mod.realtime_data()
                 if df is not None and not df.empty:
                     if stock_codes:
                         codes = [c.split('.')[0] for c in stock_codes] if isinstance(stock_codes, list) else [stock_codes.split('.')[0]]
@@ -526,7 +551,7 @@ class TripleSourceDataManager:
         self.cache.clear()
         print("[OK] 缓存已清空")
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         """获取使用统计"""
         total_hits = sum([v for k, v in self.stats.items() if k.endswith('_hits')])
 

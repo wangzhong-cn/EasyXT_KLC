@@ -13,11 +13,10 @@
 - 获取板块资金流向
 """
 
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Optional, Union
-from datetime import datetime
 import warnings
+from typing import Any, Optional, cast
+
+import pandas as pd
 
 warnings.filterwarnings('ignore')
 
@@ -64,7 +63,8 @@ class SectorData:
 
         try:
             # 获取行业板块
-            df = self.ak.stock_board_industry_name_em()
+            ak_mod = cast(Any, self.ak)
+            df = ak_mod.stock_board_industry_name_em()
 
             # 重命名列
             df = df.rename(columns={
@@ -99,7 +99,8 @@ class SectorData:
 
         try:
             # 获取概念板块
-            df = self.ak.stock_board_concept_name_em()
+            ak_mod = cast(Any, self.ak)
+            df = ak_mod.stock_board_concept_name_em()
 
             # 重命名列
             df = df.rename(columns={
@@ -122,7 +123,7 @@ class SectorData:
             print(f"[ERROR] 获取概念板块失败: {e}")
             return pd.DataFrame()
 
-    def get_all_sectors(self) -> Dict[str, pd.DataFrame]:
+    def get_all_sectors(self) -> dict[str, pd.DataFrame]:
         """
         获取所有板块列表
 
@@ -172,10 +173,11 @@ class SectorData:
             raise ImportError("请先安装akshare: pip install akshare")
 
         try:
+            ak_mod = cast(Any, self.ak)
             if sector_type == 'industry':
-                df = self.ak.stock_board_industry_cons_em(symbol=sector_name)
+                df = ak_mod.stock_board_industry_cons_em(symbol=sector_name)
             else:
-                df = self.ak.stock_board_concept_cons_em(symbol=sector_name)
+                df = ak_mod.stock_board_concept_cons_em(symbol=sector_name)
 
             # 重命名列
             df = df.rename(columns={
@@ -340,8 +342,8 @@ class SectorData:
     def get_sector_history(self, sector_name: str,
                           sector_type: str = 'industry',
                           period: str = 'daily',
-                          start_date: str = None,
-                          end_date: str = None) -> pd.DataFrame:
+                          start_date: Optional[str] = None,
+                          end_date: Optional[str] = None) -> pd.DataFrame:
         """
         获取板块历史行情
 
@@ -359,19 +361,20 @@ class SectorData:
             raise ImportError("请先安装akshare: pip install akshare")
 
         try:
+            ak_mod = cast(Any, self.ak)
             if sector_type == 'industry':
-                df = self.ak.stock_board_industry_history_em(
+                df = ak_mod.stock_board_industry_history_em(
                     symbol=sector_name,
                     period=period,
-                    start_date=start_date,
-                    end_date=end_date
+                    start_date=start_date or "",
+                    end_date=end_date or ""
                 )
             else:
-                df = self.ak.stock_board_concept_history_em(
+                df = ak_mod.stock_board_concept_history_em(
                     symbol=sector_name,
                     period=period,
-                    start_date=start_date,
-                    end_date=end_date
+                    start_date=start_date or "",
+                    end_date=end_date or ""
                 )
 
             # 重命名列
@@ -398,7 +401,7 @@ class SectorData:
     # 智能搜索
     # ============================================================
 
-    def search_sector(self, keyword: str, sector_type: str = None) -> Dict[str, pd.DataFrame]:
+    def search_sector(self, keyword: str, sector_type: Optional[str] = None) -> dict[str, pd.DataFrame]:
         """
         搜索板块
 

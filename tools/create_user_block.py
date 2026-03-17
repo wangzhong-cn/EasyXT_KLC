@@ -4,8 +4,8 @@
 """
 
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent
@@ -42,7 +42,7 @@ def create_custom_sector():
                 show=True
             )
 
-            print(f"\n  [OK] 创建成功")
+            print("\n  [OK] 创建成功")
             print(f"  返回结果: {result}")
 
         except Exception as e:
@@ -61,12 +61,12 @@ def create_custom_sector():
             retrieved_stocks = tq.get_stock_list_in_sector(sector_name)
 
             if retrieved_stocks and len(retrieved_stocks) > 0:
-                print(f"  [OK] 板块创建成功！")
+                print("  [OK] 板块创建成功！")
                 print(f"  板块名称: '{sector_name}'")
                 print(f"  股票数量: {len(retrieved_stocks)}")
                 print(f"  股票列表: {retrieved_stocks}")
             else:
-                print(f"  [WARN] 板块创建后仍无法读取")
+                print("  [WARN] 板块创建后仍无法读取")
 
         except Exception as e:
             print(f"  [ERROR] 验证失败: {e}")
@@ -86,8 +86,8 @@ def create_custom_sector():
                 if sector_name in user_sectors:
                     print(f"\n  [成功] '{sector_name}' 已在用户板块列表中")
             else:
-                print(f"  [INFO] 用户板块列表仍为空")
-                print(f"  [提示] 这可能需要重启通达信才能显示")
+                print("  [INFO] 用户板块列表仍为空")
+                print("  [提示] 这可能需要重启通达信才能显示")
 
         except Exception as e:
             print(f"  [ERROR] {e}")

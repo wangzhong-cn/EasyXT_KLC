@@ -4,8 +4,8 @@
 运行此文件启动因子分析平台，通过菜单选择功能
 """
 
-import sys
 import os
+import sys
 
 # 添加当前目录到Python路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -14,8 +14,8 @@ if current_dir not in sys.path:
 
 import numpy as np
 import pandas as pd
-from ic_ir_analysis import ICIRAnalyzer
 from factor_correlation import FactorCorrelationAnalyzer
+from ic_ir_analysis import ICIRAnalyzer
 from layered_backtest import LayeredBacktester
 
 # 配置报告输出目录
@@ -94,7 +94,7 @@ def load_data_from_file():
     try:
         price_data = pd.read_csv(price_file, index_col=0, parse_dates=True)
         factor_data = pd.read_csv(factor_file, index_col=0, parse_dates=True)
-        print(f"\n[OK] 数据加载成功！")
+        print("\n[OK] 数据加载成功！")
         print(f"  价格数据：{price_data.shape}")
         print(f"  因子数据：{factor_data.shape}\n")
         return price_data, factor_data
@@ -127,7 +127,7 @@ def ic_ir_analysis(price_data, factor_dict):
     try:
         period = input("请输入持有期数（默认1）: ").strip()
         period = int(period) if period else 1
-    except:
+    except ValueError:
         period = 1
 
     # 执行分析
@@ -176,7 +176,7 @@ def factor_correlation_analysis(price_data, factor_dict):
     try:
         threshold = input("请输入相关性阈值（默认0.7）: ").strip()
         threshold = float(threshold) if threshold else 0.7
-    except:
+    except ValueError:
         threshold = 0.7
 
     # 执行分析
@@ -219,13 +219,13 @@ def layered_backtest(price_data, factor_dict):
     try:
         n_layers = input("请输入分层数量（默认5）: ").strip()
         n_layers = int(n_layers) if n_layers else 5
-    except:
+    except ValueError:
         n_layers = 5
 
     try:
         period = input("请输入持有期数（默认1）: ").strip()
         period = int(period) if period else 1
-    except:
+    except ValueError:
         period = 1
 
     # 执行回测

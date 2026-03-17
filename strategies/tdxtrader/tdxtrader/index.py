@@ -1,9 +1,11 @@
 import time
-from tdxtrader.file import clear_file_content
-from tdxtrader.trader import create_trader
-from tdxtrader.order import create_order, cancel_order
-from tdxtrader.logger import logger, add_wechat_handler
+
 from tdxtrader.anis import RED, RESET
+from tdxtrader.file import clear_file_content
+from tdxtrader.logger import add_wechat_handler, logger
+from tdxtrader.order import cancel_order, create_order
+from tdxtrader.trader import create_trader
+
 
 def start(account_id, mini_qmt_path, file_path, buy_sign, sell_sign, buy_event, sell_event, interval=1, cancel_after=None, wechat_webhook_url=None, block_files=None):
 
@@ -24,5 +26,5 @@ def start(account_id, mini_qmt_path, file_path, buy_sign, sell_sign, buy_event, 
 
         except Exception as e:
             logger.error(f"{RED}【程序错误】{RESET}{e}")
-        
+
         time.sleep(interval)
