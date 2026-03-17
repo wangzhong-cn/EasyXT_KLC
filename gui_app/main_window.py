@@ -30,8 +30,8 @@ try:
 except ImportError:
     pass
 
-from PyQt5.QtCore import QCoreApplication, QProcess, QProcessEnvironment, QSettings, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import QCoreApplication, QProcess, QProcessEnvironment, QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt5.QtGui import QDesktopServices, QFont
 from PyQt5.QtWidgets import (
     QApplication,
     QLabel,
@@ -431,6 +431,12 @@ class MainWindow(QMainWindow):
             "quote_ts": None,
             "symbol": "",
             "source": "",
+        }
+        self._release_gate_status = {
+            "strict_gate_pass": None,
+            "P0_open_count": None,
+            "active_critical_high": None,
+            "duckdb_write_probe_detail": {},
         }
         self._last_backtest_engine_log: Optional[str] = None
         self._last_realtime_probe_log: Optional[str] = None
@@ -1355,6 +1361,11 @@ class MainWindow(QMainWindow):
         self.perf_status.setStyleSheet("color: #888; padding-left: 8px;")
         self.status_bar.addPermanentWidget(self.perf_status)
         setattr(self.perf_status, "mousePressEvent", self.on_perf_status_clicked)
+        self.release_gate_status = QLabel("发布门禁: 待检测")
+        self.release_gate_status.setStyleSheet("color:#999; padding-left:8px;")
+        self.release_gate_status.setToolTip("读取 artifacts/p0_metrics_latest.json")
+        setattr(self.release_gate_status, "mousePressEvent", self.on_release_gate_status_clicked)
+        self.status_bar.addPermanentWidget(self.release_gate_status)
         self.status_bar.showMessage("就绪")
 
         # 检查MiniQMT连接状态（启动时延迟1秒检查）
@@ -1364,6 +1375,9 @@ class MainWindow(QMainWindow):
         self.connection_check_timer = QTimer()
         self.connection_check_timer.timeout.connect(self._start_connection_check)
         self.connection_check_timer.start(self._check_base_interval)
+        self.release_gate_timer = QTimer()
+        self.release_gate_timer.timeout.connect(self._refresh_release_gate_status)
+        self.release_gate_timer.start(int(os.environ.get("EASYXT_RELEASE_GATE_REFRESH_MS", "10000")))
         autostart_services = os.environ.get("EASYXT_AUTOSTART_SERVICES", "0") in (
             "1",
             "true",
@@ -1373,6 +1387,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(3000, self.start_all_services)
         self._render_realtime_pipeline_status()
         self._render_backtest_engine_status()
+        self._refresh_release_gate_status()
 
     def on_connection_status_clicked(self, event):
         """连接状态标签被点击事件"""
@@ -1430,6 +1445,29 @@ class MainWindow(QMainWindow):
     def on_perf_status_clicked(self, event):
         text = self._build_perf_detail_text()
         QMessageBox.information(self, "启动性能详情", text)
+
+    def on_release_gate_status_clicked(self, event):
+        gate = self._release_gate_status or {}
+        detail = gate.get("duckdb_write_probe_detail") if isinstance(gate, dict) else {}
+        detail = detail if isinstance(detail, dict) else {}
+        metrics_path = os.path.join(project_path, "artifacts", "p0_metrics_latest.json")
+        action = str(detail.get("recommended_action") or "").strip()
+        if action:
+            QApplication.clipboard().setText(action)
+        lines = [
+            f"strict_gate_pass: {gate.get('strict_gate_pass')}",
+            f"P0_open_count: {gate.get('P0_open_count')}",
+            f"active_critical_high: {gate.get('active_critical_high')}",
+            f"duckdb_write.status: {detail.get('status') or 'N/A'}",
+            f"duckdb_write.db_path: {detail.get('db_path') or 'N/A'}",
+            f"duckdb_write.error_type: {detail.get('error_type') or 'N/A'}",
+            f"duckdb_write.message: {detail.get('message') or 'N/A'}",
+            f"推荐动作(已复制): {action or 'N/A'}",
+            f"门禁文件: {metrics_path}",
+        ]
+        if os.path.exists(metrics_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(metrics_path))
+        QMessageBox.information(self, "发布门禁详情", "\n".join(lines))
 
     def on_backtest_engine_status_clicked(self, event):
         status = self._backtest_engine_status or {}
@@ -1609,6 +1647,54 @@ class MainWindow(QMainWindow):
         self.realtime_pipeline_status.setText(text)
         self.realtime_pipeline_status.setStyleSheet(f"color:{color}; padding-left:8px;")
         self.realtime_pipeline_status.setToolTip(tooltip)
+
+    def _refresh_release_gate_status(self):
+        metrics_path = os.path.join(project_path, "artifacts", "p0_metrics_latest.json")
+        if not os.path.exists(metrics_path):
+            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}}
+            self._render_release_gate_status()
+            return
+        try:
+            with open(metrics_path, encoding="utf-8") as f:
+                gate = json.load(f)
+            self._release_gate_status = gate if isinstance(gate, dict) else {}
+        except Exception:
+            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}}
+        self._render_release_gate_status()
+
+    def _render_release_gate_status(self):
+        if not hasattr(self, "release_gate_status") or self.release_gate_status is None:
+            return
+        gate = self._release_gate_status if isinstance(self._release_gate_status, dict) else {}
+        strict_pass = gate.get("strict_gate_pass")
+        p0_open = gate.get("P0_open_count")
+        detail = gate.get("duckdb_write_probe_detail") if isinstance(gate.get("duckdb_write_probe_detail"), dict) else {}
+        d_status = str(detail.get("status") or "").lower()
+        if strict_pass is True:
+            text = f"🟢 发布门禁: PASS P0={p0_open if p0_open is not None else 0}"
+            color = "#00aa66"
+        elif strict_pass is False:
+            probe_err = str(detail.get("error_type") or "gate_fail")
+            text = f"🔴 发布门禁: FAIL P0={p0_open if p0_open is not None else '?'} {probe_err}"
+            color = "#d32f2f"
+        elif d_status in ("warn", "skip", "missing"):
+            text = f"🟡 发布门禁: {d_status.upper()} P0={p0_open if p0_open is not None else '?'}"
+            color = "#ef6c00"
+        else:
+            text = "⚪ 发布门禁: 待检测"
+            color = "#999999"
+        tooltip = (
+            f"strict_gate_pass={gate.get('strict_gate_pass')}\n"
+            f"P0_open_count={gate.get('P0_open_count')}\n"
+            f"active_critical_high={gate.get('active_critical_high')}\n"
+            f"duckdb_status={detail.get('status')}\n"
+            f"db_path={detail.get('db_path')}\n"
+            f"error_type={detail.get('error_type')}\n"
+            f"recommended_action={detail.get('recommended_action')}"
+        )
+        self.release_gate_status.setText(text)
+        self.release_gate_status.setStyleSheet(f"color:{color}; padding-left:8px;")
+        self.release_gate_status.setToolTip(tooltip)
 
     def on_health_status_clicked(self, event):
         if not self._health_check_results:

@@ -2271,8 +2271,13 @@ class KLineChartWorkspace(QWidget):
         if pd.notna(new_ts) and pd.notna(last_ts) and new_ts < last_ts:
             return
         if last_time == bar_time:
-            high = max(float(last_row["high"]), price, float(quote.get("high") or price))
-            low = min(float(last_row["low"]), price, float(quote.get("low") or price))
+            is_daily = period == "1d"
+            if is_daily:
+                high = max(float(last_row["high"]), price, float(quote.get("high") or price))
+                low = min(float(last_row["low"]), price, float(quote.get("low") or price))
+            else:
+                high = max(float(last_row["high"]), price)
+                low = min(float(last_row["low"]), price)
             open_price = float(last_row["open"])
             volume = float(last_row.get("volume") or 0) + volume_delta
             updated = {
@@ -2286,9 +2291,15 @@ class KLineChartWorkspace(QWidget):
             for col, value in updated.items():
                 self.last_data.at[self.last_data.index[-1], col] = value
         else:
-            open_price = float(quote.get("open") or price)
-            high = max(price, float(quote.get("high") or price))
-            low = min(price, float(quote.get("low") or price))
+            is_daily = period == "1d"
+            if is_daily:
+                open_price = float(quote.get("open") or price)
+                high = max(price, float(quote.get("high") or price))
+                low = min(price, float(quote.get("low") or price))
+            else:
+                open_price = price
+                high = price
+                low = price
             updated = {
                 "time": bar_time,
                 "open": open_price,
@@ -3380,8 +3391,14 @@ class KLineChartWorkspace(QWidget):
         else:
             bar_time = now.strftime("%Y-%m-%d %H:%M:%S")
         open_price = float(quote.get("open") or price)
-        high = max(price, float(quote.get("high") or price))
-        low = min(price, float(quote.get("low") or price))
+        is_daily = period in ("1d", "1w", "1M")
+        if is_daily:
+            high = max(price, float(quote.get("high") or price))
+            low = min(price, float(quote.get("low") or price))
+        else:
+            open_price = price
+            high = price
+            low = price
         volume = float(quote.get("volume") or 0)
         return {
             "time": bar_time,

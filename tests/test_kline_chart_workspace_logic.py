@@ -950,6 +950,115 @@ class TestNormalizeRealtimeQuote:
         assert normalized["bid1_vol"] == 800
 
 
+class TestRealtimeBarConstruction:
+    def test_intraday_new_bar_open_uses_last_trade_not_day_open(self):
+        import types as _types
+        stub = _make_stub()
+        stub._normalize_realtime_quote = _types.MethodType(
+            KLineChartWorkspace._normalize_realtime_quote, stub
+        )
+        stub.period_combo = MagicMock()
+        stub.period_combo.currentText.return_value = "30m"
+        stub.realtime_last_total_volume = 1000.0
+        stub.last_data = pd.DataFrame(
+            [
+                {
+                    "time": "2026-03-17 14:30:00",
+                    "open": 111.40,
+                    "high": 111.60,
+                    "low": 111.20,
+                    "close": 111.30,
+                    "volume": 3000.0,
+                }
+            ]
+        )
+        stub.chart_adapter = MagicMock()
+        stub.chart = None
+        stub._request_subchart_update = MagicMock()
+        stub._update_orderbook = MagicMock()
+        quote = {
+            "price": 111.12,
+            "open": 116.90,
+            "high": 111.20,
+            "low": 111.08,
+            "volume": 1050.0,
+        }
+        KLineChartWorkspace._apply_realtime_quote(stub, quote, "000988.SZ")
+        assert float(stub.last_data.iloc[-1]["open"]) == 111.12
+        assert float(stub.last_data.iloc[-1]["close"]) == 111.12
+
+    def test_daily_new_bar_open_keeps_day_open(self):
+        import types as _types
+        stub = _make_stub()
+        stub._normalize_realtime_quote = _types.MethodType(
+            KLineChartWorkspace._normalize_realtime_quote, stub
+        )
+        stub.period_combo = MagicMock()
+        stub.period_combo.currentText.return_value = "1d"
+        stub.realtime_last_total_volume = 1000.0
+        stub.last_data = pd.DataFrame(
+            [
+                {
+                    "time": "2026-03-16",
+                    "open": 110.00,
+                    "high": 112.00,
+                    "low": 109.50,
+                    "close": 111.00,
+                    "volume": 5000.0,
+                }
+            ]
+        )
+        stub.chart_adapter = MagicMock()
+        stub.chart = None
+        stub._request_subchart_update = MagicMock()
+        stub._update_orderbook = MagicMock()
+        quote = {"price": 111.12, "open": 116.90, "high": 117.10, "low": 110.80, "volume": 1200.0}
+        KLineChartWorkspace._apply_realtime_quote(stub, quote, "000988.SZ")
+        assert float(stub.last_data.iloc[-1]["open"]) == 116.90
+
+    def test_intraday_same_bar_ignores_daily_high_low_fields(self):
+        import types as _types
+        stub = _make_stub()
+        stub._normalize_realtime_quote = _types.MethodType(
+            KLineChartWorkspace._normalize_realtime_quote, stub
+        )
+        stub.period_combo = MagicMock()
+        stub.period_combo.currentText.return_value = "5m"
+        stub.realtime_last_total_volume = 1000.0
+        current_slot = pd.Timestamp.now().floor("5min")
+        stub.last_data = pd.DataFrame(
+            [
+                {
+                    "time": current_slot,
+                    "open": 111.20,
+                    "high": 111.30,
+                    "low": 111.10,
+                    "close": 111.25,
+                    "volume": 3000.0,
+                }
+            ]
+        )
+        stub.chart_adapter = MagicMock()
+        stub.chart = None
+        stub._request_subchart_update = MagicMock()
+        stub._update_orderbook = MagicMock()
+        quote = {"price": 111.12, "high": 119.90, "low": 80.00, "volume": 1010.0}
+        KLineChartWorkspace._apply_realtime_quote(stub, quote, "000988.SZ")
+        assert float(stub.last_data.iloc[-1]["high"]) == 111.30
+        assert float(stub.last_data.iloc[-1]["low"]) == 111.10
+
+
+class TestFallbackBarConstruction:
+    def test_build_intraday_bar_uses_last_trade_only(self):
+        stub = _make_stub()
+        quote = {"price": 111.12, "open": 116.90, "high": 118.20, "low": 109.90, "volume": 888.0}
+        bar = KLineChartWorkspace._build_bar_from_quote(stub, quote, "30m")
+        assert bar is not None
+        assert float(bar["open"]) == 111.12
+        assert float(bar["high"]) == 111.12
+        assert float(bar["low"]) == 111.12
+
+
 # ---------------------------------------------------------------------------
 # 覆盖率回退守卫
 # 确保关键分支都被上方的测试覆盖到；若日后误删测试导致分支丢失，本类会第一时间报警

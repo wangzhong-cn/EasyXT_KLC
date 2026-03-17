@@ -10,6 +10,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -48,9 +49,25 @@ def resolve_duckdb_path(duckdb_path: Optional[str] = None) -> str:
         "EASYXT_DUCKDB_LEGACY_PATH", r"D:/StockData/stock_data.ddb"
     )
     candidates.append(_legacy_fallback)
+    existing_candidates: list[str] = []
     for candidate in candidates:
-        if candidate and os.path.exists(candidate):
+        if not candidate or not os.path.exists(candidate):
+            continue
+        existing_candidates.append(candidate)
+        parent = os.path.dirname(candidate) or "."
+        probe = os.path.join(parent, f".easyxt_write_probe_{uuid.uuid4().hex}.tmp")
+        try:
+            with open(probe, "w", encoding="utf-8") as f:
+                f.write("ok")
+            try:
+                os.remove(probe)
+            except OSError:
+                pass
             return candidate
+        except OSError:
+            continue
+    if existing_candidates:
+        return existing_candidates[0]
     # 没有任何候选路径存在时，回退到项目内路径（首次运行时自动创建）
     return str(project_root / "data" / "stock_data.ddb")
 

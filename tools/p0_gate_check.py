@@ -1137,6 +1137,100 @@ def _p0_names() -> set[str]:
     return set(P0_RESULT_NAMES)
 
 
+def _extract_duckdb_write_probe_detail(results: list[CheckResult]) -> dict[str, object]:
+    target = next((r for r in results if r.name == "duckdb_write_probe"), None)
+    if target is None:
+        return {
+            "status": "missing",
+            "db_path": "",
+            "error_type": "check_missing",
+            "message": "duckdb_write_probe 未执行",
+            "recommended_action": "运行完整门禁: python tools/p0_gate_check.py --strict --json",
+        }
+    db_path = ""
+    error_type = ""
+    message = target.detail
+    recommended_action = ""
+    if target.violations:
+        first = target.violations[0]
+        db_path = str(first.location or "")
+        message = str(first.message or target.detail)
+        recommended_action = str(first.fix_hint or "")
+        m = re.search(r"([A-Za-z_]+Error)", message)
+        if m:
+            error_type = m.group(1)
+        elif "cannot open file" in message.lower():
+            error_type = "cannot_open_file"
+        elif "permission denied" in message.lower():
+            error_type = "permission_denied"
+        else:
+            error_type = "duckdb_write_failure"
+    return {
+        "status": target.status,
+        "db_path": db_path,
+        "error_type": error_type,
+        "message": message,
+        "recommended_action": recommended_action,
+    }
+
+
+def _build_json_output(results: list[CheckResult], *, new_only: bool) -> dict[str, object]:
+    p0_names = _p0_names()
+    sev_counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for r in results:
+        for v in r.violations:
+            sev_counts[v.severity] = sev_counts.get(v.severity, 0) + 1
+    active_ch = sum(
+        1 for r in results
+        for v in r.violations
+        if r.name in p0_names and v.severity in ("critical", "high")
+    )
+    p0_fail_count = sum(1 for r in results if r.name in p0_names and r.status == "fail")
+    _today_d = datetime.date.today()
+    _due_90_cutoff = _today_d + datetime.timedelta(days=90)
+    al_total = sum(len(v) for v in ALLOWLIST.values())
+    al_expired = 0
+    al_due_90d = 0
+    for _entries in ALLOWLIST.values():
+        for _e in _entries:
+            try:
+                _exp_d = datetime.date.fromisoformat(_e.expire)
+                if _exp_d < _today_d:
+                    al_expired += 1
+                elif _exp_d <= _due_90_cutoff:
+                    al_due_90d += 1
+            except (ValueError, AttributeError):
+                pass
+    output = {
+        "script_version": SCRIPT_VERSION,
+        "mode": "new_only" if new_only else "full",
+        "P0_open_count": p0_fail_count,
+        "active_critical_high": active_ch,
+        "strict_gate_pass": p0_fail_count == 0 and active_ch == 0,
+        "strict_pass": all(
+            r.status in ("pass", "warn", "skip")
+            for r in results if r.name in p0_names
+        ),
+        "severity_counts": sev_counts,
+        "allowlist_total": al_total,
+        "allowlist_expired": al_expired,
+        "allowlist_due_90d": al_due_90d,
+        "duckdb_write_probe_detail": _extract_duckdb_write_probe_detail(results),
+        "checks": [r.to_dict() for r in results],
+    }
+    return output
+
+
+def _persist_latest_metrics(output: dict[str, object]) -> None:
+    try:
+        artifacts_dir = PROJECT_ROOT / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        out_file = artifacts_dir / "p0_metrics_latest.json"
+        out_file.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 输出
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1306,52 +1400,9 @@ def main() -> int:
         results = filter_new_violations(results, baseline)
 
     # 输出
+    output = _build_json_output(results, new_only=args.new_only)
+    _persist_latest_metrics(output)
     if args.json:
-        p0_names = _p0_names()
-        # severity_counts：按严重程度统计活跃违规（用于趋势看板和硬门禁联动）
-        sev_counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-        for r in results:
-            for v in r.violations:
-                sev_counts[v.severity] = sev_counts.get(v.severity, 0) + 1
-        # 仅统计 P0 检查的 critical/high——P1 新增 high 时不会误触硬门禁
-        active_ch = sum(
-            1 for r in results
-            for v in r.violations
-            if r.name in p0_names and v.severity in ("critical", "high")
-        )
-        p0_fail_count = sum(1 for r in results if r.name in p0_names and r.status == "fail")
-        # allowlist 统计（供周报趋势追踪）
-        _today_d = datetime.date.today()
-        _due_90_cutoff = _today_d + datetime.timedelta(days=90)
-        al_total = sum(len(v) for v in ALLOWLIST.values())
-        al_expired = 0
-        al_due_90d = 0
-        for _entries in ALLOWLIST.values():
-            for _e in _entries:
-                try:
-                    _exp_d = datetime.date.fromisoformat(_e.expire)
-                    if _exp_d < _today_d:
-                        al_expired += 1
-                    elif _exp_d <= _due_90_cutoff:
-                        al_due_90d += 1
-                except (ValueError, AttributeError):
-                    pass
-        output = {
-            "script_version": SCRIPT_VERSION,
-            "mode": "new_only" if args.new_only else "full",
-            "P0_open_count": p0_fail_count,
-            "active_critical_high": active_ch,
-            "strict_gate_pass": p0_fail_count == 0 and active_ch == 0,
-            "strict_pass": all(
-                r.status in ("pass", "warn", "skip")
-                for r in results if r.name in p0_names
-            ),
-            "severity_counts": sev_counts,
-            "allowlist_total": al_total,
-            "allowlist_expired": al_expired,
-            "allowlist_due_90d": al_due_90d,
-            "checks": [r.to_dict() for r in results],
-        }
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
         print_summary(results, verbose=args.verbose, new_only=args.new_only)
