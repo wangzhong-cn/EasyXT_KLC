@@ -100,15 +100,20 @@ class TestBuildRiskEngine:
 
     def test_enabled_but_import_fails_returns_none(self):
         runner = _minimal_runner(enable_risk_engine=True)
-        with patch.dict("sys.modules", {"core.risk_engine": None}):
+        with patch(
+            "core.risk_config_loader.load_risk_engine",
+            side_effect=Exception("mock import fail"),
+        ):
             result = runner._build_risk_engine()
         assert result is None
 
     def test_enabled_returns_risk_engine_instance(self):
         runner = _minimal_runner(enable_risk_engine=True)
         mock_re = MagicMock()
-        mock_module = types.SimpleNamespace(RiskEngine=lambda: mock_re)
-        with patch.dict("sys.modules", {"core.risk_engine": mock_module}):
+        with patch(
+            "core.risk_config_loader.load_risk_engine",
+            return_value=mock_re,
+        ):
             result = runner._build_risk_engine()
         assert result is mock_re
 
@@ -221,9 +226,11 @@ class TestRun:
         mock_engine_instance.run.return_value = expected_result
 
         mock_re = MagicMock()
-        mock_module = types.SimpleNamespace(RiskEngine=lambda: mock_re)
 
-        with patch.dict("sys.modules", {"core.risk_engine": mock_module}):
+        with patch(
+            "core.risk_config_loader.load_risk_engine",
+            return_value=mock_re,
+        ):
             with patch(
                 "easyxt_backtest.strategy_runner.BacktestEngine",
                 return_value=mock_engine_instance,

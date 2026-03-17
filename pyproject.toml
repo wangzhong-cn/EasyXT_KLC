@@ -79,7 +79,7 @@ known-first-party = ["core", "gui_app"]
 "launch_grid_backtest.py" = ["E402"]
 
 [tool.coverage.run]
-source = ["core", "gui_app", "tools", "easy_xt", "data_manager"]
+source = ["core", "gui_app", "tools", "easy_xt", "data_manager", "strategies", "easyxt_backtest"]
 omit = [
   "*/tests/*",
   "*/__pycache__/*",
@@ -89,7 +89,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 25
+fail_under = 40
 exclude_lines = [
   "pragma: no cover",
   "def __repr__",
@@ -100,9 +100,9 @@ exclude_lines = [
 ]
 
 [tool.coverage.targets]
-short_term = 25
-mid_term = 35
-long_term = 50
+short_term = 40
+mid_term = 50
+long_term = 65
 
 [tool.coverage.html]
 directory = "htmlcov"
