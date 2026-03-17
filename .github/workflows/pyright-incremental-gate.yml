@@ -1,0 +1,185 @@
+name: Pyright Incremental Gate
+
+on:
+  pull_request:
+    branches: ["main", "master", "develop"]
+  workflow_dispatch:
+    inputs:
+      update_baseline:
+        description: "是否更新baseline（true/false）"
+        required: false
+        default: "false"
+      baseline_reason:
+        description: "baseline更新原因（Issue/PR链接或编号）"
+        required: false
+        default: ""
+
+jobs:
+  pyright-incremental:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Baseline update approval guard
+        if: github.event_name == 'pull_request'
+        env:
+          PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          python - << 'PY'
+          import json, os, re, subprocess, sys
+
+          REQUIRED_LABEL = "type-safety-baseline-approved"
+          BASELINE_FILE = ".ci/pyright_main_baseline.json"
+          base = os.environ.get("GITHUB_BASE_REF", "main")
+
+          diff = subprocess.run(
+              ["git", "diff", "--name-only", f"origin/{base}...HEAD"],
+              capture_output=True, text=True
+          )
+          changed = {x.strip() for x in diff.stdout.splitlines() if x.strip()}
+          if BASELINE_FILE not in changed:
+              print(f"[OK] {BASELINE_FILE} 未变更，跳过标签审批检查。")
+              raise SystemExit(0)
+
+          try:
+              labels = [x.get("name", "") for x in json.loads(os.environ.get("PR_LABELS_JSON", "[]"))]
+          except Exception:
+              labels = []
+
+          if REQUIRED_LABEL not in labels:
+              print(
+                  f"::error::检测到 baseline 文件变更（{BASELINE_FILE}），"
+                  f"但缺少必需标签 '{REQUIRED_LABEL}'。"
+                  f"请由类型治理负责人添加标签后再合并。"
+              )
+              raise SystemExit(1)
+
+          pr_ref = os.environ.get("GITHUB_REF", "")
+          m = re.search(r"refs/pull/(\d+)/", pr_ref)
+          pr_num = m.group(1) if m else "?"
+          print(
+              f"::notice::baseline 更新审批通过：PR #{pr_num} "
+              f"已包含标签 '{REQUIRED_LABEL}'。"
+          )
+          print(f"[AUDIT] baseline-update-approved | PR=#{pr_num} | labels={labels}")
+          PY
+
+      - name: Baseline update reason guard
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.update_baseline == 'true'
+        run: |
+          REASON="${{ github.event.inputs.baseline_reason }}"
+          if [ -z "$REASON" ]; then
+            echo "::error::update_baseline=true 时必须提供 baseline_reason"
+            exit 1
+          fi
+          if ! echo "$REASON" | grep -E '^(#|https?://)'; then
+            echo "::error::baseline_reason 必须以 # 或 http(s):// 开头"
+            exit 1
+          fi
+          echo "::notice::baseline_reason=$REASON"
+
+      - name: Baseline update actor guard
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.update_baseline == 'true'
+        env:
+          ALLOWLIST: ${{ vars.BASELINE_UPDATE_ALLOWLIST }}
+          ACTOR: ${{ github.actor }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          python - << 'PY'
+          import os, sys
+
+          actor = (os.environ.get("ACTOR") or "").strip()
+          owner = (os.environ.get("REPO_OWNER") or "").strip()
+          allowlist_raw = (os.environ.get("ALLOWLIST") or "").strip()
+          allowlist = {
+              x.strip().lower()
+              for x in allowlist_raw.replace(";", ",").split(",")
+              if x.strip()
+          }
+
+          if not allowlist:
+              print("::error::缺少仓库变量 BASELINE_UPDATE_ALLOWLIST，拒绝 baseline 更新。")
+              raise SystemExit(1)
+
+          actor_l = actor.lower()
+          owner_l = owner.lower()
+          if actor_l not in allowlist and actor_l != owner_l:
+              print(
+                  f"::error::用户 {actor} 不在 baseline 更新白名单中。"
+                  f"请由仓库管理员或授权人触发。"
+              )
+              raise SystemExit(1)
+
+          print(f"::notice::baseline 更新触发者校验通过：actor={actor}")
+          print(f"[AUDIT] baseline-actor-approved | actor={actor} | owner={owner}")
+          PY
+
+      - name: Run incremental gate
+        id: gate
+        run: |
+          mkdir -p artifacts
+          UPDATE="${{ github.event.inputs.update_baseline }}"
+          REASON="${{ github.event.inputs.baseline_reason }}"
+          if [ "$UPDATE" = "true" ]; then
+            python tools/pyright_incremental_gate.py \
+              --project pyrightconfig.main.json \
+              --baseline .ci/pyright_main_baseline.json \
+              --artifacts-dir artifacts \
+              --reason "$REASON" \
+              --actor "${{ github.actor }}" \
+              --run-id "${{ github.run_id }}" \
+              --ref "${{ github.ref }}" \
+              --update-baseline
+          else
+            python tools/pyright_incremental_gate.py \
+              --project pyrightconfig.main.json \
+              --baseline .ci/pyright_main_baseline.json \
+              --artifacts-dir artifacts \
+              --strict
+          fi
+
+      - name: Publish summary
+        if: always()
+        run: |
+          python - << 'PY'
+          import json, pathlib
+          p = pathlib.Path("artifacts/pyright_incremental_report.json")
+          if not p.exists():
+            print("Pyright report not found")
+            raise SystemExit(0)
+          d = json.loads(p.read_text(encoding="utf-8"))
+          lines = []
+          lines.append("## Pyright Incremental Gate")
+          lines.append("")
+          lines.append(f"- current: {d.get('total_current', 0)}")
+          lines.append(f"- baseline: {d.get('total_baseline', 0)}")
+          lines.append(f"- new: {d.get('new_count', 0)}")
+          lines.append(f"- removed: {d.get('removed_count', 0)}")
+          lines.append("")
+          for item in d.get("new_items", [])[:20]:
+            lines.append(f"- {item.get('severity')} {item.get('rule')} {item.get('file')}:{item.get('line')}")
+          with open(__import__("os").environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyright-incremental-${{ github.run_id }}
+          path: |
+            artifacts/pyright_incremental_report.json
+            artifacts/pyright_incremental_report.md
+            artifacts/pyright_output.txt
+            .ci/pyright_main_baseline.json
+          retention-days: 30

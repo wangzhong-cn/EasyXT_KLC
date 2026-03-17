@@ -1,0 +1,24 @@
+name: Strategy Management Quality
+
+on:
+  push:
+    paths:
+      - "strategies/management/**"
+      - "gui_app/backtest/**"
+  pull_request:
+    paths:
+      - "strategies/management/**"
+      - "gui_app/backtest/**"
+
+jobs:
+  quality-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - run: pip install mypy ruff
+      - run: python -m mypy strategies/management
+      - run: python -m mypy gui_app/backtest
+      - run: python -m ruff check strategies/management

@@ -1,0 +1,98 @@
+name: Hermetic Tests
+
+# 专项门禁：环境隔离关键用例
+#
+# 这批测试的共同特征：
+#   - 依赖 sys.modules 伪装（xtquant 缺失场景）
+#   - 依赖 token 环境变量为空（防止本机 Tushare/AKShare 凭据泄入）
+#   - 使用 side_effect=AssertionError 门禁外部源调用
+#
+# 任何一个失败都意味着测试系统的环境隔离性受损，失败必须立即修复，
+# 不允许因"只是偶发"而跳过或标记 flaky。
+#
+# fail-fast: true —— 第一个失败立即终止，节省 runner 时间并避免掩盖根因。
+
+on:
+  push:
+    branches: ["main", "master", "develop"]
+    paths:
+      - "tests/test_data_manager_units.py"
+      - "tests/test_unified_data_interface.py"
+      - "tests/conftest.py"
+      - "data_manager/board_stocks_loader.py"
+      - "data_manager/unified_data_interface.py"
+  pull_request:
+    branches: ["main", "master", "develop"]
+  workflow_dispatch:
+
+env:
+  PYTHONUTF8: "1"
+  # 强制清空所有可能携带真实凭据的 token 环境变量。
+  # session 级 conftest fixture 也会清理，这里是双保险（适用于 workflow 级覆盖）。
+  EASYXT_TUSHARE_TOKEN: ""
+  TUSHARE_TOKEN: ""
+
+jobs:
+  hermetic:
+    name: "Hermetic Tests (env-isolated, fail-fast)"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 安装测试依赖，显式排除 xtquant（CI 上不应存在，保证隔离性）
+          pip install -r requirements.txt --no-cache-dir
+          pip install pytest pytest-asyncio
+
+      - name: Verify xtquant is NOT installed (isolation check)
+        run: |
+          python - << 'PY'
+          import importlib.util, sys
+          if importlib.util.find_spec("xtquant") is not None:
+              print("::error::xtquant 已安装在此 runner — hermetic 测试需要无 xtquant 环境")
+              sys.exit(1)
+          print("[OK] xtquant 未安装，环境隔离符合预期")
+          PY
+
+      - name: Verify Tushare tokens are empty (isolation check)
+        run: |
+          python - << 'PY'
+          import os, sys
+          bad = [k for k in ("EASYXT_TUSHARE_TOKEN", "TUSHARE_TOKEN")
+                 if os.environ.get(k, "").strip()]
+          if bad:
+              print(f"::error::Tushare token 环境变量非空: {bad}，会污染 hermetic 测试")
+              sys.exit(1)
+          print("[OK] Tushare token 环境变量均为空")
+          PY
+
+      - name: Run hermetic test cases (-x fail-fast)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pytest \
+            tests/test_data_manager_units.py::TestBoardStocksLoaderNoQMT \
+            tests/test_unified_data_interface.py::TestGetStockData \
+            -x \
+            --tb=short \
+            -v \
+            --no-header \
+            -q
+
+      - name: Annotate failure summary
+        if: failure()
+        run: |
+          echo "::error::Hermetic test 失败。根据 development_rules.md § 测试规范："
+          echo "::error::  1. 禁止 patch builtins.__import__ 拦截 xtquant —— 用 sys.modules[...]=None 代替"
+          echo "::error::  2. 外部源 mock 必须用 side_effect=AssertionError，不得用 return_value=DataFrame()"
+          echo "::error::  3. _make_udi_with_mock_duckdb 必须包含 tushare/akshare _checked=True 标志"
+          echo "::error::详见 tests/conftest.py _clear_tushare_token_env 及 TestGetStockData._make_udi_with_mock_duckdb"

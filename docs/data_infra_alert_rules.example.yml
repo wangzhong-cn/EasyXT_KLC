@@ -1,0 +1,92 @@
+groups:
+  - name: easyxt-data-infra
+    interval: 30s
+    rules:
+      - alert: EasyXTGateLeakDetected
+        expr: increase(easyxt_gate_leak_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: p0
+          domain: data_contract
+        annotations:
+          summary: "Data gate leak detected"
+          description: "存在门禁拒绝后仍落库的事件，必须立即阻断写入并排查门禁链路。"
+
+      - alert: EasyXTNonTradingDayRowsDetected
+        expr: rate(easyxt_non_trading_day_rows_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: p0
+          domain: trading_calendar
+        annotations:
+          summary: "Non-trading day rows detected"
+          description: "发现非交易日 K 线数据进入验证流程，请检查源数据和日历配置。"
+
+      - alert: EasyXTIngestSuccessRateDrop
+        expr: |
+          (
+            sum(rate(easyxt_ingest_success_total[10m]))
+            /
+            clamp_min(
+              sum(rate(easyxt_ingest_success_total[10m])) + sum(rate(easyxt_ingest_failed_total[10m])),
+              1e-9
+            )
+          ) < 0.995
+        for: 10m
+        labels:
+          severity: p1
+          domain: availability
+        annotations:
+          summary: "Ingestion success rate below threshold"
+          description: "10 分钟窗口数据入库成功率低于 99.5%。"
+
+      - alert: EasyXTCircuitBreakerOpenTooLong
+        expr: avg_over_time(easyxt_source_cb_state[30m]) > 0.2
+        for: 30m
+        labels:
+          severity: p1
+          domain: failover
+        annotations:
+          summary: "Circuit breaker stays open too long"
+          description: "数据源断路器 OPEN 占比过高，请检查主源稳定性和回退策略。"
+
+      - alert: EasyXTQuarantineBacklogSpike
+        expr: |
+          easyxt_quarantine_backlog
+          >
+          2 * clamp_min(avg_over_time(easyxt_quarantine_backlog[1d]), 1)
+        for: 30m
+        labels:
+          severity: p1
+          domain: quarantine
+        annotations:
+          summary: "Quarantine backlog spike"
+          description: "隔离队列明显放大，建议检查门禁规则与重放任务。"
+
+      - alert: EasyXTReplaySuccessRateLow
+        expr: |
+          (
+            sum(rate(easyxt_quarantine_replay_success_total[30m]))
+            /
+            clamp_min(
+              sum(rate(easyxt_quarantine_replay_success_total[30m])) + sum(rate(easyxt_quarantine_replay_failed_total[30m])),
+              1e-9
+            )
+          ) < 0.90
+        for: 30m
+        labels:
+          severity: p1
+          domain: replay
+        annotations:
+          summary: "Quarantine replay success rate is low"
+          description: "30 分钟窗口重放成功率低于 90%。"
+
+      - alert: EasyXTIngestLatencyP99Breach
+        expr: histogram_quantile(0.99, sum(rate(easyxt_ingest_latency_ms_bucket[10m])) by (le)) > 8000
+        for: 15m
+        labels:
+          severity: p1
+          domain: latency
+        annotations:
+          summary: "Ingestion latency p99 breach"
+          description: "数据入库延迟 p99 超过 8000ms。"

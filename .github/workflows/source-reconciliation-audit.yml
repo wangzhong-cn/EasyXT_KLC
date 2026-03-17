@@ -1,0 +1,111 @@
+name: Source Reconciliation Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      strict_mode:
+        description: "严格模式（存在失败标的时任务失败）"
+        required: false
+        default: "false"
+      config_path:
+        description: "对账配置文件路径"
+        required: false
+        default: "config/data_reconciliation_audit.json"
+  schedule:
+    - cron: "0 2 * * 1"
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run reconciliation audit
+        run: |
+          mkdir -p artifacts
+          STRICT="${{ github.event.inputs.strict_mode }}"
+          CONFIG="${{ github.event.inputs.config_path }}"
+          if [ -z "$CONFIG" ]; then
+            CONFIG="config/data_reconciliation_audit.json"
+          fi
+          if [ "$STRICT" = "true" ]; then
+            python tools/data_reconciliation_audit.py --config "$CONFIG" --out-dir artifacts --strict
+          else
+            python tools/data_reconciliation_audit.py --config "$CONFIG" --out-dir artifacts
+          fi
+
+      - name: Publish summary
+        if: always()
+        run: |
+          python - << 'PY'
+          import glob, json, pathlib
+
+          files = sorted(glob.glob("artifacts/source_reconciliation_*.json"))
+          if not files:
+              print("No reconciliation report generated.")
+              raise SystemExit(0)
+          p = pathlib.Path(files[-1])
+          d = json.loads(p.read_text(encoding="utf-8"))
+          s = d.get("summary", {})
+          lines = []
+          lines.append("## Source Reconciliation Audit")
+          lines.append("")
+          lines.append(f"- report: {p.name}")
+          lines.append(f"- total_symbols: {s.get('total_symbols', 0)}")
+          lines.append(f"- passed_symbols: {s.get('passed_symbols', 0)}")
+          lines.append(f"- failed_symbols: {s.get('failed_symbols', 0)}")
+          lines.append(f"- qmt_available: {d.get('qmt_available')}")
+          lines.append(f"- akshare_available: {d.get('akshare_available')}")
+          failures = [x for x in d.get("results", []) if not x.get("pass_reconciliation", False)]
+          if failures:
+              lines.append("")
+              lines.append("### Failed Symbols")
+              for item in failures[:20]:
+                  lines.append(f"- {item.get('symbol')}: overlap={item.get('overlap_ratio')}")
+          with open(__import__("os").environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+
+          latest_json = pathlib.Path("artifacts/source_reconciliation_latest.json")
+          latest_md = pathlib.Path("artifacts/source_reconciliation_latest.md")
+          latest_json.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+          if pathlib.Path(str(p).replace(".json", ".md")).exists():
+              latest_md.write_text(pathlib.Path(str(p).replace(".json", ".md")).read_text(encoding="utf-8"), encoding="utf-8")
+
+          gov_metrics = {
+              "ts": d.get("generated_at"),
+              "kind": "source_reconciliation",
+              "total_symbols": s.get("total_symbols", 0),
+              "passed_symbols": s.get("passed_symbols", 0),
+              "failed_symbols": s.get("failed_symbols", 0),
+              "qmt_available": d.get("qmt_available"),
+              "akshare_available": d.get("akshare_available"),
+          }
+          pathlib.Path("artifacts/governance_source_reconciliation_latest.json").write_text(
+              json.dumps(gov_metrics, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          PY
+
+      - name: Merge reconciliation into governance trend
+        if: always()
+        run: |
+          python tools/merge_reconciliation_into_p0_trend.py \
+            --recon-json artifacts/governance_source_reconciliation_latest.json \
+            --trend-json artifacts/p0_trend_history.json
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-reconciliation-${{ github.run_id }}
+          path: |
+            artifacts/source_reconciliation_*.json
+            artifacts/source_reconciliation_*.md
+            artifacts/source_reconciliation_latest.json
+            artifacts/source_reconciliation_latest.md
+            artifacts/governance_source_reconciliation_latest.json
+            artifacts/p0_trend_history.json
+          retention-days: 30

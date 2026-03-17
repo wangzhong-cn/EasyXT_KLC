@@ -1,0 +1,39 @@
+[coverage:run]
+# source=. → 所有路径相对于项目根，格式为 core/xxx.py / data_manager/xxx.py / gui_app/xxx.py
+source = .
+omit =
+    myenv/*
+    external/*
+    101因子/*
+    学习实例/*
+    examples/*
+    notebooks/*
+    tests/*
+    tools/*
+    code_converter/*
+    strategies/*
+    PYPlugins/*
+    */__pycache__/*
+    diagnose_*.py
+    launch_*.py
+    run_*.py
+    start_*.py
+    test_xtquant.py
+    test_realtime_pipeline.py
+
+[coverage:report]
+# 只报告核心目录，<overall> 就是这 3 个目录的加权覆盖率
+include =
+    core/*
+    data_manager/*
+    gui_app/*
+skip_empty = True
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    \.\.\.
+
+[coverage:xml]
+output = coverage.xml

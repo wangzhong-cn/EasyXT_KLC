@@ -1,0 +1,172 @@
+{
+  "_schema_version": "stage1/v2",
+  "_pipeline_version": "stage1/v2.1",
+  "_git_commit": "b5c2aa8",
+  "_generated_at": "2026-03-10T22:55:51",
+  "_schema_migration_note": "v1→v2: BacktestMetrics 新增 calmar/sortino/turnover/cost_ratio/market_assumption; Stage1Result 新增 benchmark_comparison(BenchmarkComparison) 与 market_config; BenchmarkComparison 新增 benchmark_source/bench_data_range 审计字段。旧版 dashboard 若读取 v1 文件缺少 benchmark_comparison 字段，请用 d.get('benchmark_comparison', {'available': False}) 做兜底。",
+  "strategy": "dual_ma",
+  "symbol": "000001.SZ",
+  "run_date": "2026-03-10",
+  "start": "2024-01-01",
+  "end": "2024-03-31",
+  "oos_split": "2024-02-01",
+  "stage1_pass": false,
+  "summary": "Stage 1 未通过: OOS比=0.00<0.7（过拟合风险）; 参数敏感=520.7%>30%",
+  "market_config": {
+    "buy_comm": 0.0003,
+    "sell_comm": 0.0013,
+    "slippage": 0.0,
+    "market_name": "A股标准"
+  },
+  "data_acceptance": {
+    "symbol": "000001.SZ",
+    "period": "1d",
+    "date_range": "2024-01-01~2024-03-31",
+    "expected_trading_days": 61,
+    "actual_data_days": 58,
+    "coverage_pct": 95.08,
+    "max_gap_days": 0,
+    "pass_board": true,
+    "failures": []
+  },
+  "backtest_metrics": {
+    "total_return_pct": -1.61,
+    "annualized_return_pct": -6.85,
+    "sharpe_ratio": -3.398,
+    "max_drawdown_pct": 1.89,
+    "win_rate_pct": 0.0,
+    "trade_count": 1,
+    "years": 0.23,
+    "period": "full",
+    "calmar_ratio": -3.633,
+    "sortino_ratio": -3.404,
+    "turnover_rate_pct": 3.4,
+    "cost_ratio_pct": 11.8,
+    "market_assumption": "A股标准"
+  },
+  "in_sample_metrics": {
+    "total_return_pct": 0.0,
+    "annualized_return_pct": 0.0,
+    "sharpe_ratio": 0.0,
+    "max_drawdown_pct": 0.0,
+    "win_rate_pct": 0.0,
+    "trade_count": 0,
+    "years": 0.09,
+    "period": "in_sample",
+    "calmar_ratio": 0.0,
+    "sortino_ratio": 0.0,
+    "turnover_rate_pct": 0.0,
+    "cost_ratio_pct": 0.0,
+    "market_assumption": "A股标准"
+  },
+  "out_of_sample_metrics": {
+    "total_return_pct": -1.61,
+    "annualized_return_pct": -10.92,
+    "sharpe_ratio": -3.929,
+    "max_drawdown_pct": 1.89,
+    "win_rate_pct": 0.0,
+    "trade_count": 1,
+    "years": 0.14,
+    "period": "out_of_sample",
+    "calmar_ratio": -5.788,
+    "sortino_ratio": -3.806,
+    "turnover_rate_pct": 5.6,
+    "cost_ratio_pct": 11.8,
+    "market_assumption": "A股标准"
+  },
+  "in_out_sample": {
+    "in_sample_period": "2024-01-01 ~ 2024-02-01",
+    "out_sample_period": "2024-02-01 ~ 2024-03-31",
+    "in_sharpe": 0.0,
+    "out_sharpe": -3.929,
+    "oos_ratio": 0.0,
+    "pass_threshold": false
+  },
+  "param_sensitivity": {
+    "base_params": {
+      "short_period": 5,
+      "long_period": 20
+    },
+    "sensitivity_table": [
+      {
+        "param": "short_period",
+        "base_value": 5,
+        "perturbed_value": 4,
+        "delta_pct": -20,
+        "annual_return_pct": -3.26,
+        "change_pct": 52.4
+      },
+      {
+        "param": "short_period",
+        "base_value": 5,
+        "perturbed_value": 4,
+        "delta_pct": -10,
+        "annual_return_pct": -3.26,
+        "change_pct": 52.4
+      },
+      {
+        "param": "short_period",
+        "base_value": 5,
+        "perturbed_value": 6,
+        "delta_pct": 10,
+        "annual_return_pct": 6.81,
+        "change_pct": 199.4
+      },
+      {
+        "param": "short_period",
+        "base_value": 5,
+        "perturbed_value": 6,
+        "delta_pct": 20,
+        "annual_return_pct": 6.81,
+        "change_pct": 199.4
+      },
+      {
+        "param": "long_period",
+        "base_value": 20,
+        "perturbed_value": 16,
+        "delta_pct": -20,
+        "annual_return_pct": 28.82,
+        "change_pct": 520.7
+      },
+      {
+        "param": "long_period",
+        "base_value": 20,
+        "perturbed_value": 18,
+        "delta_pct": -10,
+        "annual_return_pct": -6.85,
+        "change_pct": 0.0
+      },
+      {
+        "param": "long_period",
+        "base_value": 20,
+        "perturbed_value": 22,
+        "delta_pct": 10,
+        "annual_return_pct": -3.4,
+        "change_pct": 50.4
+      },
+      {
+        "param": "long_period",
+        "base_value": 20,
+        "perturbed_value": 24,
+        "delta_pct": 20,
+        "annual_return_pct": -0.55,
+        "change_pct": 92.0
+      }
+    ],
+    "max_change_pct": 520.7,
+    "pass_threshold": false
+  },
+  "benchmark_comparison": {
+    "benchmark": "CSI300",
+    "benchmark_annualized_pct": 0.0,
+    "excess_return_pct": 0.0,
+    "alpha": 0.0,
+    "beta": 1.0,
+    "information_ratio": 0.0,
+    "tracking_error_pct": 0.0,
+    "available": false,
+    "benchmark_source": "local_duckdb",
+    "bench_data_range": "",
+    "note": "基准 CSI300 本地数据不可用，已跳过 Alpha/Beta 计算"
+  }
+}

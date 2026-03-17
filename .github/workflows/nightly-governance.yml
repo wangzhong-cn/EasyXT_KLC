@@ -1,0 +1,303 @@
+name: Nightly Governance Gate
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      duckdb_path:
+        description: "Optional DuckDB path"
+        required: false
+        default: ""
+      release_env:
+        description: "发布环境（preprod/prod）"
+        required: false
+        default: "preprod"
+      step6_warn_days:
+        description: "Step6 连续恶化告警阈值（天）"
+        required: false
+        default: "3"
+      step6_fail_days:
+        description: "Step6 连续恶化阻断阈值（天）"
+        required: false
+        default: "5"
+      strict_strategy_impact:
+        description: "是否启用策略影响严格门禁"
+        required: false
+        default: "true"
+      strategy_impact_delta_return:
+        description: "策略影响门禁 ΔR 阈值（年化收益百分点）"
+        required: false
+        default: "3.0"
+      strategy_impact_delta_mdd:
+        description: "策略影响门禁 ΔMDD 阈值（百分点）"
+        required: false
+        default: "1.5"
+      strategy_impact_baseline:
+        description: "策略影响基准文件路径（默认 artifacts/strategy_impact_baseline.json）"
+        required: false
+        default: "artifacts/strategy_impact_baseline.json"
+      strategy_impact_enforce_sharpe_sign:
+        description: "是否启用 Sharpe 符号一致性门禁"
+        required: false
+        default: "true"
+      strict_strategy_impact_baseline_meta:
+        description: "是否强制校验策略影响baseline审批元数据"
+        required: false
+        default: "true"
+      peak_warn_consecutive_days:
+        description: "峰值发布门禁告警阈值（连续达标天数）"
+        required: false
+        default: "7"
+      peak_fail_consecutive_days:
+        description: "峰值发布门禁阻断阈值（连续达标天数）"
+        required: false
+        default: "14"
+      strict_peak_release_gate:
+        description: "是否启用峰值发布门禁硬阻断（留空按环境默认：preprod=false, prod=true）"
+        required: false
+        default: ""
+      peak_notify_webhook_url:
+        description: "峰值通知Webhook地址（可选）"
+        required: false
+        default: ""
+      strict_peak_notify:
+        description: "是否强制峰值通知投递（留空按环境默认：preprod=false, prod=true）"
+        required: false
+        default: ""
+      peak_notify_message_format:
+        description: "峰值通知消息格式（auto/text/post）"
+        required: false
+        default: "auto"
+      peak_notify_max_attempts:
+        description: "峰值通知投递最大重试次数"
+        required: false
+        default: "2"
+      peak_notify_retry_backoff_sec:
+        description: "峰值通知投递重试退避秒数"
+        required: false
+        default: "1.0"
+      peak_notify_dedupe_max_scan_lines:
+        description: "峰值通知去重日志最大扫描行数"
+        required: false
+        default: "2000"
+      peak_notify_dedupe_index_max_entries:
+        description: "峰值通知去重索引最大保留条数"
+        required: false
+        default: "5000"
+
+env:
+  PYTHONUTF8: "1"
+  EASYXT_STEP6_WARN_DAYS: "3"
+  EASYXT_STEP6_FAIL_DAYS: "5"
+  EASYXT_STRATEGY_IMPACT_DELTA_RETURN: "3.0"
+  EASYXT_STRATEGY_IMPACT_DELTA_MDD: "1.5"
+  EASYXT_STRATEGY_IMPACT_BASELINE: "artifacts/strategy_impact_baseline.json"
+  EASYXT_STRATEGY_IMPACT_ENFORCE_SHARPE_SIGN: "true"
+  EASYXT_STRICT_STRATEGY_IMPACT: "true"
+  EASYXT_STRICT_STRATEGY_IMPACT_BASELINE_META: "true"
+  EASYXT_PEAK_WARN_CONSECUTIVE_DAYS: "7"
+  EASYXT_PEAK_FAIL_CONSECUTIVE_DAYS: "14"
+  EASYXT_RELEASE_ENV: "preprod"
+  EASYXT_STRICT_PEAK_RELEASE_GATE: "false"
+  EASYXT_PEAK_NOTIFY_WEBHOOK_URL: ""
+  EASYXT_STRICT_PEAK_NOTIFY: "false"
+  EASYXT_PEAK_NOTIFY_MESSAGE_FORMAT: "auto"
+  EASYXT_PEAK_NOTIFY_MAX_ATTEMPTS: "2"
+  EASYXT_PEAK_NOTIFY_RETRY_BACKOFF_SEC: "1.0"
+  EASYXT_PEAK_NOTIFY_DEDUPE_MAX_SCAN_LINES: "2000"
+  EASYXT_PEAK_NOTIFY_DEDUPE_INDEX_MAX_ENTRIES: "5000"
+
+jobs:
+  governance-gate:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: "${{ github.workflow }}-nightly-governance"
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install duckdb pandas
+      - name: Run governance jobs
+        id: governance
+        run: |
+          mkdir -p artifacts
+          DATE=$(date -u +%Y%m%d)
+          STEP6_WARN_DAYS="${{ github.event.inputs.step6_warn_days }}"
+          STEP6_FAIL_DAYS="${{ github.event.inputs.step6_fail_days }}"
+          RELEASE_ENV="${{ github.event.inputs.release_env }}"
+          STRICT_STRATEGY_IMPACT="${{ github.event.inputs.strict_strategy_impact }}"
+          STRATEGY_IMPACT_DELTA_RETURN="${{ github.event.inputs.strategy_impact_delta_return }}"
+          STRATEGY_IMPACT_DELTA_MDD="${{ github.event.inputs.strategy_impact_delta_mdd }}"
+          STRATEGY_IMPACT_BASELINE="${{ github.event.inputs.strategy_impact_baseline }}"
+          STRATEGY_IMPACT_ENFORCE_SHARPE_SIGN="${{ github.event.inputs.strategy_impact_enforce_sharpe_sign }}"
+          STRICT_STRATEGY_IMPACT_BASELINE_META="${{ github.event.inputs.strict_strategy_impact_baseline_meta }}"
+          PEAK_WARN_CONSECUTIVE_DAYS="${{ github.event.inputs.peak_warn_consecutive_days }}"
+          PEAK_FAIL_CONSECUTIVE_DAYS="${{ github.event.inputs.peak_fail_consecutive_days }}"
+          STRICT_PEAK_RELEASE_GATE="${{ github.event.inputs.strict_peak_release_gate }}"
+          PEAK_NOTIFY_WEBHOOK_URL="${{ github.event.inputs.peak_notify_webhook_url }}"
+          STRICT_PEAK_NOTIFY="${{ github.event.inputs.strict_peak_notify }}"
+          PEAK_NOTIFY_MESSAGE_FORMAT="${{ github.event.inputs.peak_notify_message_format }}"
+          PEAK_NOTIFY_MAX_ATTEMPTS="${{ github.event.inputs.peak_notify_max_attempts }}"
+          PEAK_NOTIFY_RETRY_BACKOFF_SEC="${{ github.event.inputs.peak_notify_retry_backoff_sec }}"
+          PEAK_NOTIFY_DEDUPE_MAX_SCAN_LINES="${{ github.event.inputs.peak_notify_dedupe_max_scan_lines }}"
+          PEAK_NOTIFY_DEDUPE_INDEX_MAX_ENTRIES="${{ github.event.inputs.peak_notify_dedupe_index_max_entries }}"
+          PEAK_NOTIFY_RUN_ID="${{ github.run_id }}"
+          [ -n "${STEP6_WARN_DAYS}" ] || STEP6_WARN_DAYS="${EASYXT_STEP6_WARN_DAYS}"
+          [ -n "${STEP6_FAIL_DAYS}" ] || STEP6_FAIL_DAYS="${EASYXT_STEP6_FAIL_DAYS}"
+          [ -n "${RELEASE_ENV}" ] || RELEASE_ENV="${EASYXT_RELEASE_ENV}"
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            RELEASE_ENV="prod"
+          fi
+          [ -n "${STRICT_STRATEGY_IMPACT}" ] || STRICT_STRATEGY_IMPACT="${EASYXT_STRICT_STRATEGY_IMPACT}"
+          [ -n "${STRATEGY_IMPACT_DELTA_RETURN}" ] || STRATEGY_IMPACT_DELTA_RETURN="${EASYXT_STRATEGY_IMPACT_DELTA_RETURN}"
+          [ -n "${STRATEGY_IMPACT_DELTA_MDD}" ] || STRATEGY_IMPACT_DELTA_MDD="${EASYXT_STRATEGY_IMPACT_DELTA_MDD}"
+          [ -n "${STRATEGY_IMPACT_BASELINE}" ] || STRATEGY_IMPACT_BASELINE="${EASYXT_STRATEGY_IMPACT_BASELINE}"
+          [ -n "${STRATEGY_IMPACT_ENFORCE_SHARPE_SIGN}" ] || STRATEGY_IMPACT_ENFORCE_SHARPE_SIGN="${EASYXT_STRATEGY_IMPACT_ENFORCE_SHARPE_SIGN}"
+          [ -n "${STRICT_STRATEGY_IMPACT_BASELINE_META}" ] || STRICT_STRATEGY_IMPACT_BASELINE_META="${EASYXT_STRICT_STRATEGY_IMPACT_BASELINE_META}"
+          [ -n "${PEAK_WARN_CONSECUTIVE_DAYS}" ] || PEAK_WARN_CONSECUTIVE_DAYS="${EASYXT_PEAK_WARN_CONSECUTIVE_DAYS}"
+          [ -n "${PEAK_FAIL_CONSECUTIVE_DAYS}" ] || PEAK_FAIL_CONSECUTIVE_DAYS="${EASYXT_PEAK_FAIL_CONSECUTIVE_DAYS}"
+          [ -n "${PEAK_NOTIFY_WEBHOOK_URL}" ] || PEAK_NOTIFY_WEBHOOK_URL="${EASYXT_PEAK_NOTIFY_WEBHOOK_URL}"
+          [ -n "${PEAK_NOTIFY_MESSAGE_FORMAT}" ] || PEAK_NOTIFY_MESSAGE_FORMAT="${EASYXT_PEAK_NOTIFY_MESSAGE_FORMAT}"
+          [ -n "${PEAK_NOTIFY_MAX_ATTEMPTS}" ] || PEAK_NOTIFY_MAX_ATTEMPTS="${EASYXT_PEAK_NOTIFY_MAX_ATTEMPTS}"
+          [ -n "${PEAK_NOTIFY_RETRY_BACKOFF_SEC}" ] || PEAK_NOTIFY_RETRY_BACKOFF_SEC="${EASYXT_PEAK_NOTIFY_RETRY_BACKOFF_SEC}"
+          [ -n "${PEAK_NOTIFY_DEDUPE_MAX_SCAN_LINES}" ] || PEAK_NOTIFY_DEDUPE_MAX_SCAN_LINES="${EASYXT_PEAK_NOTIFY_DEDUPE_MAX_SCAN_LINES}"
+          [ -n "${PEAK_NOTIFY_DEDUPE_INDEX_MAX_ENTRIES}" ] || PEAK_NOTIFY_DEDUPE_INDEX_MAX_ENTRIES="${EASYXT_PEAK_NOTIFY_DEDUPE_INDEX_MAX_ENTRIES}"
+          if [ -z "${STRICT_PEAK_RELEASE_GATE}" ]; then
+            if [ "${RELEASE_ENV}" = "prod" ]; then
+              STRICT_PEAK_RELEASE_GATE="true"
+            else
+              STRICT_PEAK_RELEASE_GATE="false"
+            fi
+          fi
+          if [ -z "${STRICT_PEAK_NOTIFY}" ]; then
+            if [ "${RELEASE_ENV}" = "prod" ]; then
+              STRICT_PEAK_NOTIFY="true"
+            else
+              STRICT_PEAK_NOTIFY="false"
+            fi
+          fi
+          GOV_STRICT_IMPACT_ARGS=""
+          if [ "${STRICT_STRATEGY_IMPACT}" = "true" ] || [ "${STRICT_STRATEGY_IMPACT}" = "1" ]; then
+            GOV_STRICT_IMPACT_ARGS="--strict-strategy-impact"
+          fi
+          GOV_STRICT_BASELINE_META_ARGS=""
+          if [ "${STRICT_STRATEGY_IMPACT_BASELINE_META}" = "true" ] || [ "${STRICT_STRATEGY_IMPACT_BASELINE_META}" = "1" ]; then
+            GOV_STRICT_BASELINE_META_ARGS="--strict-strategy-impact-baseline-meta"
+          fi
+          GOV_SHARPE_SIGN_ARGS=""
+          if [ "${STRATEGY_IMPACT_ENFORCE_SHARPE_SIGN}" = "true" ] || [ "${STRATEGY_IMPACT_ENFORCE_SHARPE_SIGN}" = "1" ]; then
+            GOV_SHARPE_SIGN_ARGS="--strategy-impact-enforce-sharpe-sign"
+          fi
+          set +e
+          if [ -n "${{ github.event.inputs.duckdb_path }}" ]; then
+            python tools/governance_jobs.py --job all --strict-sla --strict-dead-letter ${GOV_STRICT_IMPACT_ARGS} ${GOV_SHARPE_SIGN_ARGS} ${GOV_STRICT_BASELINE_META_ARGS} \
+              --strategy-impact-baseline "${STRATEGY_IMPACT_BASELINE}" --strategy-impact-delta-return "${STRATEGY_IMPACT_DELTA_RETURN}" \
+              --strategy-impact-delta-mdd "${STRATEGY_IMPACT_DELTA_MDD}" --duckdb-path "${{ github.event.inputs.duckdb_path }}" \
+              > artifacts/governance_nightly_${DATE}.json 2>governance_stderr.txt
+          else
+            python tools/governance_jobs.py --job all --strict-sla --strict-dead-letter ${GOV_STRICT_IMPACT_ARGS} ${GOV_SHARPE_SIGN_ARGS} ${GOV_STRICT_BASELINE_META_ARGS} \
+              --strategy-impact-baseline "${STRATEGY_IMPACT_BASELINE}" --strategy-impact-delta-return "${STRATEGY_IMPACT_DELTA_RETURN}" \
+              --strategy-impact-delta-mdd "${STRATEGY_IMPACT_DELTA_MDD}" \
+              > artifacts/governance_nightly_${DATE}.json 2>governance_stderr.txt
+          fi
+          cp artifacts/governance_nightly_${DATE}.json artifacts/governance_metrics_latest.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("artifacts/governance_metrics_latest.json")
+          out = Path("artifacts/strategy_impact_latest.json")
+          payload = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+          impact = payload.get("strategy_impact", {})
+          out.write_text(json.dumps(impact, ensure_ascii=False, indent=2), encoding="utf-8")
+          PY
+          GOV_EC=$?
+          python tools/p0_gate_check.py --strict --json > artifacts/p0_metrics_${DATE}.json 2>p0_stderr.txt
+          cp artifacts/p0_metrics_${DATE}.json artifacts/p0_metrics_latest.json
+          P0_EC=$?
+          python tools/p0_trend_update.py --gate-json artifacts/p0_metrics_latest.json --governance-json artifacts/governance_metrics_latest.json --keep-days 60
+          python tools/stability_30d_report.py --window-days 30 --step6-warn-days "${STEP6_WARN_DAYS}" --step6-fail-days "${STEP6_FAIL_DAYS}" --out artifacts/stability_30d_latest.md --json-out artifacts/stability_30d_latest.json 2>stability_stderr.txt
+          STAB_EC=$?
+          python tools/stability_evidence_board.py --history artifacts/p0_trend_history.json --window-days 30 --out-md artifacts/stability_evidence_30d.md --out-json artifacts/stability_evidence_30d.json
+          EVID_EC=$?
+          PEAK_STRICT_ARG=""
+          if [ "${STRICT_PEAK_RELEASE_GATE}" = "true" ] || [ "${STRICT_PEAK_RELEASE_GATE}" = "1" ]; then
+            PEAK_STRICT_ARG="--strict"
+          fi
+          python tools/peak_release_gate.py --evidence artifacts/stability_evidence_30d.json --warn-consecutive-days "${PEAK_WARN_CONSECUTIVE_DAYS}" --fail-consecutive-days "${PEAK_FAIL_CONSECUTIVE_DAYS}" --release-env "${RELEASE_ENV}" ${PEAK_STRICT_ARG} --out-json artifacts/peak_release_gate_latest.json
+          PEAK_EC=$?
+          python tools/peak_release_block_note.py --peak-gate artifacts/peak_release_gate_latest.json --evidence artifacts/stability_evidence_30d.json --trend-history artifacts/p0_trend_history.json --recent-days 7 --out-md artifacts/peak_release_block_note_latest.md --out-json artifacts/peak_release_block_note_latest.json
+          PEAK_NOTE_EC=$?
+          python tools/peak_release_notification.py --peak-gate artifacts/peak_release_gate_latest.json --block-note artifacts/peak_release_block_note_latest.json --out-md artifacts/peak_release_notification_latest.md --out-json artifacts/peak_release_notification_latest.json
+          PEAK_NOTIFY_EC=$?
+          PEAK_NOTIFY_STRICT_ARG=""
+          if [ "${STRICT_PEAK_NOTIFY}" = "true" ] || [ "${STRICT_PEAK_NOTIFY}" = "1" ]; then
+            PEAK_NOTIFY_STRICT_ARG="--strict --require-webhook"
+          fi
+          python tools/peak_release_notify_webhook.py --notification artifacts/peak_release_notification_latest.json --webhook-url "${PEAK_NOTIFY_WEBHOOK_URL}" --message-format "${PEAK_NOTIFY_MESSAGE_FORMAT}" --max-attempts "${PEAK_NOTIFY_MAX_ATTEMPTS}" --retry-backoff-sec "${PEAK_NOTIFY_RETRY_BACKOFF_SEC}" --run-id "${PEAK_NOTIFY_RUN_ID}" --enable-dedupe --dedupe-max-scan-lines "${PEAK_NOTIFY_DEDUPE_MAX_SCAN_LINES}" --dedupe-index artifacts/peak_release_notify_dedupe_index.json --dedupe-index-max-entries "${PEAK_NOTIFY_DEDUPE_INDEX_MAX_ENTRIES}" ${PEAK_NOTIFY_STRICT_ARG} --out-json artifacts/peak_release_notify_delivery_latest.json --log-jsonl logs/peak_release_notify_delivery.jsonl
+          PEAK_NOTIFY_SEND_EC=$?
+          python tools/peak_release_notify_sla_report.py --log-jsonl logs/peak_release_notify_delivery.jsonl --window-days 7 --out-md artifacts/peak_release_notify_sla_latest.md --out-json artifacts/peak_release_notify_sla_latest.json --out-oncall-json artifacts/peak_release_notify_oncall_latest.json
+          PEAK_NOTIFY_SLA_EC=$?
+          echo "governance_exit_code=${GOV_EC}" >> "$GITHUB_OUTPUT"
+          echo "p0_exit_code=${P0_EC}" >> "$GITHUB_OUTPUT"
+          echo "stability_exit_code=${STAB_EC}" >> "$GITHUB_OUTPUT"
+          echo "evidence_exit_code=${EVID_EC}" >> "$GITHUB_OUTPUT"
+          echo "peak_release_exit_code=${PEAK_EC}" >> "$GITHUB_OUTPUT"
+          echo "peak_release_note_exit_code=${PEAK_NOTE_EC}" >> "$GITHUB_OUTPUT"
+          echo "peak_release_notify_exit_code=${PEAK_NOTIFY_EC}" >> "$GITHUB_OUTPUT"
+          echo "peak_release_notify_send_exit_code=${PEAK_NOTIFY_SEND_EC}" >> "$GITHUB_OUTPUT"
+          echo "peak_release_notify_sla_exit_code=${PEAK_NOTIFY_SLA_EC}" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-governance-${{ github.run_id }}
+          path: |
+            artifacts/governance_nightly_*.json
+            artifacts/governance_metrics_latest.json
+            artifacts/p0_metrics_*.json
+            artifacts/p0_metrics_latest.json
+            artifacts/p0_trend_history.json
+            artifacts/p0_trend_latest.md
+            artifacts/stability_30d_latest.md
+            artifacts/stability_30d_latest.json
+            artifacts/strategy_impact_latest.json
+            artifacts/stability_evidence_30d.md
+            artifacts/stability_evidence_30d.json
+            artifacts/peak_release_gate_latest.json
+            artifacts/peak_release_block_note_latest.md
+            artifacts/peak_release_block_note_latest.json
+            artifacts/peak_release_notification_latest.md
+            artifacts/peak_release_notification_latest.json
+            artifacts/peak_release_notify_delivery_latest.json
+            artifacts/peak_release_notify_dedupe_index.json
+            artifacts/peak_release_notify_sla_latest.md
+            artifacts/peak_release_notify_sla_latest.json
+            artifacts/peak_release_notify_oncall_latest.json
+            logs/peak_release_notify_delivery.jsonl
+            governance_stderr.txt
+            p0_stderr.txt
+            stability_stderr.txt
+          retention-days: 30
+      - name: Enforce governance gate
+        if: always()
+        run: |
+          GOV_EC="${{ steps.governance.outputs.governance_exit_code }}"
+          P0_EC="${{ steps.governance.outputs.p0_exit_code }}"
+          STAB_EC="${{ steps.governance.outputs.stability_exit_code }}"
+          EVID_EC="${{ steps.governance.outputs.evidence_exit_code }}"
+          PEAK_EC="${{ steps.governance.outputs.peak_release_exit_code }}"
+          PEAK_NOTE_EC="${{ steps.governance.outputs.peak_release_note_exit_code }}"
+          PEAK_NOTIFY_EC="${{ steps.governance.outputs.peak_release_notify_exit_code }}"
+          PEAK_NOTIFY_SEND_EC="${{ steps.governance.outputs.peak_release_notify_send_exit_code }}"
+          PEAK_NOTIFY_SLA_EC="${{ steps.governance.outputs.peak_release_notify_sla_exit_code }}"
+          if [ "${GOV_EC}" != "0" ] || [ "${P0_EC}" != "0" ] || [ "${STAB_EC}" != "0" ] || [ "${EVID_EC}" != "0" ] || [ "${PEAK_EC}" != "0" ] || [ "${PEAK_NOTE_EC}" != "0" ] || [ "${PEAK_NOTIFY_EC}" != "0" ] || [ "${PEAK_NOTIFY_SEND_EC}" != "0" ] || [ "${PEAK_NOTIFY_SLA_EC}" != "0" ]; then
+            echo "::error::Nightly governance gate failed: governance=${GOV_EC}, p0=${P0_EC}, stability=${STAB_EC}, evidence=${EVID_EC}, peak=${PEAK_EC}, peak_note=${PEAK_NOTE_EC}, peak_notify=${PEAK_NOTIFY_EC}, peak_notify_send=${PEAK_NOTIFY_SEND_EC}, peak_notify_sla=${PEAK_NOTIFY_SLA_EC}"
+            exit 1
+          fi

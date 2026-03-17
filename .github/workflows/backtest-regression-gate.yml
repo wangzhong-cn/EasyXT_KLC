@@ -1,0 +1,88 @@
+name: Backtest Regression Gate
+
+# 快速门禁：回测引擎端到端回归 + 指标契约（< 5s）
+#
+# 触发条件：
+#   - 回测引擎相关源文件变更（push / PR）
+#   - 手动触发
+#
+# 设计原则：
+#   - 零真实 IO：所有测试使用 _load_data monkey-patch 注入合成行情
+#   - 验证 native BacktestEngine 数值正确性
+#   - 验证 _run_native_backtest() 的 GUI key 映射契约
+#   - 验证 adjust 透传行为
+#   - 验证 sqn / profit_factor 哨兵值格式正确
+
+on:
+  push:
+    branches: ["main", "master", "develop"]
+    paths:
+      - "easyxt_backtest/engine.py"
+      - "easyxt_backtest/performance.py"
+      - "easyxt_backtest/strategy_runner.py"
+      - "easyxt_backtest/__init__.py"
+      - "gui_app/backtest/engine.py"
+      - "gui_app/widgets/backtest_widget.py"
+      - "strategies/base_strategy.py"
+      - "data_manager/duckdb_connection_pool.py"
+      - "tests/test_backtest_e2e_regression.py"
+      - "tests/test_easyxt_backtest_import.py"
+      - "tests/test_duckdb_pool.py"
+      - "tests/test_backtest_widget.py"
+  pull_request:
+    branches: ["main", "master", "develop"]
+    paths:
+      - "easyxt_backtest/engine.py"
+      - "easyxt_backtest/performance.py"
+      - "easyxt_backtest/strategy_runner.py"
+      - "easyxt_backtest/__init__.py"
+      - "gui_app/backtest/engine.py"
+      - "gui_app/widgets/backtest_widget.py"
+      - "strategies/base_strategy.py"
+      - "data_manager/duckdb_connection_pool.py"
+      - "tests/test_backtest_e2e_regression.py"
+      - "tests/test_easyxt_backtest_import.py"
+      - "tests/test_duckdb_pool.py"
+      - "tests/test_backtest_widget.py"
+  workflow_dispatch:
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  backtest-regression:
+    name: "Backtest E2E Regression + Metrics Contract"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt --no-cache-dir
+          pip install pytest pytest-asyncio
+
+      - name: Run backtest E2E regression + metrics contract + stale-lock
+        run: |
+          python -m pytest \
+            tests/test_backtest_e2e_regression.py \
+            tests/test_easyxt_backtest_import.py \
+            tests/test_duckdb_pool.py::TestCrossProcessWriteLock \
+            "tests/test_backtest_widget.py::TestBacktestWidgetMappingContract" \
+            --tb=short \
+            -v \
+            --no-header
+
+      - name: Annotate failure summary
+        if: failure()
+        run: |
+          echo "::error::Backtest regression gate 失败，可能原因："
+          echo "::error::  1. easyxt_backtest/performance.py 改了 metric key 名称，未同步更新 gui_app/backtest/engine._run_native_backtest() 映射"
+          echo "::error::  2. _run_native_backtest() 的 adjust_map 不完整，导致 adjust 透传失效"
+          echo "::error::  3. 原生引擎回测逻辑变更，导致已知确定性场景数值方向反转"
+          echo "::error::检查 tests/test_backtest_e2e_regression.py 中 _NATIVE_TO_GUI_KEY_MAP 是否需要更新"

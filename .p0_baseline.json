@@ -1,0 +1,26 @@
+{
+  "_meta": {
+    "script_version": "2.2.0",
+    "git_commit": "b5c2aa8",
+    "saved_at": "2026-03-09T17:32:53Z",
+    "expires_at": "2026-03-23T17:32:53Z",
+    "violation_counts": {
+      "credential_scan": 0,
+      "sql_injection_scan": 0,
+      "timestamp_contract_check": 0,
+      "xtdata_import_check": 0,
+      "snapshot_publish_atomic": 0,
+      "schema_version_check": 1,
+      "allowlist_governance": 0
+    }
+  },
+  "credential_scan": [],
+  "sql_injection_scan": [],
+  "timestamp_contract_check": [],
+  "xtdata_import_check": [],
+  "snapshot_publish_atomic": [],
+  "schema_version_check": [
+    "data_manager/unified_data_interface.py"
+  ],
+  "allowlist_governance": []
+}

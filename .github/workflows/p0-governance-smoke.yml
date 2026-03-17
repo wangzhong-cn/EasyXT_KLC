@@ -1,0 +1,1057 @@
+name: P0 Governance Smoke
+
+# 三层 CI 矩阵：PR 阶段 + 夜间巡检 + Release 校验
+# artifacts 按日期落盘，用于追踪 active_critical_high 趋势斜率
+#
+# ── Branch Protection 配置建议（GitHub repo Settings → Branches）────────────
+#   main / master / develop:
+#     Required status checks → "PR Gate (new-only)"
+#     Require branches to be up to date before merging: ✅
+#   release/* / hotfix/*:
+#     Required status checks → "Release Gate (enforce-expiry)"
+#     Restrict pushes: 仅 CI bot / release-manager team
+#   以上设置将 gate 结果与分支合并权限强制绑定，使治理从"建议"变成"制度"
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+    branches: ["main", "master", "develop"]
+  schedule:
+    # 每天 02:00 UTC（北京时间 10:00）运行夜间巡检 + Release 模拟
+    - cron: "0 2 * * *"
+    # 周一至周五 01:00 UTC（北京时间 09:00）运行每日真实 Batch（daily-batch job）
+    - cron: "0 1 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式 (all / pr / nightly / release / batch)"
+        required: false
+        default: "all"
+
+env:
+  PYTHONUTF8: "1"   # 保证 Windows runner 上 JSON 管道编码一致
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────
+  # Job 1: PR 阶段 — 仅阻断本次新增违规
+  # ──────────────────────────────────────────────────────────────────
+  pr-gate:
+    name: "PR Gate (new-only)"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event.inputs.mode == 'all' || github.event.inputs.mode == 'pr'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0         # 需要历史记录以读取 baseline
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify baseline (must pass before gate)
+        run: |
+          python tools/p0_baseline_verify.py
+          # 若基线过期或版本不匹配，脚本以 exit(1) 退出，阻断后续 gate
+
+      - name: Run PR Gate Check
+        id: pr_check
+        run: |
+          mkdir -p artifacts
+          set +e
+          python tools/p0_gate_check.py --new-only --strict --json \
+            > artifacts/p0_pr_${{ github.run_id }}.json 2>pr_gate_stderr.txt
+          EC=$?
+          echo "exit_code=$EC" >> "$GITHUB_OUTPUT"
+          exit 0
+        continue-on-error: true  # 先收集 artifact，再决定是否 fail
+
+      - name: Parse & Annotate
+        if: always()
+        run: |
+          python - << 'PYEOF'
+          import json, os, sys
+          path = next(
+              (f for f in os.listdir("artifacts") if f.startswith("p0_pr_")),
+              None
+          )
+          if not path:
+              print("::warning::P0 PR artifact not found")
+              sys.exit(0)
+          d = json.load(open(f"artifacts/{path}", encoding="utf-8"))
+          ach = d.get("active_critical_high", -1)
+          p0  = d.get("P0_open_count", -1)
+          gate = d.get("strict_gate_pass", False)
+          print(f"::notice::PR Gate — P0_open={p0} | active_critical/high={ach} | gate_pass={gate}")
+          if not gate:
+              failing = [c["name"] for c in d.get("checks", []) if c["status"] == "fail"]
+              print(f"::error::P0 门禁未通过: {failing}")
+          PYEOF
+
+      - name: Allowlist Change Detection — Require Manual Review
+        # 被 allowlist 豁免的文件若被修改，自动要求人工安全复核
+        # 防止"误报豁免掩盖新真实风险"
+        if: github.event_name == 'pull_request'
+        run: |
+          python - << 'PYEOF'
+          import subprocess, sys, json, os
+
+          # 从门禁脚本获取 allowlist 覆盖文件列表（单一真相来源）
+          r = subprocess.run(
+              ["python", "tools/p0_gate_check.py", "--list-allowlisted-files"],
+              capture_output=True, text=True,
+          )
+          allowlisted = set(json.loads(r.stdout)) if r.stdout.strip() else set()
+
+          # 获取本次 PR 相对于目标分支的变更文件
+          base = os.environ.get("GITHUB_BASE_REF", "main")
+          r2 = subprocess.run(
+              ["git", "diff", "--name-only", f"origin/{base}...HEAD"],
+              capture_output=True, text=True,
+          )
+          changed = {f.replace("\\", "/") for f in r2.stdout.strip().splitlines() if f.strip()}
+
+          # 交叉比对
+          flagged = sorted(changed & allowlisted)
+          if flagged:
+              for f in flagged:
+                  print(f"::warning file={f}::此文件已被安全扫描 allowlist 覆盖，"
+                        f"修改后需人工确认未引入新的 SQL注入/凭据风险")
+              print(f"\n[REQUIRE-REVIEW] {len(flagged)} 个 allowlist 覆盖文件被修改，PR 需人工安全复核：")
+              for f in flagged:
+                  print(f"  - {f}")
+              print("\n合并前请审批人在 PR 评论中确认：已阅读变更内容并确认未引入新安全风险。")
+              sys.exit(1)
+          print("[OK] 无 allowlist 覆盖文件变更，跳过安全复核检查。")
+          PYEOF
+
+      - name: Show stderr warnings
+        if: always()
+        run: cat pr_gate_stderr.txt || true
+
+      - name: Upload PR artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-pr-${{ github.run_id }}
+          path: artifacts/p0_pr_*.json
+          retention-days: 30
+
+      - name: Threshold Change Freeze Check
+        # 检查 stage1_universe.yaml 的 thresholds 字段变更是否附带 issue_ref
+        # 紧急情况：给 PR 打上 "threshold-hotfix-approved" 标签可豁免检查（自动留下审计日志）
+        if: github.event_name == 'pull_request'
+        env:
+          PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          python - << 'PYEOF'
+          import subprocess, sys, pathlib, os, json as _json
+
+          # ── 紧急热修复豁免（threshold-hotfix-approved 标签）──────────────
+          HOTFIX_LABEL = "threshold-hotfix-approved"
+          _labels_json = os.environ.get("PR_LABELS_JSON", "[]")
+          try:
+              _pr_labels = [l.get("name", "") for l in _json.loads(_labels_json)]
+          except Exception:
+              _pr_labels = []
+          if HOTFIX_LABEL in _pr_labels:
+              _pr_ref = os.environ.get("GITHUB_REF", "")
+              import re as _re
+              _pr_num = _re.search(r"refs/pull/(\d+)/", _pr_ref)
+              _pr_num = _pr_num.group(1) if _pr_num else "?"
+              import datetime as _dt
+              print(f"::warning::⚠️ 紧急豁免已激活！PR #{_pr_num} 使用 '{HOTFIX_LABEL}' 标签跳过 issue_ref 检查。")
+              print(f"::warning::请在 24 小时内补充 issue_ref 并更新 _change_log，否则下次 PR 检查将报错。")
+              print(f"[AUDIT] hotfix-bypass | PR=#{_pr_num} | labels={_pr_labels}"
+                    f" | ts={_dt.datetime.utcnow().isoformat(timespec='seconds')}Z")
+              sys.exit(0)
+          # ─────────────────────────────────────────────────────────────────
+
+          yaml_file = "config/stage1_universe.yaml"
+          base = os.environ.get("GITHUB_BASE_REF", "main")
+
+          # 检查文件是否在本次 PR 中被修改
+          r = subprocess.run(
+              ["git", "diff", "--name-only", f"origin/{base}...HEAD"],
+              capture_output=True, text=True,
+          )
+          changed = {f.strip() for f in r.stdout.splitlines() if f.strip()}
+          if yaml_file not in changed:
+              print(f"[OK] {yaml_file} 未修改，跳过阈值变更检查。")
+              sys.exit(0)
+
+          # 读取新旧版本，比较 thresholds 字段
+          new_content = pathlib.Path(yaml_file).read_text(encoding="utf-8")
+          r2 = subprocess.run(
+              ["git", "show", f"origin/{base}:{yaml_file}"],
+              capture_output=True, text=True,
+          )
+          old_content = r2.stdout if r2.returncode == 0 else ""
+
+          def _extract_thresholds(text: str) -> dict:
+              """从 YAML 文本中粗提取 thresholds 块下的 key:value（不依赖 PyYAML）。"""
+              import re
+              result = {}
+              in_thresh = False
+              for line in text.splitlines():
+                  if re.match(r"\s*thresholds\s*:", line):
+                      in_thresh = True
+                      continue
+                  if in_thresh:
+                      m = re.match(r"\s+(\w+)\s*:\s*(.+)", line)
+                      if m:
+                          result[m.group(1).strip()] = m.group(2).strip()
+                      elif line.strip() and not line.startswith(" "):
+                          in_thresh = False
+              return result
+
+          old_thr = _extract_thresholds(old_content)
+          new_thr = _extract_thresholds(new_content)
+          changed_keys = {k for k in set(old_thr) | set(new_thr)
+                          if old_thr.get(k) != new_thr.get(k)}
+
+          if not changed_keys:
+              print(f"[OK] thresholds 值未变更，无需 issue_ref。")
+              sys.exit(0)
+
+          print(f"[INFO] 检测到 thresholds 变更：{sorted(changed_keys)}")
+
+          # 检查 _change_log 最新条目是否有非 init 的 issue_ref
+          import re
+          cl_entries = re.findall(
+              r"issue_ref\s*:\s*[\"']?([^\"'\n#]+)[\"']?", new_content
+          )
+          # 去掉注释行并清理
+          valid_refs = [
+              r.strip() for r in cl_entries
+              if r.strip() and r.strip().lower() != "init"
+              and (r.strip().startswith("#") or r.strip().startswith("http"))
+          ]
+          if not valid_refs:
+              # 最新条目仍是 init 或为空
+              latest_ref = cl_entries[-1].strip() if cl_entries else "(空)"
+              print(
+                  f"::error::阈值变更卡控：检测到 thresholds 字段修改 ({sorted(changed_keys)})，"
+                  f"但 _change_log 最新条目的 issue_ref='{latest_ref}' 未指向有效 Issue/PR。\n"
+                  f"请在 config/stage1_universe.yaml 的 _change_log 中新增一条记录，"
+                  f"issue_ref 填写对应 GitHub Issue 或 PR 链接（如 #42 或 https://...）。"
+              )
+              sys.exit(1)
+
+          print(f"[OK] 阈值变更已附带 issue_ref: {valid_refs[-1]}")
+          PYEOF
+
+      - name: Enforce gate result
+        if: steps.pr_check.outputs.exit_code != '0'
+        run: |
+          echo "::error::P0 PR Gate 失败，请修复新增违规后重新提交。"
+          exit 1
+
+  # ──────────────────────────────────────────────────────────────────
+  # Job 2: 夜间全量巡检
+  # ──────────────────────────────────────────────────────────────────
+  nightly-scan:
+    name: "Nightly Full Scan"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.mode == 'all' || github.event.inputs.mode == 'nightly'
+    concurrency:
+      group: "${{ github.workflow }}-nightly-scan"
+      cancel-in-progress: false   # 排队等待，不取消正在运行的巡检
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install nightly governance dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install duckdb pandas pyyaml pytest
+
+      - name: Run Nightly Governance + P0 Scan
+        id: nightly_check
+        run: |
+          mkdir -p artifacts
+          DATE=$(date -u +%Y%m%d)
+          set +e
+          python tools/governance_jobs.py --job all --strict-sla --strict-dead-letter \
+            > artifacts/governance_nightly_${DATE}.json 2>governance_stderr.txt
+          GOV_EC=$?
+          python tools/p0_gate_check.py --strict --json \
+            > artifacts/p0_metrics_${DATE}.json 2>nightly_stderr.txt
+          P0_EC=$?
+          echo "governance_exit_code=${GOV_EC}" >> "$GITHUB_OUTPUT"
+          echo "p0_exit_code=${P0_EC}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Trend Analysis
+        id: trend
+        run: |
+          python - << 'PYEOF'
+          import json, pathlib, sys, os
+
+          artifact_dir = pathlib.Path("artifacts")
+          files = sorted(artifact_dir.glob("p0_metrics_*.json"))
+          if not files:
+              print("No metrics found.")
+              sys.exit(0)
+
+          rows = []
+          for f in files:
+              try:
+                  d = json.loads(f.read_text(encoding="utf-8"))
+                  rows.append({
+                      "date": f.stem.replace("p0_metrics_", ""),
+                      "active_ch": d.get("active_critical_high", 0),
+                      "p0_open":   d.get("P0_open_count", 0),
+                      "gate_pass": d.get("strict_gate_pass", False),
+                  })
+              except Exception:
+                  continue
+
+          # ── 控制台趋势表 ──
+          print("\n── P0 趋势看板 ──────────────────────────────")
+          print(f"{'日期':10s}  {'P0_open':>8s}  {'crit/high':>10s}  {'gate':>6s}")
+          for r in rows[-14:]:
+              flag = "PASS" if r["gate_pass"] else "FAIL"
+              print(f"{r['date']:10s}  {r['p0_open']:>8d}  {r['active_ch']:>10d}  {flag:>6s}")
+
+          slope_info = ""
+          if len(rows) >= 2:
+              slope = rows[-1]["active_ch"] - rows[-2]["active_ch"]
+              arrow = "down" if slope < 0 else ("flat" if slope == 0 else "UP")
+              slope_info = f"{rows[-1]['active_ch']} [{arrow}] (delta={slope:+d})"
+              print(f"\n  最近变化: {slope_info}")
+
+          # ── SLO 停滞检测：连续 N 天 active_critical_high 不下降 ──
+          SLO_STALL_DAYS = 3
+          stalled = False
+          if len(rows) >= SLO_STALL_DAYS + 1:
+              recent = [r["active_ch"] for r in rows[-(SLO_STALL_DAYS + 1):]]
+              # 全部相邻差 >= 0（不降）且最新值 > 0
+              if all(recent[i+1] >= recent[i] for i in range(SLO_STALL_DAYS)) and recent[-1] > 0:
+                  stalled = True
+                  print(f"\n[SLO-ALERT] active_critical_high 连续 {SLO_STALL_DAYS} 天未下降！")
+
+          # ── GitHub Job Summary ──
+          summary_file = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if summary_file:
+              with open(summary_file, "a", encoding="utf-8") as f:
+                  f.write("## P0 治理巡检趋势\n\n")
+                  f.write("| 日期 | P0_open | crit/high | Gate |\n")
+                  f.write("|------|---------|-----------|------|\n")
+                  for r in rows[-14:]:
+                      g = "PASS" if r["gate_pass"] else "FAIL"
+                      f.write(f"| {r['date']} | {r['p0_open']} | {r['active_ch']} | {g} |\n")
+                  if slope_info:
+                      f.write(f"\n**最近变化**: {slope_info}\n")
+                  if stalled:
+                      f.write(
+                          f"\n> :warning: **SLO 告警**: `active_critical_high` "
+                          f"已连续 {SLO_STALL_DAYS} 天未下降，请查看自动创建的 Issue。\n"
+                      )
+
+          # ── 输出供后续 step 判断 ──
+          output_file = os.environ.get("GITHUB_OUTPUT", "")
+          if output_file:
+              with open(output_file, "a") as f:
+                  f.write(f"stalled={'true' if stalled else 'false'}\n")
+                  f.write(f"current_ach={rows[-1]['active_ch'] if rows else -1}\n")
+          PYEOF
+
+      - name: Show stderr warnings
+        if: always()
+        run: |
+          cat governance_stderr.txt || true
+          cat nightly_stderr.txt || true
+
+      - name: SLO Stall Alert — open GitHub Issue if frozen
+        # 连续 N 天不下降时自动创建 Issue，避免告警淹没在日志里
+        if: steps.trend.outputs.stalled == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ach = '${{ steps.trend.outputs.current_ach }}';
+            const title = `[P0-SLO] active_critical_high 连续停滞未下降 (当前=${ach})`;
+            // 避免重复开 issue（7 天时间窗，避免历史遗留噪音）
+            const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'p0-slo',
+              per_page: 20,
+            });
+            const recentIssues = issues.filter(i => new Date(i.created_at) >= sevenDaysAgo);
+            if (recentIssues.some(i => i.title.startsWith('[P0-SLO]'))) {
+              core.notice('SLO 停滞 Issue 已存在，跳过重复创建。');
+              return;
+            }
+            const { data: created } = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: [
+                '## P0 SLO 告警 — active_critical_high 停滞',
+                '',
+                `**触发原因**: \`active_critical_high\` 连续 3 天未下降，当前值 = **${ach}**。`,
+                '',
+                '**SLA 要求**:',
+                '- [ ] 24h 内：指定清债负责人，更新 ALLOWLIST `owner` 字段',
+                '- [ ] 72h 内：合并至少 1 个使 critical/high 计数下降的 PR',
+                '- [ ] 关闭此 Issue 时在评论中记录收敛前后数据（Δ 值）',
+                '',
+                '**参考命令**:',
+                '```bash',
+                '# 查看当前所有 critical/high（按批次修复）',
+                'python tools/p0_gate_check.py --summary --verbose',
+                '# SQL Batch A（外部输入优先）',
+                'python tools/p0_gate_check.py --check sql --verbose 2>&1 | grep "A-外部"',
+                '```',
+                '',
+                `> 自动由 \`p0-governance-smoke\` Nightly job 生成 @ ${new Date().toISOString()}`,
+              ].join('\n'),
+              labels: ['p0-slo', 'debt-cleanup'],
+            });
+            core.warning(`已创建 SLO 告警 Issue #${created.number}: ${title}`);
+
+      - name: Update ops trend dashboard
+        if: always()
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          # 用今天的 metrics JSON 更新趋势看板
+          LATEST=$(ls artifacts/p0_metrics_${DATE}.json 2>/dev/null || ls artifacts/p0_metrics_*.json 2>/dev/null | tail -1)
+          if [ -n "$LATEST" ]; then
+            python tools/p0_trend_update.py --gate-json "$LATEST"
+          fi
+
+      - name: Generate weekly report (Monday only)
+        if: always()
+        run: |
+          # 每周一生成周报；workflow_dispatch 时也强制生成
+          DAY=$(date -u +%u)   # 1=Mon ... 7=Sun
+          if [ "${DAY}" = "1" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python tools/p0_weekly_report.py
+          fi
+
+      - name: Stability 30d Report
+        if: always()
+        run: |
+          python tools/stability_30d_report.py
+
+      - name: Governance-Strategy Dashboard
+        if: always()
+        run: |
+          python tools/governance_strategy_dashboard.py
+
+      - name: Stability Tools Regression Tests
+        id: regression_tests
+        if: always()
+        run: |
+          # 最小回归集：确保 anomaly schema / CI 软失败窗 / 字段兼容层不回退
+          python -m pytest tests/test_stability_tools.py -v --tb=short \
+            --junitxml=artifacts/test_stability_tools_results.xml
+          PYTEST_EC=$?
+          # 把是否有失败写入 GITHUB_OUTPUT，供后续 failure-snapshot 步骤使用
+          if [ "$PYTEST_EC" != "0" ]; then
+            echo "had_failures=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "had_failures=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0   # 测试失败不阻断 nightly；快照上传步骤会触发
+          # 输出 Job Summary
+          python - << 'PYEOF'
+          import xml.etree.ElementTree as ET, os, pathlib
+          xml_path = pathlib.Path("artifacts/test_stability_tools_results.xml")
+          if not xml_path.exists():
+              print("::warning::test_stability_tools_results.xml not found")
+          else:
+              root = ET.parse(xml_path).getroot()
+              suite = root if root.tag == "testsuite" else root.find("testsuite")
+              if suite is not None:
+                  tests   = suite.attrib.get("tests", "?")
+                  failures= suite.attrib.get("failures", "0")
+                  errors  = suite.attrib.get("errors", "0")
+                  icon = "✅" if failures == "0" and errors == "0" else "❌"
+                  print(f"::notice::Stability Tests: {icon} {tests} tests, {failures} failures, {errors} errors")
+                  summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+                  if summary:
+                      with open(summary, "a") as f:
+                          f.write(f"\n## Stability Tools 回归测试\n\n")
+                          f.write(f"{icon} **{tests}** tests | failures={failures} | errors={errors}\n")
+          PYEOF
+
+      - name: Upload regression failure snapshot
+        if: steps.regression_tests.outputs.had_failures == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-failure-snapshot-${{ github.run_id }}
+          path: |
+            artifacts/stability_30d_latest.json
+            artifacts/test_stability_tools_results.xml
+          retention-days: 30
+
+      - name: Batch Universe Dry-Run (data acceptance only)
+        id: batch_universe
+        if: always()
+        run: |
+          # 仅做数据验收（--dry-run），不执行回测，速度快
+          # 验证：stage1_universe.yaml 所有标的数据可达、字段完整
+          mkdir -p strategies/results
+          python strategies/stage1_batch.py --dry-run \
+            --out-dir artifacts
+          BATCH_EC=$?
+          if [ "$BATCH_EC" -eq "0" ]; then
+            echo "batch_status=all_pass"  >> "$GITHUB_OUTPUT"
+          elif [ "$BATCH_EC" -eq "1" ]; then
+            echo "batch_status=partial"   >> "$GITHUB_OUTPUT"
+          else
+            echo "batch_status=no_go"     >> "$GITHUB_OUTPUT"
+          fi
+          exit 0   # 不阻断 nightly；结果落 artifact 备查
+
+      - name: Batch Accessibility & Tradeability Alert
+        if: always()
+        run: |
+          python - << 'PYEOF'
+          import json, os, pathlib, sys
+          batch_files = sorted(pathlib.Path("artifacts").glob("batch_stage1_*.json"))
+          if not batch_files:
+              print("::warning::batch_stage1_*.json not found — skipping accessibility check")
+              sys.exit(0)
+          report = json.loads(batch_files[-1].read_text(encoding="utf-8"))
+          ACCESS_WARN_DEFAULT = 80.0
+          warnings_list = []
+          summary_rows  = []
+          for g in report.get("groups", []):
+              label           = g["label"]
+              total           = g["total"]
+              access_pct      = g.get("accessibility_pct", 100.0)
+              access_warn     = g.get("accessibility_warn_pct", ACCESS_WARN_DEFAULT)
+              td_fails        = g.get("tradeability_fail_count", 0)
+              confidence      = g.get("confidence", "MEDIUM")
+              verdict         = g.get("verdict", "?")
+              if access_pct < access_warn:
+                  status = "🔴"
+              elif td_fails > 0:
+                  status = "🟡"
+              else:
+                  status = "🟢"
+              summary_rows.append(
+                  f"| {status} {label} | {access_pct:.0f}% | {access_warn:.0f}% | {td_fails} | {confidence} | {verdict} |"
+              )
+              if access_pct < access_warn:
+                  msg = f"分组 [{label}] 数据可达率 {access_pct:.0f}% < 阈值{access_warn:.0f}%"
+                  warnings_list.append(msg)
+                  print(f"::warning::{msg}")
+              if td_fails > 0:
+                  msg = f"分组 [{label}] 有 {td_fails}/{total} 个标的成交可行性检查未通过"
+                  warnings_list.append(msg)
+                  print(f"::warning::{msg}")
+          summary_file = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if summary_file:
+              with open(summary_file, "a", encoding="utf-8") as f:
+                  f.write("## Batch Universe 可达性 & 成交可行性\n\n")
+                  f.write("| 分组 | 可达率 | 阈值 | TD失败数 | 置信度 | 判定 |\n")
+                  f.write("|------|--------|------|----------|--------|------|\n")
+                  for row in summary_rows:
+                      f.write(row + "\n")
+                  if warnings_list:
+                      f.write(f"\n> :warning: **{len(warnings_list)} 个告警** — 请检查数据源或调整阈值。\n")
+                      for w in warnings_list:
+                          f.write(f"> - {w}\n")
+                  else:
+                      f.write("\n> ✅ 所有分组可达率和成交约束均通过\n")
+          PYEOF
+
+      - name: Generate Weekly Diff Report
+        # 比较最近两份 batch JSON，产出 diff_report_<date>.md
+        if: always()
+        run: |
+          python tools/batch_diff.py --dir artifacts --out-dir artifacts || true
+          # 返回 1 表示发现告警；返回 0 表示无变化；两种情况均继续执行
+
+      - name: Ops Webhook Notification
+        # 将 ACCESSIBILITY ALERT 或 TRADEABILITY FAIL 推送到运维告警渠道
+        # 配置方式（在 repo Settings → Secrets → Actions 中填写任一 secret）：
+        #   FEISHU_WEBHOOK_URL   —— 飞书群自定义机器人 webhook
+        #   DINGTALK_WEBHOOK_URL —— 钉钉群机器人 webhook
+        #   SLACK_WEBHOOK_URL    —— Slack Incoming Webhook
+        if: always()
+        env:
+          FEISHU_WEBHOOK_URL:   ${{ secrets.FEISHU_WEBHOOK_URL }}
+          DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL:    ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          python - << 'PYEOF'
+          import hashlib, json, os, pathlib, sys, urllib.request, urllib.error
+
+          # ── 收集告警内容 ──
+          batch_files = sorted(pathlib.Path("artifacts").glob("batch_stage1_*.json"))
+          if not batch_files:
+              print("[webhook] 无 batch JSON，跳过推送")
+              sys.exit(0)
+
+          report = json.loads(batch_files[-1].read_text(encoding="utf-8"))
+          run_date = report.get("run_date", "unknown")
+          alerts: list[str] = []
+
+          for g in report.get("groups", []):
+              label       = g["label"]
+              total       = g["total"]
+              acc_pct     = g.get("accessibility_pct", 100.0)
+              acc_warn    = g.get("accessibility_warn_pct", 80.0)
+              td_fails    = g.get("tradeability_fail_count", 0)
+              if acc_pct < acc_warn:
+                  alerts.append(
+                      f"🔴 **ACCESSIBILITY ALERT** [{label}] "
+                      f"可达率 {acc_pct:.0f}% < 阈值 {acc_warn:.0f}%"
+                  )
+              if td_fails > 0:
+                  alerts.append(
+                      f"🟡 **TRADEABILITY FAIL** [{label}] "
+                      f"{td_fails}/{total} 个标的成交可行性未通过"
+                  )
+
+          if not alerts:
+              print("[webhook] 无告警，跳过推送")
+              sys.exit(0)
+
+          # ── 告警去重保护（防止同日同内容重复推送，如定时与手动同时触发）─────
+          _fp = hashlib.sha1(
+              (run_date + "nightly" + "|".join(sorted(alerts))).encode("utf-8")
+          ).hexdigest()[:16]
+          _dedup_file = pathlib.Path("artifacts/.webhook_sent.json")
+          _sent: dict = {}
+          if _dedup_file.exists():
+              try:
+                  _sent = json.loads(_dedup_file.read_text(encoding="utf-8"))
+              except Exception:
+                  pass
+          # TTL 清理：只保留近 14 天的键，避免文件长期膨胀
+          import datetime as _dt
+          _cutoff = (_dt.date.today() - _dt.timedelta(days=14)).isoformat()
+          _sent = {k: v for k, v in _sent.items() if k.split("::")[0] >= _cutoff}
+          _key = f"{run_date}::nightly"
+          if _sent.get(_key) == _fp:
+              print(f"[webhook] 去重跳过：本日相同告警已推送 (fp={_fp})")
+              sys.exit(0)
+          # ─────────────────────────────────────────────────────────────────
+
+          alert_text = "\n".join(alerts)
+          print(f"[webhook] 准备推送 {len(alerts)} 条告警 (fp={_fp})")
+
+          def _post(url: str, payload: dict) -> None:
+              data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+              req  = urllib.request.Request(
+                  url, data=data,
+                  headers={"Content-Type": "application/json; charset=utf-8"},
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as resp:
+                      print(f"  → {resp.status} {resp.read(100).decode('utf-8', 'ignore')}")
+              except urllib.error.URLError as e:
+                  print(f"  → 推送失败: {e}", file=sys.stderr)
+
+          # ── 飞书 ──
+          feishu_url = os.environ.get("FEISHU_WEBHOOK_URL", "")
+          if feishu_url:
+              payload = {
+                  "msg_type": "interactive",
+                  "uuid": _fp,  # 飞书服务端去重：相同 uuid 24h 内只接受一次
+                  "card": {
+                      "header": {
+                          "title": {"tag": "plain_text",
+                                    "content": f"⚠️ Stage1 Batch 运维告警 [{run_date}]"},
+                          "template": "red",
+                      },
+                      "elements": [
+                          {"tag": "div", "text": {"tag": "lark_md", "content": alert_text}},
+                          {"tag": "note", "elements": [
+                              {"tag": "plain_text",
+                               "content": "来自 p0-governance-smoke CI / Nightly Batch"}
+                          ]},
+                      ],
+                  },
+              }
+              _post(feishu_url, payload)
+
+          # ── 钉钉 ──
+          ding_url = os.environ.get("DINGTALK_WEBHOOK_URL", "")
+          if ding_url:
+              payload = {
+                  "msgtype": "markdown",
+                  "markdown": {
+                      "title": f"Stage1 Batch 告警 [{run_date}]",
+                      "text": (
+                          f"## ⚠️ Stage1 Batch 运维告警\n"
+                          f"**日期**: {run_date}\n\n"
+                          + alert_text.replace("**", "**")
+                      ),
+                  },
+              }
+              _post(ding_url, payload)
+
+          # ── Slack ──
+          slack_url = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if slack_url:
+              payload = {
+                  "text": f"⚠️ Stage1 Batch 运维告警 [{run_date}]",
+                  "attachments": [
+                      {
+                          "color": "#FF0000",
+                          "text": "\n".join(
+                              a.replace("🔴 **ACCESSIBILITY ALERT**", ":red_circle: ACCESSIBILITY ALERT")
+                               .replace("🟡 **TRADEABILITY FAIL**", ":warning: TRADEABILITY FAIL")
+                              for a in alerts
+                          ),
+                          "footer": "p0-governance-smoke CI",
+                      }
+                  ],
+              }
+              _post(slack_url, payload)
+
+          if not feishu_url and not ding_url and not slack_url:
+              print("[webhook] 未配置任何 webhook secret（FEISHU/DINGTALK/SLACK_WEBHOOK_URL），跳过推送")
+              print("[webhook] 请在 repo Settings → Secrets → Actions 中配置至少一个 webhook URL")
+          else:
+              # 推送成功，更新去重状态（下次相同内容不再推送）
+              _sent[_key] = _fp
+              _dedup_file.parent.mkdir(parents=True, exist_ok=True)
+              _dedup_file.write_text(
+                  json.dumps(_sent, ensure_ascii=False, indent=2), encoding="utf-8"
+              )
+              print(f"[webhook] 去重状态已保存 (fp={_fp})")
+          PYEOF
+
+      - name: Upload Nightly artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-nightly-${{ github.run_id }}
+          path: |
+            artifacts/governance_nightly_*.json
+            artifacts/p0_metrics_*.json
+            artifacts/test_stability_tools_results.xml
+            artifacts/batch_stage1_*.json
+            artifacts/batch_stage1_*.md
+            artifacts/diff_report_*.md
+            artifacts/diff_report_*.json
+          retention-days: 90    # 保留 90 天用于趋势分析
+
+      - name: Enforce Nightly Gates
+        if: always()
+        run: |
+          GOV_EC="${{ steps.nightly_check.outputs.governance_exit_code }}"
+          P0_EC="${{ steps.nightly_check.outputs.p0_exit_code }}"
+          if [ "${GOV_EC}" != "0" ] || [ "${P0_EC}" != "0" ]; then
+            echo "::error::Nightly gate failed: governance=${GOV_EC}, p0=${P0_EC}"
+            exit 1
+          fi
+
+      - name: Commit ops artifacts to ops-metrics branch
+        if: always()
+        run: |
+          git config user.email "ci-bot@noreply"
+          git config user.name  "P0 CI Bot"
+          git fetch origin ops-metrics:ops-metrics 2>/dev/null || true
+          git checkout -B ops-metrics
+          git add --force \
+            artifacts/p0_trend_latest.md \
+            artifacts/p0_trend_history.json \
+            artifacts/p0_weekly_latest.md \
+            artifacts/p0_audit_hash.json \
+            artifacts/p0_allowlist_touch_events.json \
+            artifacts/stability_30d_latest.md \
+            artifacts/stability_30d_latest.json \
+            artifacts/governance_strategy_dashboard.md 2>/dev/null || true
+          # 仅在有变更时提交，避免 [skip ci] 堆积
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(ops): P0 nightly update $(date -u +%Y-%m-%d) [skip ci]"
+            git push origin ops-metrics
+          else
+            echo "[INFO] ops artifacts 无变更，跳过提交"
+          fi
+        continue-on-error: true  # ops 分支推送失败不阻断正式结果
+
+  # ──────────────────────────────────────────────────────────────────
+  # Job 3: Release 分支模拟 — AllowList 过期强阻断
+  # ──────────────────────────────────────────────────────────────────
+  release-gate:
+    name: "Release Gate (enforce-expiry)"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.mode == 'all' || github.event.inputs.mode == 'release'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run Release Gate
+        id: release_check
+        run: |
+          mkdir -p artifacts
+          DATE=$(date -u +%Y%m%d)
+          set +e
+          python tools/p0_gate_check.py --strict --json --enforce-allowlist-expiry \
+            > artifacts/p0_release_${DATE}.json 2>release_stderr.txt
+          EC=$?
+          echo "exit_code=$EC" >> "$GITHUB_OUTPUT"
+          exit 0
+        continue-on-error: true
+
+      - name: Write Release Job Summary
+        if: always()
+        run: |
+          python - << 'PYEOF'
+          import json, pathlib, os, sys
+          files = sorted(pathlib.Path("artifacts").glob("p0_release_*.json"))
+          if not files:
+              sys.exit(0)
+          d = json.loads(files[-1].read_text(encoding="utf-8"))
+          ach  = d.get("active_critical_high", "?")
+          p0   = d.get("P0_open_count", "?")
+          gate = d.get("strict_gate_pass", False)
+          gov  = next((c["status"] for c in d.get("checks", []) if c["name"] == "allowlist_governance"), "?")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if summary:
+              icon = "PASS" if gate else "FAIL"
+              with open(summary, "a", encoding="utf-8") as f:
+                  f.write("## Release Gate 结果\n\n")
+                  f.write("| 指标 | 值 |\n|------|-----|\n")
+                  f.write(f"| P0_open_count | {p0} |\n")
+                  f.write(f"| active_critical_high (P0 范围) | {ach} |\n")
+                  f.write(f"| strict_gate_pass | {icon} |\n")
+                  f.write(f"| allowlist_governance | {gov} |\n")
+                  if not gate:
+                      f.write("\n> :no_entry: **Release 被阻断** — 请修复上述问题后重新提交。\n")
+                  else:
+                      f.write("\n> :white_check_mark: Release Gate 通过，可合并至发布分支。\n")
+          PYEOF
+
+      - name: Record audit artifact hashes
+        if: always()
+        run: |
+          # 记录4个审计产物的SHA-256，写入 artifacts/p0_audit_hash.json
+          python tools/p0_audit_hash.py || true
+
+      - name: Show stderr warnings
+        if: always()
+        run: cat release_stderr.txt || true
+
+      - name: Upload Release artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-release-${{ github.run_id }}
+          path: artifacts/p0_release_*.json
+          retention-days: 90
+
+      - name: Enforce Release Gate
+        if: steps.release_check.outputs.exit_code != '0'
+        run: |
+          echo "::error::Release Gate 失败（含过期 allowlist 阻断）。请清理过期豁免条目后重试。"
+          exit 1
+
+  # ──────────────────────────────────────────────────────────────────
+  # Job 4: 每日真实 Batch Run（周一至周五）
+  # 目标：每日落盘一份完整 batch JSON，供 diff_report 追踪参数稳态
+  # ──────────────────────────────────────────────────────────────────
+  daily-batch:
+    name: "Daily Real Batch Run (Mon-Fri)"
+    runs-on: ubuntu-latest
+    # 每天 01:00 UTC（北京时间 09:00），仅工作日（周一至周五）
+    # 也可通过 workflow_dispatch 手动触发
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 1-5') ||
+      github.event.inputs.mode == 'batch'
+    concurrency:
+      group: "${{ github.workflow }}-daily-batch"
+      cancel-in-progress: false   # 排队等待，不取消正在运行的 batch
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run Full Batch (--groups filter optional)
+        id: batch_run
+        run: |
+          mkdir -p artifacts
+          DATE=$(date -u +%Y-%m-%d)
+          echo "run_date=${DATE}" >> "$GITHUB_OUTPUT"
+          # 真实回测（无 --dry-run）；数据不可用的标的会有 error 记录
+          set +e
+          python strategies/stage1_batch.py \
+            --universe config/stage1_universe.yaml \
+            --out-dir artifacts
+          EC=$?
+          echo "exit_code=${EC}" >> "$GITHUB_OUTPUT"
+          exit 0   # 不阻断；结果落 artifact
+
+      - name: Generate Diff Report
+        if: always()
+        run: |
+          # 对比最近两份 batch JSON
+          python tools/batch_diff.py --dir artifacts --out-dir artifacts
+          EC=$?
+          if [ "$EC" -ne "0" ]; then
+            echo "::warning::diff_report 发现需关注项，请查看 artifacts/diff_report_*.md"
+          fi
+
+      - name: Ops Webhook Notification (Daily)
+        if: always()
+        env:
+          FEISHU_WEBHOOK_URL:   ${{ secrets.FEISHU_WEBHOOK_URL }}
+          DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL:    ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          python - << 'PYEOF'
+          import hashlib, json, os, pathlib, sys, urllib.request, urllib.error
+
+          batch_files = sorted(pathlib.Path("artifacts").glob("batch_stage1_*.json"))
+          if not batch_files:
+              sys.exit(0)
+
+          report   = json.loads(batch_files[-1].read_text(encoding="utf-8"))
+          run_date = report.get("run_date", "unknown")
+          alerts: list[str] = []
+
+          for g in report.get("groups", []):
+              acc_pct  = g.get("accessibility_pct", 100.0)
+              acc_warn = g.get("accessibility_warn_pct", 80.0)
+              td_fails = g.get("tradeability_fail_count", 0)
+              label    = g["label"]
+              total    = g["total"]
+              if acc_pct < acc_warn:
+                  alerts.append(
+                      f"🔴 ACCESSIBILITY [{label}] {acc_pct:.0f}% < {acc_warn:.0f}%"
+                  )
+              if td_fails > 0:
+                  alerts.append(
+                      f"🟡 TRADEABILITY [{label}] {td_fails}/{total} 标的失败"
+                  )
+
+          if not alerts:
+              print("[daily-webhook] 无告警，跳过推送")
+              sys.exit(0)
+
+          # ── 告警去重保护（防止同日同内容重复推送）────────────────────
+          _fp = hashlib.sha1(
+              (run_date + "daily" + "|".join(sorted(alerts))).encode("utf-8")
+          ).hexdigest()[:16]
+          _dedup_file = pathlib.Path("artifacts/.webhook_sent.json")
+          _sent: dict = {}
+          if _dedup_file.exists():
+              try:
+                  _sent = json.loads(_dedup_file.read_text(encoding="utf-8"))
+              except Exception:
+                  pass
+          # TTL 清理：只保留近 14 天的键，避免文件长期膨胀
+          import datetime as _dt
+          _cutoff = (_dt.date.today() - _dt.timedelta(days=14)).isoformat()
+          _sent = {k: v for k, v in _sent.items() if k.split("::")[0] >= _cutoff}
+          _key = f"{run_date}::daily"
+          if _sent.get(_key) == _fp:
+              print(f"[daily-webhook] 去重跳过：本日相同告警已推送 (fp={_fp})")
+              sys.exit(0)
+          # ─────────────────────────────────────────────────────────────────
+
+          def _post(url: str, payload: dict) -> None:
+              data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+              req  = urllib.request.Request(
+                  url, data=data,
+                  headers={"Content-Type": "application/json; charset=utf-8"},
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as resp:
+                      print(f"  → {resp.status}")
+              except urllib.error.URLError as e:
+                  print(f"  → 推送失败: {e}", file=sys.stderr)
+
+          alert_text = "\n".join(alerts)
+          feishu_url = os.environ.get("FEISHU_WEBHOOK_URL", "")
+          ding_url   = os.environ.get("DINGTALK_WEBHOOK_URL", "")
+          slack_url  = os.environ.get("SLACK_WEBHOOK_URL", "")
+
+          if feishu_url:
+              _post(feishu_url, {
+                  "msg_type": "interactive",
+                  "uuid": _fp,  # 飞书服务端去重
+                  "card": {
+                      "header": {"title": {"tag": "plain_text",
+                                           "content": f"⚠️ Daily Batch 告警 [{run_date}]"},
+                                 "template": "orange"},
+                      "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": alert_text}}],
+                  },
+              })
+          if ding_url:
+              _post(ding_url, {
+                  "msgtype": "markdown",
+                  "markdown": {"title": f"Daily Batch 告警 [{run_date}]",
+                               "text": f"## ⚠️ Daily Batch 告警\n{alert_text}"},
+              })
+          if slack_url:
+              _post(slack_url, {"text": f"⚠️ Daily Batch 告警 [{run_date}]\n{alert_text}"})
+          # 推送成功，更新去重状态
+          if feishu_url or ding_url or slack_url:
+              _sent[_key] = _fp
+              _dedup_file.parent.mkdir(parents=True, exist_ok=True)
+              _dedup_file.write_text(
+                  json.dumps(_sent, ensure_ascii=False, indent=2), encoding="utf-8"
+              )
+              print(f"[daily-webhook] 去重状态已保存 (fp={_fp})")
+          PYEOF
+
+      - name: Write Job Summary
+        if: always()
+        run: |
+          python - << 'PYEOF'
+          import json, os, pathlib, sys
+
+          batch_files = sorted(pathlib.Path("artifacts").glob("batch_stage1_*.json"))
+          diff_files  = sorted(pathlib.Path("artifacts").glob("diff_report_*.md"))
+          summary_file = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if not summary_file:
+              sys.exit(0)
+
+          with open(summary_file, "a", encoding="utf-8") as f:
+              f.write("## Daily Batch Run 结果\n\n")
+              if batch_files:
+                  report = json.loads(batch_files[-1].read_text(encoding="utf-8"))
+                  total  = report.get("total_assets", 0)
+                  passed = report.get("total_passed", 0)
+                  f.write(f"| 项目 | 值 |\n|------|----|\n")
+                  f.write(f"| 运行日期 | {report.get('run_date', '?')} |\n")
+                  f.write(f"| Pipeline | `{report.get('pipeline_version', '?')}` |\n")
+                  f.write(f"| 总通过 | {passed}/{total} |\n\n")
+                  f.write("| 分组 | 可达率 | 通过率 | 夏普中位 | 判定 |\n")
+                  f.write("|------|--------|--------|----------|------|\n")
+                  for g in report.get("groups", []):
+                      v = g.get("verdict", "?")
+                      icon = {"GO": "✅", "HOLD": "🟡", "NO-GO": "❌"}.get(v, "?")
+                      f.write(f"| {g['label']} | {g.get('accessibility_pct',0):.0f}% "
+                              f"| {g.get('pass_rate_pct',0):.0f}% "
+                              f"| {g.get('median_sharpe',0):.2f} "
+                              f"| {icon} {v} |\n")
+              if diff_files:
+                  f.write(f"\n> 差异报告: `{diff_files[-1].name}` — 见 artifact 附件\n")
+          PYEOF
+
+      - name: Upload Daily Batch Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-batch-${{ steps.batch_run.outputs.run_date || github.run_id }}
+          path: |
+            artifacts/batch_stage1_*.json
+            artifacts/batch_stage1_*.md
+            artifacts/diff_report_*.md
+            artifacts/diff_report_*.json
+          retention-days: 7   # 每日归档保留 7 天，够支撑一周比对

@@ -1,0 +1,26 @@
+{
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "include": [
+    "core",
+    "data_manager",
+    "easy_xt",
+    "gui_app",
+    "strategies",
+    "tools",
+    "PYPlugins"
+  ],
+  "exclude": [
+    "external",
+    "myenv",
+    "xtquant",
+    "101因子",
+    "学习实例",
+    "学习案例",
+    "tests",
+    "artifacts",
+    "**/__pycache__",
+    "**/.venv",
+    "**/venv"
+  ]
+}
