@@ -54,6 +54,7 @@ class StrategyRunner:
         duckdb_path: Optional[str] = None,
         enable_risk_engine: bool = True,
         enable_audit_trail: bool = False,
+        risk_config: Optional[Any] = None,
     ) -> None:
         """
         Args:
@@ -67,6 +68,7 @@ class StrategyRunner:
             duckdb_path:        DuckDB 路径，不传走 resolve_duckdb_path 逻辑
             enable_risk_engine: 是否接入 RiskEngine 预交易风控
             enable_audit_trail: 是否写 AuditTrail（生产级合规要求时开启）
+            risk_config:        风控配置来源（JSON 文件路径 / dict / None）
         """
         self.strategy = strategy
         self.codes = codes
@@ -78,14 +80,15 @@ class StrategyRunner:
         self.duckdb_path = duckdb_path
         self.enable_risk_engine = enable_risk_engine
         self.enable_audit_trail = enable_audit_trail
+        self.risk_config = risk_config
 
     def _build_risk_engine(self) -> Optional[Any]:
         if not self.enable_risk_engine:
             return None
         try:
-            from core.risk_engine import RiskEngine
+            from core.risk_config_loader import load_risk_engine
 
-            return RiskEngine()
+            return load_risk_engine(self.risk_config)
         except Exception:
             log.warning("RiskEngine 初始化失败，回测将跳过风控检查")
             return None

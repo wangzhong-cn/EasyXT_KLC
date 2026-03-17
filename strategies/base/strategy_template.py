@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """
-策略基础模板
-所有策略都应该继承这个基类
+策略基础模板 (已弃用)
+
+.. deprecated:: 2026.3
+    请使用 ``strategies.base_strategy.BaseStrategy``，它支持：
+    - 统一生命周期钩子 (on_init / on_bar / on_order / on_risk / on_stop)
+    - StrategyContext 注入 (RiskEngine + AuditTrail)
+    - 可被 StrategyRunner / BacktestEngine 统一驱动
+
+    如需快速适配旧策略，可使用 ``strategies.legacy_adapter.LegacyStrategyAdapter``。
 """
 
 import os
 import sys
+import warnings
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Optional
@@ -16,11 +24,18 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import easy_xt
 
+warnings.warn(
+    "strategies.base.strategy_template.BaseStrategy 已弃用，"
+    "请迁移到 strategies.base_strategy.BaseStrategy。"
+    "详见 strategies/legacy_adapter.py 适配器。",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 
 class BaseStrategy(ABC):
     """
-    策略基类
-    所有策略都应该继承这个类
+    策略基类 (已弃用 — 请使用 strategies.base_strategy.BaseStrategy)
 
     支持复权参数：
     - adjust='none': 不复权（原始价格，适合实时交易）

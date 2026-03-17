@@ -447,6 +447,12 @@ class BacktestEngine:
 
         metrics = calc_all_metrics(equity_series, trades_df, self.config.initial_capital)
 
+        # ── 组合风险分析（可选） ────────────────────────────────────────
+        if self._risk_engine is not None:
+            self._enrich_with_portfolio_risk(
+                metrics, equity_series, positions, latest_prices, final_equity,
+            )
+
         return BacktestResult(
             equity_curve=equity_series,
             trades=trades_df,
@@ -533,6 +539,46 @@ class BacktestEngine:
                 "stamp": stamp,
             }
         )
+
+    def _enrich_with_portfolio_risk(
+        self,
+        metrics: Dict[str, Any],
+        equity_series: pd.Series,
+        positions: Dict[str, "_Position"],
+        latest_prices: Dict[str, float],
+        final_equity: float,
+    ) -> None:
+        """在 metrics 中追加 PortfolioRiskAnalyzer 结果（best-effort）。"""
+        try:
+            from core.portfolio_risk import PortfolioRiskAnalyzer
+        except ImportError:
+            return
+
+        # 构造每日收益率
+        if len(equity_series) < 3:
+            return
+        daily_returns = equity_series.pct_change().dropna().tolist()
+
+        # 各标的组合数据
+        portfolio: Dict[str, Dict[str, Any]] = {}
+        for code, pos in positions.items():
+            if pos.quantity <= 0:
+                continue
+            mv = pos.market_value(latest_prices.get(code, pos.avg_cost))
+            portfolio[code] = {"nav": mv, "returns": daily_returns}
+
+        if not portfolio:
+            return
+
+        try:
+            analyzer = PortfolioRiskAnalyzer()
+            var_result = analyzer.portfolio_var95(portfolio, total_nav=final_equity)
+            metrics["portfolio_var95"] = var_result.portfolio_var95
+            metrics["portfolio_var95_pct"] = var_result.portfolio_var95_pct
+            metrics["portfolio_cvar95"] = var_result.portfolio_cvar95
+            metrics["portfolio_cvar95_pct"] = var_result.portfolio_cvar95_pct
+        except Exception:
+            self._logger.debug("PortfolioRiskAnalyzer 计算失败，跳过")
 
     def _load_data(
         self,
