@@ -180,7 +180,7 @@ P2 增强方向：
 
 ---
 
-### Phase 4（GUI 功能完善）— 进行中 [2026-03-15 起]
+### Phase 4（GUI 功能完善）— 已关闭 [2026-03-15 起 / 验收通过]
 
 **目标**：完成 Stage 2.2 原生图表画线工具；完善本地缓存管理；保持 P0 gate 绿色。
 
@@ -204,15 +204,9 @@ P2 增强方向：
   - `get_drawings(timeout) → list`
   - `on_drawing_created/deleted/updated(callback)`
 
-**Phase 4 验收门槛**：
+**Phase 4 已关闭 [2026-03-xx]**：所有验收门槛达成。测试基线 3764 passed / 1 skipped，P0 gate `strict_pass = true`，画线 API 无 TODO。
 
-| 指标 | 标准 |
-|------|------|
-| 全量回归 | `pytest --tb=line -q` ≥ 2282 passed, 10 skipped, 0 failed |
-| P0 gate | `strict_pass = true` |
-| 画线 API 完整 | chart.addDrawing / removeDrawing / loadDrawings / getDrawings 均无 TODO 残留 |
 
----
 
 ### 背景
 
