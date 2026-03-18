@@ -33,6 +33,19 @@ try:
 except Exception:
     pass
 
+# Pre-import xtquant so that test_api.py's module-level _stub_module()
+# (which checks "if key not in sys.modules") does NOT replace the real
+# package with a plain types.ModuleType stub (which has no __path__ and
+# breaks "import xtquant.xtconstant" in later tests).
+try:
+    import xtquant  # noqa: F401
+    import xtquant.xtdata  # noqa: F401
+    import xtquant.xtconstant  # noqa: F401
+    import xtquant.xttype  # noqa: F401
+    import xtquant.xttrader  # noqa: F401
+except Exception:
+    pass
+
 
 @pytest.fixture(scope="session")
 def qapp():

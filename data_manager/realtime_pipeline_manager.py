@@ -314,9 +314,9 @@ class RealtimePipelineManager:
             high = max(price, float(quote.get("high") or price))
             low = min(price, float(quote.get("low") or price))
         else:
-            open_price = price
-            high = price
-            low = price
+            high = max(price, float(quote.get("high") or price))
+            low_raw = float(quote.get("low") or 0)
+            low = min(price, low_raw) if low_raw > 0 else price
         volume = float(quote.get("volume") or 0)
         return {
             "time": bar_time,
