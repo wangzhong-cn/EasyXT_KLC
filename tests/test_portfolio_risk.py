@@ -6,7 +6,12 @@ tests/test_portfolio_risk.py
 import math
 import pytest
 
-from core.portfolio_risk import PortfolioRiskAnalyzer, PortfolioVaRResult
+from core.portfolio_risk import (
+    PortfolioRiskAnalyzer,
+    PortfolioVaRResult,
+    SectorConcentrationResult,
+    MultiAccountExposure,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +278,186 @@ class TestQuickVar:
         assert result.portfolio_var95 >= 0.0
         assert "A" in result.per_position_var95
         assert "B" in result.per_position_var95
+
+
+# ---------------------------------------------------------------------------
+# R7 补充：+20 个新测试
+# ---------------------------------------------------------------------------
+
+
+class TestPortfolioVar95Formulas:
+    """验证 PortfolioVaRResult pct 字段与绝对值字段一致性。"""
+
+    def test_var95_pct_equals_var_over_nav(self):
+        rets = _simple_returns(50, seed_val=0.03)
+        pos = {"A": {"nav": 60000.0, "returns": rets}, "B": {"nav": 40000.0, "returns": rets}}
+        result = PortfolioRiskAnalyzer().portfolio_var95(pos, total_nav=100000.0)
+        assert abs(result.portfolio_var95_pct - result.portfolio_var95 / 100000.0) < 1e-5
+
+    def test_cvar95_pct_equals_cvar_over_nav(self):
+        rets = _simple_returns(50, seed_val=0.03)
+        pos = {"A": {"nav": 80000.0, "returns": rets}}
+        result = PortfolioRiskAnalyzer().portfolio_var95(pos, total_nav=200000.0)
+        assert abs(result.portfolio_cvar95_pct - result.portfolio_cvar95 / 200000.0) < 1e-5
+
+    def test_cvar95_ge_var95(self):
+        """CVaR95 ≥ VaR95（数学不变式）。"""
+        rets = _simple_returns(100, seed_val=0.02)
+        pos = {"A": {"nav": 50000.0, "returns": rets}}
+        result = PortfolioRiskAnalyzer().portfolio_var95(pos, total_nav=100000.0)
+        assert result.portfolio_cvar95 >= result.portfolio_var95
+
+    def test_n_observations_matches_portfolio_returns_length(self):
+        rets = _simple_returns(30, seed_val=0.02)
+        pos = {"X": {"nav": 100000.0, "returns": rets}}
+        result = PortfolioRiskAnalyzer().portfolio_var95(pos, total_nav=100000.0)
+        assert result.n_observations == len(result.portfolio_returns) == 30
+
+    def test_empty_positions_returns_zero_result(self):
+        result = PortfolioRiskAnalyzer().portfolio_var95({}, total_nav=100000.0)
+        assert result.portfolio_var95 == 0.0
+        assert result.portfolio_var95_pct == 0.0
+
+
+class TestPortfolioModeMinLen:
+    """portfolio mode 截断到 min_len。"""
+
+    def test_unequal_sequences_truncated(self):
+        rets_long = [0.01, -0.02] * 50     # 100 samples
+        rets_short = [-0.03, 0.01] * 10    # 20 samples
+        pos = {
+            "A": {"nav": 50000.0, "returns": rets_long},
+            "B": {"nav": 50000.0, "returns": rets_short},
+        }
+        result = PortfolioRiskAnalyzer().portfolio_var95(
+            pos, total_nav=100000.0, correlation_method="portfolio"
+        )
+        assert result.n_observations == 20  # min_len
+
+    def test_weighted_sum_uses_max_len(self):
+        """weighted_sum 使用最长序列，不截断。"""
+        rets_long = [0.01] * 80
+        rets_short = [-0.01] * 20
+        pos = {
+            "A": {"nav": 50000.0, "returns": rets_long},
+            "B": {"nav": 50000.0, "returns": rets_short},
+        }
+        result = PortfolioRiskAnalyzer().portfolio_var95(
+            pos, total_nav=100000.0, correlation_method="weighted_sum"
+        )
+        assert result.n_observations == 80  # max_len
+
+
+class TestSectorConcentrationEdges:
+    def test_all_unknown_sectors(self):
+        """所有标的不在 sector_map → unknown_weight = 1.0。"""
+        positions = {"A": 60000.0, "B": 40000.0}
+        result = PortfolioRiskAnalyzer().sector_concentration(positions, {})
+        assert result.unknown_weight == pytest.approx(1.0)
+        assert result.sector_weights == {}
+
+    def test_negative_positions_excluded(self):
+        """负市值持仓被排除，不计入总市值。"""
+        positions = {"A": 50000.0, "SHORT": -10000.0}
+        sm = {"A": "银行"}
+        result = PortfolioRiskAnalyzer().sector_concentration(positions, sm)
+        # total should use only positive: 50_000
+        assert result.sector_weights["银行"] == pytest.approx(1.0)
+        assert result.unknown_weight == pytest.approx(0.0)
+
+    def test_all_negative_positions_returns_default(self):
+        """所有市值为负时返回空结果。"""
+        positions = {"A": -5000.0, "B": -3000.0}
+        result = PortfolioRiskAnalyzer().sector_concentration(positions, {"A": "科技"})
+        assert isinstance(result, SectorConcentrationResult)
+        assert result.top3_concentration == 0.0
+
+    def test_top_n_equals_one(self):
+        """top_n=1 → top3_concentration == max_sector_weight。"""
+        positions = {"X": 60000.0, "Y": 40000.0}
+        sm = {"X": "银行", "Y": "科技"}
+        result = PortfolioRiskAnalyzer().sector_concentration(positions, sm, top_n=1)
+        assert result.top3_concentration == pytest.approx(result.max_sector_weight)
+
+    def test_top_n_exceeds_sector_count(self):
+        """top_n 大于行业数时仍正常返回（sum 截断到实际数量）。"""
+        positions = {"A": 50000.0}
+        sm = {"A": "银行"}
+        result = PortfolioRiskAnalyzer().sector_concentration(positions, sm, top_n=5)
+        assert result.top3_concentration == pytest.approx(1.0)
+
+
+class TestAggregateMultiAccountEdges:
+    def test_negative_positions_excluded_from_gross_long(self):
+        """空头持仓不计入 platform_gross_long。"""
+        accounts = {
+            "acc1": {"nav": 100000.0, "positions": {"LONG": 80000.0, "SHORT": -20000.0}},
+        }
+        result = PortfolioRiskAnalyzer().aggregate_multi_account(accounts)
+        assert result.platform_gross_long == pytest.approx(80000.0)
+        assert "SHORT" not in result.aggregated_positions
+
+    def test_zero_nav_account(self):
+        """零净值账户贡献 0，不影响 total_nav。"""
+        accounts = {
+            "real": {"nav": 100000.0, "positions": {}},
+            "zero": {"nav": 0.0, "positions": {}},
+        }
+        result = PortfolioRiskAnalyzer().aggregate_multi_account(accounts)
+        assert result.total_nav == pytest.approx(100000.0)
+
+    def test_aggregated_hhi_two_equal_positions(self):
+        """2 只等权聚合持仓 → HHI = 0.5。"""
+        accounts = {
+            "a": {"nav": 100000.0, "positions": {"X": 50000.0, "Y": 50000.0}},
+        }
+        result = PortfolioRiskAnalyzer().aggregate_multi_account(accounts)
+        assert result.aggregated_hhi == pytest.approx(0.5, abs=1e-4)
+
+
+class TestEstimateBetaEdges:
+    def test_four_samples_returns_one(self):
+        """n < 5 → 返回中性 Beta = 1.0。"""
+        asset = [0.01, -0.02, 0.03, -0.01]
+        market = [0.02, -0.01, 0.02, -0.02]
+        beta = PortfolioRiskAnalyzer().estimate_beta(asset, market)
+        assert beta == 1.0
+
+    def test_five_samples_computes_beta(self):
+        """n == 5 → 正常计算（不返回 1.0）。"""
+        asset = [0.01, -0.02, 0.03, -0.01, 0.02]
+        market = [0.01, -0.02, 0.03, -0.01, 0.02]  # identical → beta ≈ 1.0
+        beta = PortfolioRiskAnalyzer().estimate_beta(asset, market)
+        assert beta == pytest.approx(1.0)  # identical series → beta = 1
+
+    def test_negative_beta(self):
+        """资产与市场完全反向 → beta < 0。"""
+        market = [0.01] * 10 + [-0.01] * 10
+        asset = [-0.01] * 10 + [0.01] * 10
+        beta = PortfolioRiskAnalyzer().estimate_beta(asset, market)
+        assert beta < 0
+
+    def test_zero_market_variance_returns_one(self):
+        """市场收益率无变化（方差=0）时返回 1.0。"""
+        market = [0.0] * 20
+        asset = [0.01] * 20
+        beta = PortfolioRiskAnalyzer().estimate_beta(asset, market)
+        assert beta == 1.0
+
+
+class TestQuickVarEdges:
+    def test_empty_positions_returns_zero_result(self):
+        result = PortfolioRiskAnalyzer.quick_var({}, total_nav=100000.0)
+        assert isinstance(result, PortfolioVaRResult)
+        assert result.portfolio_var95 == 0.0
+
+    def test_single_position_matches_direct_call(self):
+        rets = _simple_returns(50, seed_val=0.03)
+        quick = PortfolioRiskAnalyzer.quick_var(
+            {"A": (80000.0, rets)}, total_nav=100000.0
+        )
+        direct = PortfolioRiskAnalyzer().portfolio_var95(
+            {"A": {"nav": 80000.0, "returns": rets}}, total_nav=100000.0
+        )
+        assert quick.portfolio_var95 == direct.portfolio_var95
+

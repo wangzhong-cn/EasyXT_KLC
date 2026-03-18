@@ -421,3 +421,271 @@ class TestRiskEventDBPersistence:
             direction="buy", positions={}, nav=95_000,
         )
 
+
+# ---------------------------------------------------------------------------
+# R7: 补充覆盖 — 共 30 个新测试
+# ---------------------------------------------------------------------------
+
+
+class TestRiskThresholdsDefaults:
+    """RiskThresholds 默认字段值与等价性。"""
+
+    def test_default_values(self):
+        t = RiskThresholds()
+        assert t.concentration_limit == 0.30
+        assert t.hhi_limit == 0.18
+        assert t.intraday_drawdown_halt == 0.05
+        assert t.intraday_drawdown_warn == 0.03
+        assert t.var95_limit == 0.02
+        assert t.net_exposure_limit == 0.95
+
+    def test_equality(self):
+        assert RiskThresholds() == RiskThresholds()
+
+    def test_inequality(self):
+        assert RiskThresholds(concentration_limit=0.10) != RiskThresholds()
+
+
+class TestRiskActionEnum:
+    def test_values(self):
+        assert RiskAction.PASS.value == "pass"
+        assert RiskAction.WARN.value == "warn"
+        assert RiskAction.LIMIT.value == "limit"
+        assert RiskAction.HALT.value == "halt"
+
+
+class TestRiskCheckResultBlocked:
+    def test_pass_not_blocked(self):
+        from core.risk_engine import RiskCheckResult
+        r = RiskCheckResult(RiskAction.PASS)
+        assert not r.blocked
+
+    def test_warn_not_blocked(self):
+        from core.risk_engine import RiskCheckResult
+        r = RiskCheckResult(RiskAction.WARN)
+        assert not r.blocked
+
+    def test_limit_is_blocked(self):
+        from core.risk_engine import RiskCheckResult
+        r = RiskCheckResult(RiskAction.LIMIT)
+        assert r.blocked
+
+    def test_halt_is_blocked(self):
+        from core.risk_engine import RiskCheckResult
+        r = RiskCheckResult(RiskAction.HALT)
+        assert r.blocked
+
+
+class TestNetExposureExtended:
+    def test_negative_positions_reduce_exposure(self, engine):
+        """空头持仓（负市值）降低净敞口。"""
+        result = engine.get_net_exposure({"LONG": 80_000, "SHORT": -20_000}, 100_000)
+        assert abs(result - 0.6) < 1e-9
+
+    def test_empty_positions(self, engine):
+        assert engine.get_net_exposure({}, 100_000) == 0.0
+
+
+class TestHHIExtended:
+    def test_zero_nav_empty_positions_returns_zero(self, engine):
+        """持仓为空时 HHI = 0，不考虑 nav。"""
+        assert engine.get_hhi({}, 0) == 0.0
+
+    def test_ten_equal_weight(self, engine):
+        """10 只等权 → HHI = 0.1。"""
+        positions = {str(i): 10_000.0 for i in range(10)}
+        result = engine.get_hhi(positions, 100_000)
+        assert abs(result - 0.1) < 1e-9
+
+    def test_in_range(self, engine):
+        positions = {"A": 60_000, "B": 30_000, "C": 10_000}
+        result = engine.get_hhi(positions, 100_000)
+        assert 0.0 < result <= 1.0
+
+
+class TestCalcVar95Extended:
+    def test_single_return_negative(self, engine):
+        """单个负收益 → VaR = 该收益的绝对值。"""
+        var = engine.calc_var95([-0.02])
+        assert var == pytest.approx(0.02)
+
+    def test_all_same_negative(self, engine):
+        """全部相同负收益 → VaR = 该绝对值。"""
+        var = engine.calc_var95([-0.015] * 100)
+        assert var == pytest.approx(0.015)
+
+    def test_order_independent(self, engine):
+        """顺序不影响 VaR 计算（排序无关）。"""
+        import random
+        rets = [-0.05, -0.03, -0.01, 0.01, 0.03, 0.05]
+        shuffled = rets.copy()
+        random.shuffle(shuffled)
+        assert engine.calc_var95(rets) == engine.calc_var95(shuffled)
+
+    def test_minimum_returns_zero_or_positive(self, engine):
+        rets = [0.01] * 5 + [-0.001] * 5
+        var = engine.calc_var95(rets)
+        assert var >= 0.0
+
+
+class TestStratifiedThresholds:
+    def test_register_and_resolve_account(self, engine):
+        """注册账户专属阈值后 _resolve_thresholds 优先返回账户阈值。"""
+        t = RiskThresholds(concentration_limit=0.10)
+        engine.register_thresholds("vip_acc", t)
+        resolved = engine._resolve_thresholds("vip_acc")
+        assert resolved.concentration_limit == 0.10
+
+    def test_strategy_fallback(self, engine):
+        """未注册账户阈值时回退到 strategy_id 阈值。"""
+        t_strategy = RiskThresholds(concentration_limit=0.15)
+        engine.register_thresholds("strat_A", t_strategy)
+        resolved = engine._resolve_thresholds("unknown_acc", "strat_A")
+        assert resolved.concentration_limit == 0.15
+
+    def test_default_fallback(self, engine):
+        """无账户和策略阈值时回退到引擎全局阈值。"""
+        resolved = engine._resolve_thresholds("no_acc")
+        assert resolved == engine.thresholds
+
+    def test_account_overrides_strategy(self, engine):
+        """账户阈值优先于策略阈值。"""
+        t_acc = RiskThresholds(concentration_limit=0.05)
+        t_strat = RiskThresholds(concentration_limit=0.25)
+        engine.register_thresholds("acc_x", t_acc)
+        engine.register_thresholds("strat_x", t_strat)
+        resolved = engine._resolve_thresholds("acc_x", "strat_x")
+        assert resolved.concentration_limit == 0.05  # account wins
+
+
+class TestRiskStats:
+    def test_stats_incremented_on_pass(self, engine):
+        """每次 check_pre_trade 都增加对应账户的计数。"""
+        engine.check_pre_trade("acc_s", "A", 1, 1.0, "buy", {}, 1_000_000)
+        stats = engine.get_risk_stats("acc_s")
+        assert stats.get("pass", 0) >= 1
+
+    def test_stats_for_all_accounts(self, engine):
+        """get_risk_stats(None) 返回所有账户。"""
+        engine.check_pre_trade("s1", "A", 1, 1.0, "buy", {}, 100_000)
+        engine.check_pre_trade("s2", "A", 1, 1.0, "buy", {}, 100_000)
+        all_stats = engine.get_risk_stats()
+        assert "s1" in all_stats
+        assert "s2" in all_stats
+
+    def test_reset_stats_per_account(self, engine):
+        engine.check_pre_trade("r1", "A", 1, 1.0, "buy", {}, 100_000)
+        engine.reset_risk_stats("r1")
+        assert engine.get_risk_stats("r1") == {}
+
+    def test_reset_stats_all(self, engine):
+        engine.check_pre_trade("r2", "A", 1, 1.0, "buy", {}, 100_000)
+        engine.check_pre_trade("r3", "A", 1, 1.0, "buy", {}, 100_000)
+        engine.reset_risk_stats()
+        assert engine.get_risk_stats() == {}
+
+
+class TestUpdateDailyHigh:
+    def test_new_account_initialized(self, engine):
+        engine.update_daily_high("new_acc", 200_000)
+        assert engine._daily_high["new_acc"] == 200_000
+
+    def test_higher_value_updates(self, engine):
+        engine.update_daily_high("acc_u", 100_000)
+        engine.update_daily_high("acc_u", 120_000)
+        assert engine._daily_high["acc_u"] == 120_000
+
+    def test_lower_value_does_not_downgrade(self, engine):
+        engine.update_daily_high("acc_d", 100_000)
+        engine.update_daily_high("acc_d", 80_000)
+        assert engine._daily_high["acc_d"] == 100_000
+
+
+class TestAccountIsolation:
+    def test_drawdown_accounts_isolated(self, engine):
+        """账户 A 的回撤不影响账户 B。"""
+        engine.update_daily_high("iso_a", 100_000)
+        engine.update_daily_high("iso_b", 100_000)
+        # iso_a 有回撤
+        dd_a = engine.get_intraday_drawdown("iso_a", 90_000)
+        # iso_b 无回撤
+        dd_b = engine.get_intraday_drawdown("iso_b", 100_000)
+        assert dd_a == pytest.approx(0.10)
+        assert dd_b == 0.0
+
+
+class TestCalibrateThresholds:
+    def test_empty_returns_gives_defaults(self):
+        t = RiskEngine.calibrate_thresholds_from_returns([])
+        assert t == RiskThresholds()
+
+    def test_stable_returns_give_low_halt(self):
+        """低波动时 halt = max(3σ, 0.04)，σ 小时 halt = 0.04。"""
+        rets = [0.001] * 100
+        t = RiskEngine.calibrate_thresholds_from_returns(rets)
+        assert t.intraday_drawdown_halt >= 0.04
+
+    def test_volatile_returns_set_higher_halt(self):
+        """高波动时 halt > 0.04。"""
+        rets = [0.02, -0.02] * 50  # σ ≈ 0.02, 3σ ≈ 0.06
+        t = RiskEngine.calibrate_thresholds_from_returns(rets)
+        assert t.intraday_drawdown_halt > 0.04
+
+    def test_safety_margin_respected(self):
+        """safety_margin=2.0 应使 var95_limit 约为 safety_margin=1.5 时的 1.33 倍。"""
+        rets = [-0.05] + [-0.02] * 5 + [0.01] * 14
+        t1 = RiskEngine.calibrate_thresholds_from_returns(rets, var95_safety_margin=1.5)
+        t2 = RiskEngine.calibrate_thresholds_from_returns(rets, var95_safety_margin=2.0)
+        assert t2.var95_limit >= t1.var95_limit
+
+    def test_concentration_passthrough(self):
+        """concentration_limit 直接透传，不被校准修改。"""
+        t = RiskEngine.calibrate_thresholds_from_returns(
+            [0.01] * 30, concentration_limit=0.12
+        )
+        assert t.concentration_limit == 0.12
+
+
+class TestPreTradeCheckEdgeCases:
+    def test_var95_within_limit_passes(self, engine):
+        """VaR95 未超限时不触发 WARN。"""
+        good_returns = [0.01, -0.005, 0.008] * 20  # small var
+        result = engine.check_pre_trade(
+            account_id="var_ok", code="A", volume=10, price=10.0,
+            direction="buy", positions={}, nav=500_000,
+            returns=good_returns,
+        )
+        assert result.action == RiskAction.PASS
+
+    def test_no_returns_skips_var_check(self, engine):
+        """returns=None → 跳过 VaR 检查，不干扰其他检查结果。"""
+        result = engine.check_pre_trade(
+            account_id="no_ret", code="A", volume=10, price=10.0,
+            direction="buy", positions={}, nav=500_000,
+            returns=None,
+        )
+        assert result.action == RiskAction.PASS
+        assert "var95" not in result.metrics
+
+    def test_strategy_id_threshold_used(self):
+        """strategy_id 专属阈值被正确应用。"""
+        eng = RiskEngine()
+        t = RiskThresholds(
+            concentration_limit=0.05,  # very strict
+            net_exposure_limit=0.95,
+            intraday_drawdown_halt=0.05,
+        )
+        eng.register_thresholds("strat_strict", t)
+        result = eng.check_pre_trade(
+            account_id="unknown_acc",
+            code="BIG",
+            volume=10000,
+            price=10.0,   # 100_000 trade value
+            direction="buy",
+            positions={},
+            nav=100_000,  # concentration = 100_000/100_000 = 100% > 5% limit
+            strategy_id="strat_strict",
+        )
+        assert result.action == RiskAction.LIMIT
+
+
