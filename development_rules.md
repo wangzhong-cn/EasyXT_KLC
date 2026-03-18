@@ -204,9 +204,47 @@ P2 增强方向：
   - `get_drawings(timeout) → list`
   - `on_drawing_created/deleted/updated(callback)`
 
-**Phase 4 已关闭 [2026-03-xx]**：所有验收门槛达成。测试基线 3764 passed / 1 skipped，P0 gate `strict_pass = true`，画线 API 无 TODO。
+**Phase 4 已关闭 [2026-03-18]**：所有验收门槛达成。测试基线 3764 passed / 1 skipped，P0 gate `strict_pass = true`，画线 API 无 TODO。
 
+---
 
+### Phase 5（覆盖率提升 + 测试稳定性）— 进行中
+
+**目标**：整体覆盖率从 50.5% 提升至 ≥60%；消除所有已知 flaky/crash 根因；测试基线 ≥3844 passed。
+
+**当前状态 [2026-03-18]**：
+- 总覆盖率：50.5%（16409/32490 语句），来源：`cov_combined.json`（v7.13.4，2026-03-18T03:18）
+- 测试基线：3844 passed / 1 skipped（排除 6 个 QMT 依赖文件 + `test_trading_flow_integration.py`）
+- UDI 测试 crash 已修复：`test_unified_data_interface.py` 75 tests pass（原来 Fatal Python error: Aborted）
+
+**已完成**：
+- ✅ 修复 `tests/test_unified_data_interface.py::TestScheduleBackfill::test_returns_false_when_scheduler_none`
+  - 根因：`_ensure_backfill_scheduler` 启动真实 daemon 线程泄漏，污染后续 DuckDB 操作导致 `abort()`
+  - 方案：`with patch.object(udi, "_ensure_backfill_scheduler"):` 阻止真实线程启动
+- ✅ 修复 `tests/test_coverage_boost_t2d.py::TestBuildBarFromQuote::test_bar_has_ohlcv`
+  - 根因：用 `"5m"` 周期调用 `_build_bar_from_quote`，盘中时间门控返回 `None`（非交易时段）
+  - 方案：改用 `"1d"` 周期绕过 `_is_intraday_market_time` 门控
+
+**主要覆盖率机会（非 GUI）**：
+| 模块 | 当前覆盖率 | 语句数 | 目标 |
+|------|-----------|--------|------|
+| `data_manager/unified_data_interface.py` | 54.2% | 2569 | ≥65% |
+| `data_manager/duckdb_fivefold_adjust.py` | 71.7% | 269 | ≥85% |
+| `data_manager/pipeline_health.py` | 76.7% | 73 | ≥90% |
+| `core/api_server.py` | 79.0% | 509 | ≥88% |
+
+**稳定套件定义**（6 个文件永久排除，原因：需要 QMT 进程）：
+```
+--ignore=tests\test_realtime_pipeline.py
+--ignore=tests\test_qmt_feed.py
+--ignore=tests\test_qmt_integration.py
+--ignore=tests\test_tick_stress.py
+--ignore=tests\test_realtime_pipeline_manager.py
+--ignore=tests\test_triple_source_manager.py
+```
+`test_trading_flow_integration.py`：单独运行 exit -1073740791（Windows Qt/asyncio 崩溃，pre-existing），不计入稳定套件。
+
+---
 
 ### 背景
 

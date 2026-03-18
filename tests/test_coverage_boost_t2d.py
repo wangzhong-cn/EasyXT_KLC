@@ -942,8 +942,10 @@ class TestBuildBarFromQuote(unittest.TestCase):
     def test_bar_has_ohlcv(self):
         from data_manager.realtime_pipeline_manager import RealtimePipelineManager
         mgr = RealtimePipelineManager()
+        # Use "1d" period to avoid _is_intraday_market_time gating outside trading hours
         bar = mgr._build_bar_from_quote(
-            {"price": 10.0, "open": 9.5, "high": 11.0, "low": 9.0, "volume": 5000}, "5m")
+            {"price": 10.0, "open": 9.5, "high": 11.0, "low": 9.0, "volume": 5000}, "1d")
+        assert bar is not None
         assert bar["open"] == 9.5
         assert bar["high"] == 11.0
         assert bar["low"] == 9.0

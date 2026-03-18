@@ -370,10 +370,12 @@ class TestScheduleBackfill:
         udi = _make_udi()
         udi._backfill_enabled = True
         udi._backfill_scheduler = None
-        # _ensure_backfill_scheduler 会尝试导入，在无 HistoryBackfillScheduler 环境下返回 None
-        result = udi.schedule_backfill("000001.SZ", "2024-01-01", "2024-01-31")
-        # Either False (scheduler None) or True (scheduler started) - just verify no exception
-        assert isinstance(result, bool)
+        # Prevent real scheduler from starting to avoid daemon thread leaking into
+        # subsequent tests (can cause DuckDB abort() crash in the next test class).
+        with patch.object(udi, "_ensure_backfill_scheduler"):
+            result = udi.schedule_backfill("000001.SZ", "2024-01-01", "2024-01-31")
+        # With _ensure_backfill_scheduler patched, scheduler stays None → returns False
+        assert result is False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
