@@ -218,3 +218,48 @@ class TestOverallHealthy:
             report = PipelineHealth().report()
 
         assert report["overall_healthy"] is False
+
+
+# ---------------------------------------------------------------------------
+# 5. 因子注册表异常路径
+# ---------------------------------------------------------------------------
+
+
+class TestFactorRegistryException:
+    """覆盖 _check_factor_registry 的 except 分支（lines 118-119）。"""
+
+    def test_factor_registry_list_all_raises(self):
+        broken_registry = MagicMock()
+        broken_registry.list_all.side_effect = RuntimeError("registry unavailable")
+        with (
+            patch("data_manager.pipeline_health.get_db_manager", return_value=_mock_db_manager()),
+            patch("data_manager.pipeline_health.factor_registry", broken_registry),
+            patch("data_manager.pipeline_health.UnifiedDataInterface", return_value=_mock_udi()),
+        ):
+            report = PipelineHealth().report()
+
+        check = report["checks"]["factor_registry"]
+        assert check["healthy"] is False
+        assert "error" in check
+
+
+# ---------------------------------------------------------------------------
+# 6. 数据源注册表异常路径
+# ---------------------------------------------------------------------------
+
+
+class TestDatasourceRegistryException:
+    """覆盖 _check_datasource_registry 的 except 分支（line 152）。"""
+
+    def test_udi_constructor_raises(self):
+        broken_udi_cls = MagicMock(side_effect=RuntimeError("udi init failed"))
+        with (
+            patch("data_manager.pipeline_health.get_db_manager", return_value=_mock_db_manager()),
+            patch("data_manager.pipeline_health.factor_registry", _mock_factor_registry()),
+            patch("data_manager.pipeline_health.UnifiedDataInterface", broken_udi_cls),
+        ):
+            report = PipelineHealth().report()
+
+        check = report["checks"]["datasource_registry"]
+        assert check["healthy"] is False
+        assert "error" in check
