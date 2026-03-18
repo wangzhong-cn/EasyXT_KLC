@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from easy_xt.realtime_data.monitor.alert_manager import AlertManager
 from easy_xt.realtime_data.monitor.monitor_dashboard import MonitorDashboard
 
@@ -12,7 +14,8 @@ class DummyRequest:
         return self._payload
 
 
-def test_ingest_trigger_and_resolve():
+@pytest.mark.asyncio
+async def test_ingest_trigger_and_resolve():
     dashboard = MonitorDashboard()
     dashboard.register_alert_manager(AlertManager(config={}))
 
@@ -27,7 +30,7 @@ def test_ingest_trigger_and_resolve():
         "source": "kline_chart_workspace",
         "tags": {"type": "degraded", "component": "realtime_pipeline"},
     }
-    asyncio.run(dashboard._handle_alerts_ingest(DummyRequest(trigger_payload)))
+    await dashboard._handle_alerts_ingest(DummyRequest(trigger_payload))
     assert len(dashboard.alert_manager.get_active_alerts()) == 1
 
     resolve_payload = {
@@ -37,5 +40,5 @@ def test_ingest_trigger_and_resolve():
         "source": "kline_chart_workspace",
         "tags": {"type": "degraded", "component": "realtime_pipeline"},
     }
-    asyncio.run(dashboard._handle_alerts_ingest(DummyRequest(resolve_payload)))
+    await dashboard._handle_alerts_ingest(DummyRequest(resolve_payload))
     assert len(dashboard.alert_manager.get_active_alerts()) == 0

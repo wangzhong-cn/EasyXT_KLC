@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -52,7 +53,8 @@ except ModuleNotFoundError:
 # 血缘字段版本号 — 升版本策略见 docs/lineage_spec.md §二
 # v1.1 (2026-03): 新增财务表 financial_income / financial_balance / financial_cashflow
 #                 支持 QMT 主路径 + Tushare 降级路径；auto_data_updater 收盘后 20 分钟调度
-CURRENT_SCHEMA_VERSION = "1.1"
+# v1.2 (2026-03): 引入 sequence_id + watermark 晚到治理字段与多周期重建审计回执
+CURRENT_SCHEMA_VERSION = "1.2"
 
 warnings.filterwarnings("ignore")
 
@@ -885,6 +887,12 @@ class UnifiedDataInterface:
                     date_min VARCHAR,
                     date_max VARCHAR,
                     sample_json VARCHAR,
+                    sequence_id VARCHAR,
+                    source_event_time TIMESTAMP,
+                    ingest_time TIMESTAMP,
+                    watermark_ms BIGINT,
+                    lateness_ms BIGINT,
+                    watermark_late BOOLEAN DEFAULT FALSE,
                     replay_status VARCHAR DEFAULT 'pending',
                     retry_count INTEGER DEFAULT 0,
                     last_error VARCHAR,
@@ -892,6 +900,22 @@ class UnifiedDataInterface:
                     resolved_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (quarantine_id)
+                )
+                """)
+                self.con.execute("""
+                CREATE TABLE IF NOT EXISTS multiperiod_rebuild_audit (
+                    rebuild_id VARCHAR NOT NULL,
+                    stock_code VARCHAR NOT NULL,
+                    start_date VARCHAR NOT NULL,
+                    end_date VARCHAR NOT NULL,
+                    periods_json VARCHAR,
+                    persisted_periods_json VARCHAR,
+                    row_stats_json VARCHAR,
+                    receipt_hash VARCHAR,
+                    status VARCHAR NOT NULL,
+                    error_message VARCHAR,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (rebuild_id)
                 )
                 """)
                 self.con.execute("""
@@ -1123,6 +1147,12 @@ class UnifiedDataInterface:
             ("last_error", "VARCHAR"),
             ("replay_at", "TIMESTAMP"),
             ("resolved_at", "TIMESTAMP"),
+            ("sequence_id", "VARCHAR"),
+            ("source_event_time", "TIMESTAMP"),
+            ("ingest_time", "TIMESTAMP"),
+            ("watermark_ms", "BIGINT"),
+            ("lateness_ms", "BIGINT"),
+            ("watermark_late", "BOOLEAN DEFAULT FALSE"),
         ]
         for col_name, col_def in ext_columns:
             if col_name not in columns_set:
@@ -2041,32 +2071,48 @@ class UnifiedDataInterface:
         pivot.index.name = "stock_code"
         return pivot
 
-    def run_quarantine_replay(self, limit: int = 50, max_retries: int = 3) -> dict[str, int]:
+    def _run_quarantine_replay_core(
+        self,
+        limit: int = 50,
+        max_retries: int = 3,
+        *,
+        reason_regex: Optional[str] = None,
+    ) -> dict[str, int]:
         if self.con is None:
             if not self.connect(read_only=False):
                 return {"processed": 0, "succeeded": 0, "failed": 0, "dead_letter": 0}
         self._ensure_tables_exist()
         capped_retries = max(int(max_retries), 1)
+        fetch_limit = max(int(limit), 1)
+        if reason_regex:
+            fetch_limit = fetch_limit * 6
         try:
             rows = self.con.execute(
                 """
-                SELECT quarantine_id, stock_code, period, date_min, date_max, COALESCE(retry_count, 0)
+                SELECT quarantine_id, stock_code, period, date_min, date_max, COALESCE(retry_count, 0), COALESCE(reason, '')
                 FROM data_quarantine_log
                 WHERE replay_status IN ('pending', 'failed')
                   AND COALESCE(retry_count, 0) < ?
                 ORDER BY replay_status ASC, created_at ASC
                 LIMIT ?
                 """,
-                [capped_retries, max(int(limit), 1)],
+                [capped_retries, fetch_limit],
             ).fetchall()
         except Exception as e:
             self._logger.warning("读取quarantine待重放队列失败: %s", e)
             return {"processed": 0, "succeeded": 0, "failed": 0, "dead_letter": 0}
+        if reason_regex:
+            try:
+                reason_re = re.compile(reason_regex, re.IGNORECASE)
+                rows = [r for r in rows if reason_re.search(str(r[6] or ""))]
+            except Exception:
+                rows = []
+        rows = rows[: max(int(limit), 1)]
         processed = 0
         succeeded = 0
         failed = 0
         dead_letter = 0
-        for quarantine_id, stock_code, period, date_min, date_max, retry_count in rows:
+        for quarantine_id, stock_code, period, date_min, date_max, retry_count, _reason in rows:
             processed += 1
             target_period = "1m" if str(period) == "tick" else str(period or "1d")
             start_date = str(date_min or "")[:10]
@@ -2162,6 +2208,337 @@ class UnifiedDataInterface:
                 failed += 1
                 self._logger.warning("更新quarantine replay状态失败 %s: %s", quarantine_id, e)
         return {"processed": processed, "succeeded": succeeded, "failed": failed, "dead_letter": dead_letter}
+
+    def run_quarantine_replay(self, limit: int = 50, max_retries: int = 3) -> dict[str, int]:
+        return self._run_quarantine_replay_core(limit=limit, max_retries=max_retries)
+
+    def run_late_event_replay(
+        self,
+        limit: int = 80,
+        max_retries: int = 4,
+        reason_regex: str = r"(late|out_of_order|watermark|stale|reorder)",
+    ) -> dict[str, int]:
+        return self._run_quarantine_replay_core(
+            limit=limit,
+            max_retries=max_retries,
+            reason_regex=reason_regex,
+        )
+
+    def run_multiperiod_rebuild(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        periods: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        if self.con is None:
+            if not self.connect(read_only=False):
+                return {
+                    "ok": False,
+                    "error": "duckdb_connect_failed",
+                    "processed": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                    "details": [],
+                }
+        self._ensure_tables_exist()
+        symbol = str(stock_code or "").strip()
+        if not symbol:
+            return {"ok": False, "error": "stock_code_empty", "processed": 0, "succeeded": 0, "failed": 0, "details": []}
+        target_periods = [str(p).strip() for p in (periods or ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1M"]) if str(p).strip()]
+        try:
+            data_1m = self.get_stock_data(symbol, start_date, end_date, "1m", "none", auto_save=True)
+        except Exception:
+            data_1m = pd.DataFrame()
+        try:
+            data_1d = self.get_stock_data(symbol, start_date, end_date, "1d", "none", auto_save=True)
+        except Exception:
+            data_1d = pd.DataFrame()
+
+        def _ensure_time_column(df: pd.DataFrame) -> pd.DataFrame:
+            if df is None or df.empty:
+                return pd.DataFrame()
+            out = df.copy()
+            if "time" not in out.columns:
+                out = out.reset_index()
+                if "datetime" in out.columns:
+                    out = out.rename(columns={"datetime": "time"})
+                elif "date" in out.columns:
+                    out = out.rename(columns={"date": "time"})
+                elif "index" in out.columns:
+                    out = out.rename(columns={"index": "time"})
+            if "time" in out.columns:
+                out["time"] = pd.to_datetime(out["time"], errors="coerce")
+                out = out[out["time"].notna()]
+            return out
+
+        data_1m = _ensure_time_column(data_1m)
+        data_1d = _ensure_time_column(data_1d)
+
+        from data_manager.period_bar_builder import PeriodBarBuilder
+
+        builder = PeriodBarBuilder()
+        details: list[dict[str, Any]] = []
+        rebuilt_map: dict[str, pd.DataFrame] = {}
+        succeeded = 0
+        failed = 0
+        for p in target_periods:
+            try:
+                rebuilt = pd.DataFrame()
+                if p == "1m":
+                    rebuilt = data_1m.copy()
+                elif p == "1d":
+                    rebuilt = data_1d.copy()
+                elif p == "5m":
+                    _src = data_1m.copy()
+                    if "time" in _src.columns:
+                        _src = _src.set_index("time")
+                    rebuilt = self._resample_ohlcv(_src, "5min") if _src is not None else pd.DataFrame()
+                elif p in self._INTRADAY_CUSTOM_PERIODS:
+                    rebuilt = builder.build_intraday_bars(
+                        data_1m=data_1m.copy(),
+                        period_minutes=int(self._INTRADAY_CUSTOM_PERIODS[p]),
+                        daily_ref=data_1d.copy() if data_1d is not None else None,
+                    )
+                elif p in self._MULTIDAY_CUSTOM_PERIODS:
+                    rebuilt = builder.build_multiday_bars(
+                        data_1d=data_1d.copy(),
+                        trading_days_per_period=int(self._MULTIDAY_CUSTOM_PERIODS[p]),
+                        listing_date=self.get_listing_date(symbol),
+                    )
+                elif p in self._PERIOD_AGGREGATION:
+                    _src, rule = self._PERIOD_AGGREGATION[p]
+                    rebuilt = builder.build_natural_calendar_bars(data_1d=data_1d.copy(), freq=rule)
+                if rebuilt is None or rebuilt.empty:
+                    failed += 1
+                    details.append({"period": p, "status": "failed", "rows": 0, "reason": "rebuilt_empty"})
+                    continue
+                rebuilt_map[p] = rebuilt.copy()
+                succeeded += 1
+                details.append(
+                    {
+                        "period": p,
+                        "status": "ok",
+                        "rows": int(len(rebuilt)),
+                        "persisted": p in {"1m", "5m", "1d"},
+                        "persist_error": "",
+                    }
+                )
+            except Exception as e:
+                failed += 1
+                details.append({"period": p, "status": "failed", "rows": 0, "reason": str(e)})
+        rebuild_id = str(uuid.uuid4())
+        persisted_periods = [p for p in ("1m", "5m", "1d") if p in rebuilt_map]
+        atomic_ok = failed == 0
+        atomic_error = ""
+        if atomic_ok:
+            atomic_ok, atomic_error = self._atomic_replace_rebuild_periods(
+                stock_code=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                rebuilt_map=rebuilt_map,
+                persisted_periods=persisted_periods,
+            )
+            if not atomic_ok:
+                failed += 1
+        row_stats = {p: int(len(rebuilt_map[p])) for p in rebuilt_map}
+        receipt = self._write_rebuild_receipt(
+            rebuild_id=rebuild_id,
+            stock_code=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            target_periods=target_periods,
+            persisted_periods=persisted_periods,
+            row_stats=row_stats,
+            status="success" if atomic_ok else "failed",
+            error_message=atomic_error,
+        )
+        try:
+            self.con.execute(
+                """
+                INSERT OR REPLACE INTO multiperiod_rebuild_audit (
+                    rebuild_id, stock_code, start_date, end_date, periods_json,
+                    persisted_periods_json, row_stats_json, receipt_hash, status, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    rebuild_id,
+                    symbol,
+                    start_date,
+                    end_date,
+                    json.dumps(target_periods, ensure_ascii=False),
+                    json.dumps(persisted_periods, ensure_ascii=False),
+                    json.dumps(row_stats, ensure_ascii=False),
+                    str(receipt.get("receipt_hash", "")),
+                    "success" if atomic_ok else "failed",
+                    atomic_error[:500] if atomic_error else None,
+                ],
+            )
+        except Exception:
+            pass
+        processed = len(target_periods)
+        return {
+            "ok": failed == 0 and atomic_ok,
+            "processed": processed,
+            "succeeded": succeeded,
+            "failed": failed,
+            "stock_code": symbol,
+            "start_date": start_date,
+            "end_date": end_date,
+            "details": details,
+            "rebuild_id": rebuild_id,
+            "atomic_replace": atomic_ok,
+            "atomic_error": atomic_error,
+            "audit_receipt": receipt,
+        }
+
+    def _atomic_replace_rebuild_periods(
+        self,
+        *,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        rebuilt_map: dict[str, pd.DataFrame],
+        persisted_periods: list[str],
+    ) -> tuple[bool, str]:
+        if not persisted_periods:
+            return False, "no_persisted_periods"
+        if self.con is None:
+            return False, "duckdb_connection_missing"
+        table_map = {"1m": ("stock_1m", "datetime"), "5m": ("stock_5m", "datetime"), "1d": ("stock_daily", "date")}
+        write_lock = getattr(self, "_db_manager", None)
+        write_lock = getattr(write_lock, "_write_lock", None) if write_lock else None
+        if write_lock is not None:
+            write_lock.acquire()
+        try:
+            self.con.execute("BEGIN")
+            for period in persisted_periods:
+                if period not in rebuilt_map:
+                    continue
+                table_name, date_col = table_map[period]
+                df = rebuilt_map[period].copy()
+                if df.empty:
+                    raise ValueError(f"{period}_rebuilt_empty")
+                if "time" not in df.columns:
+                    if "datetime" in df.columns:
+                        df = df.rename(columns={"datetime": "time"})
+                    elif "date" in df.columns:
+                        df = df.rename(columns={"date": "time"})
+                    elif isinstance(df.index, pd.DatetimeIndex):
+                        df = df.reset_index().rename(columns={"index": "time"})
+                if "time" not in df.columns:
+                    raise ValueError(f"{period}_missing_time_column")
+                df["stock_code"] = stock_code
+                df["period"] = period
+                df["symbol_type"] = "stock"
+                df["adjust_type"] = "none"
+                df["factor"] = 1.0
+                now_ts = pd.Timestamp.now()
+                if "created_at" not in df.columns:
+                    df["created_at"] = now_ts
+                if "updated_at" not in df.columns:
+                    df["updated_at"] = now_ts
+                if date_col == "date":
+                    df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+                else:
+                    df["datetime"] = pd.to_datetime(df["time"], errors="coerce")
+                df = df[df[date_col].notna()]
+                if df.empty:
+                    raise ValueError(f"{period}_coerce_time_empty")
+                table_columns = self.con.execute(f"DESCRIBE {table_name}").fetchdf()["column_name"].tolist()
+                df_ordered = pd.DataFrame()
+                for col in table_columns:
+                    if col in df.columns:
+                        df_ordered[col] = df[col]
+                    else:
+                        df_ordered[col] = None
+                df_ordered = df_ordered.drop_duplicates(
+                    subset=[c for c in [date_col, "stock_code", "period", "adjust_type"] if c in df_ordered.columns],
+                    keep="last",
+                )
+                self.con.execute(
+                    "DELETE FROM " + table_name + " WHERE stock_code = ? AND period = ? AND " + date_col + " >= ? AND " + date_col + " <= ?",
+                    [stock_code, period, str(df_ordered[date_col].min()), str(df_ordered[date_col].max())],
+                )
+                temp_name = f"rebuild_temp_{period.replace(' ', '_').replace('/', '_')}"
+                self.con.register(temp_name, df_ordered)
+                self.con.execute("INSERT OR REPLACE INTO " + table_name + " SELECT * FROM " + temp_name)
+                self.con.unregister(temp_name)
+                self.con.execute(
+                    """
+                    INSERT OR REPLACE INTO data_ingestion_status (
+                        stock_code, period, start_date, end_date, source, status, record_count, error_message,
+                        schema_version, ingest_run_id, raw_hash, source_event_time
+                    ) VALUES (
+                        ?, ?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    [
+                        stock_code,
+                        period,
+                        start_date,
+                        end_date,
+                        "multiperiod_rebuild",
+                        "success",
+                        int(len(df_ordered)),
+                        None,
+                        CURRENT_SCHEMA_VERSION,
+                        str(uuid.uuid4()),
+                        hashlib.sha256(
+                            df_ordered.head(200).to_json(orient="records", date_format="iso", force_ascii=False).encode("utf-8")
+                        ).hexdigest(),
+                        pd.to_datetime(df_ordered[date_col], errors="coerce").max(),
+                    ],
+                )
+            self.con.execute("COMMIT")
+            return True, ""
+        except Exception as e:
+            try:
+                self.con.execute("ROLLBACK")
+            except Exception:
+                pass
+            return False, str(e)
+        finally:
+            if write_lock is not None:
+                write_lock.release()
+
+    def _write_rebuild_receipt(
+        self,
+        *,
+        rebuild_id: str,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        target_periods: list[str],
+        persisted_periods: list[str],
+        row_stats: dict[str, int],
+        status: str,
+        error_message: str,
+    ) -> dict[str, Any]:
+        payload = {
+            "rebuild_id": rebuild_id,
+            "stock_code": stock_code,
+            "start_date": start_date,
+            "end_date": end_date,
+            "target_periods": target_periods,
+            "persisted_periods": persisted_periods,
+            "row_stats": row_stats,
+            "status": status,
+            "error_message": error_message,
+            "created_at": pd.Timestamp.now().isoformat(),
+        }
+        payload_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        payload["receipt_hash"] = hashlib.sha256(payload_bytes).hexdigest()
+        try:
+            artifacts_dir = Path(__file__).resolve().parents[1] / "artifacts"
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            latest_path = artifacts_dir / "rebuild_audit_latest.json"
+            history_path = artifacts_dir / f"rebuild_audit_{rebuild_id}.json"
+            latest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            history_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        return payload
 
     def get_quarantine_status_counts(self) -> dict[str, int]:
         if self.con is None:
@@ -3596,6 +3973,13 @@ class UnifiedDataInterface:
         date_min: str,
         date_max: str,
         sample_json: str,
+        *,
+        sequence_id: Optional[str] = None,
+        source_event_time: Optional[Any] = None,
+        ingest_time: Optional[Any] = None,
+        watermark_ms: Optional[int] = None,
+        lateness_ms: Optional[int] = None,
+        watermark_late: bool = False,
     ) -> None:
         if not self.con or self._read_only_connection:
             return
@@ -3604,8 +3988,9 @@ class UnifiedDataInterface:
                 """
                 INSERT INTO data_quarantine_log (
                     quarantine_id, audit_id, table_name, stock_code, period, reason,
-                    expected_rows, actual_rows, date_min, date_max, sample_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    expected_rows, actual_rows, date_min, date_max, sample_json,
+                    sequence_id, source_event_time, ingest_time, watermark_ms, lateness_ms, watermark_late
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     str(uuid.uuid4()),
@@ -3619,6 +4004,12 @@ class UnifiedDataInterface:
                     date_min,
                     date_max,
                     sample_json,
+                    sequence_id,
+                    source_event_time,
+                    ingest_time,
+                    watermark_ms,
+                    lateness_ms,
+                    bool(watermark_late),
                 ],
             )
         except Exception as e:

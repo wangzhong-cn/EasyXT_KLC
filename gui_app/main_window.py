@@ -437,6 +437,11 @@ class MainWindow(QMainWindow):
             "P0_open_count": None,
             "active_critical_high": None,
             "duckdb_write_probe_detail": {},
+            "intraday_bar_semantic_detail": {},
+            "governance_nightly_detail": {},
+            "watermark_quality_detail": {},
+            "watermark_profile_audit_detail": {},
+            "watermark_profile_approval_detail": {},
         }
         self._last_backtest_engine_log: Optional[str] = None
         self._last_realtime_probe_log: Optional[str] = None
@@ -1450,10 +1455,43 @@ class MainWindow(QMainWindow):
         gate = self._release_gate_status or {}
         detail = gate.get("duckdb_write_probe_detail") if isinstance(gate, dict) else {}
         detail = detail if isinstance(detail, dict) else {}
+        intraday_detail = gate.get("intraday_bar_semantic_detail") if isinstance(gate, dict) else {}
+        intraday_detail = intraday_detail if isinstance(intraday_detail, dict) else {}
+        governance_detail = gate.get("governance_nightly_detail") if isinstance(gate, dict) else {}
+        governance_detail = governance_detail if isinstance(governance_detail, dict) else {}
+        watermark_detail = gate.get("watermark_quality_detail") if isinstance(gate, dict) else {}
+        watermark_detail = watermark_detail if isinstance(watermark_detail, dict) else {}
+        watermark_audit = gate.get("watermark_profile_audit_detail") if isinstance(gate, dict) else {}
+        watermark_audit = watermark_audit if isinstance(watermark_audit, dict) else {}
+        watermark_approval = gate.get("watermark_profile_approval_detail") if isinstance(gate, dict) else {}
+        watermark_approval = watermark_approval if isinstance(watermark_approval, dict) else {}
         metrics_path = os.path.join(project_path, "artifacts", "p0_metrics_latest.json")
         action = str(detail.get("recommended_action") or "").strip()
-        if action:
-            QApplication.clipboard().setText(action)
+        intraday_action = str(intraday_detail.get("recommended_action") or "").strip()
+        governance_action = str(governance_detail.get("recommended_action") or "").strip()
+        final_action = governance_action or intraday_action or action
+        if final_action:
+            QApplication.clipboard().setText(final_action)
+        trend_items = watermark_detail.get("trend") if isinstance(watermark_detail.get("trend"), list) else []
+        wm_weights = watermark_detail.get("weights") if isinstance(watermark_detail.get("weights"), dict) else {}
+        wm_profile = str(watermark_detail.get("profile") or "balanced")
+        trend_tail = trend_items[-3:] if trend_items else []
+        trend_text = " | ".join(
+            [f"{str(it.get('date') or '')}:{float(it.get('q_score', 0.0) or 0.0):.3f}" for it in trend_tail if isinstance(it, dict)]
+        ) or "N/A"
+        q_spark = self._score_sparkline([float(it.get("q_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)])
+        late_spark = self._score_sparkline([float(it.get("late_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)])
+        ooo_spark = self._score_sparkline([float(it.get("ooo_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)])
+        lateness_spark = self._score_sparkline([float(it.get("lateness_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)])
+        audit_recent = watermark_audit.get("recent") if isinstance(watermark_audit.get("recent"), list) else []
+        audit_tail = audit_recent[-3:] if audit_recent else []
+        audit_text = " | ".join(
+            [
+                f"{str(it.get('ts') or '')} {str(it.get('action') or '')}->{str(it.get('profile') or '')} {'OK' if bool(it.get('success', False)) else 'FAIL'}"
+                for it in audit_tail
+                if isinstance(it, dict)
+            ]
+        ) or "N/A"
         lines = [
             f"strict_gate_pass: {gate.get('strict_gate_pass')}",
             f"P0_open_count: {gate.get('P0_open_count')}",
@@ -1462,7 +1500,58 @@ class MainWindow(QMainWindow):
             f"duckdb_write.db_path: {detail.get('db_path') or 'N/A'}",
             f"duckdb_write.error_type: {detail.get('error_type') or 'N/A'}",
             f"duckdb_write.message: {detail.get('message') or 'N/A'}",
-            f"推荐动作(已复制): {action or 'N/A'}",
+            f"intraday_bar.status: {intraday_detail.get('status') or 'N/A'}",
+            f"intraday_bar.anomaly_count: {intraday_detail.get('anomaly_count') or 0}",
+            f"intraday_bar.message: {intraday_detail.get('message') or 'N/A'}",
+            f"governance_nightly.status: {governance_detail.get('status') or 'N/A'}",
+            f"governance_nightly.failed_items: {governance_detail.get('failed_items') or 0}",
+            f"governance_nightly.message: {governance_detail.get('message') or 'N/A'}",
+            f"watermark_quality.status: {watermark_detail.get('status') or 'N/A'}",
+            f"watermark_quality.today_q_score: {float(watermark_detail.get('today_q_score', 0.0) or 0.0):.4f}",
+            f"watermark_quality.q_score_floor: {float(watermark_detail.get('q_score_floor', 0.0) or 0.0):.4f}",
+            f"watermark_quality.q_score_pass: {bool(watermark_detail.get('q_score_pass', False))}",
+            f"watermark_quality.profile: {wm_profile}",
+            f"watermark_quality.weights: late={float(wm_weights.get('late', 0.0) or 0.0):.3f}, ooo={float(wm_weights.get('ooo', 0.0) or 0.0):.3f}, lateness={float(wm_weights.get('lateness', 0.0) or 0.0):.3f}",
+            f"watermark_quality.today_late_score: {float(watermark_detail.get('today_late_score', 0.0) or 0.0):.4f}",
+            f"watermark_quality.today_ooo_score: {float(watermark_detail.get('today_ooo_score', 0.0) or 0.0):.4f}",
+            f"watermark_quality.today_lateness_score: {float(watermark_detail.get('today_lateness_score', 0.0) or 0.0):.4f}",
+            f"watermark_quality.q_score_mean_7d: {float(watermark_detail.get('q_score_mean_7d', 0.0) or 0.0):.4f}",
+            f"watermark_quality.q_score_vol_7d: {float(watermark_detail.get('q_score_vol_7d', 0.0) or 0.0):.4f}",
+            f"watermark_quality.late_mean_7d: {float(watermark_detail.get('late_score_mean_7d', 0.0) or 0.0):.4f}",
+            f"watermark_quality.late_vol_7d: {float(watermark_detail.get('late_score_vol_7d', 0.0) or 0.0):.4f}",
+            f"watermark_quality.ooo_mean_7d: {float(watermark_detail.get('ooo_score_mean_7d', 0.0) or 0.0):.4f}",
+            f"watermark_quality.ooo_vol_7d: {float(watermark_detail.get('ooo_score_vol_7d', 0.0) or 0.0):.4f}",
+            f"watermark_quality.lateness_mean_7d: {float(watermark_detail.get('lateness_score_mean_7d', 0.0) or 0.0):.4f}",
+            f"watermark_quality.lateness_vol_7d: {float(watermark_detail.get('lateness_score_vol_7d', 0.0) or 0.0):.4f}",
+            f"watermark_quality.q_spark: {q_spark}",
+            f"watermark_quality.late_spark: {late_spark}",
+            f"watermark_quality.ooo_spark: {ooo_spark}",
+            f"watermark_quality.lateness_spark: {lateness_spark}",
+            f"watermark_quality.trend(last3): {trend_text}",
+            f"watermark_profile_audit.status: {watermark_audit.get('status') or 'N/A'}",
+            f"watermark_profile_audit.count: {int(watermark_audit.get('count', 0) or 0)}",
+            f"watermark_profile_audit.recent(last3): {audit_text}",
+            f"watermark_profile_approval.required: {bool(watermark_approval.get('required', False))}",
+            f"watermark_profile_approval.valid: {bool(watermark_approval.get('valid', False))}",
+            f"watermark_profile_approval.release_env: {watermark_approval.get('release_env') or 'N/A'}",
+            f"watermark_profile_approval.profile: {watermark_approval.get('profile') or 'N/A'}",
+            f"watermark_profile_approval.approval_id: {watermark_approval.get('approval_id') or 'N/A'}",
+            f"watermark_profile_approval.approver: {watermark_approval.get('approver') or 'N/A'}",
+            f"watermark_profile_approval.reason: {watermark_approval.get('reason') or 'N/A'}",
+            f"watermark_profile_approval.registry_path: {watermark_approval.get('registry_path') or 'N/A'}",
+            f"watermark_profile_approval.approved_at: {watermark_approval.get('approved_at') or 'N/A'}",
+            f"watermark_profile_approval.expires_at: {watermark_approval.get('expires_at') or 'N/A'}",
+            f"watermark_profile_approval.days_to_expire: {watermark_approval.get('days_to_expire')}",
+            f"watermark_profile_approval.signature_required: {bool(watermark_approval.get('signature_required', False))}",
+            f"watermark_profile_approval.signature_valid: {bool(watermark_approval.get('signature_valid', False))}",
+            f"watermark_profile_approval.signatures_required: {watermark_approval.get('signatures_required')}",
+            f"watermark_profile_approval.signatures_valid_count: {watermark_approval.get('signatures_valid_count')}",
+            f"watermark_profile_approval.max_uses: {watermark_approval.get('max_uses')}",
+            f"watermark_profile_approval.used_count: {watermark_approval.get('used_count')}",
+            f"watermark_profile_approval.remaining_uses: {watermark_approval.get('remaining_uses')}",
+            f"watermark_profile_approval.warnings: {watermark_approval.get('warnings')}",
+            f"watermark_profile_approval.risk_level: {watermark_approval.get('risk_level')}",
+            f"推荐动作(已复制): {final_action or 'N/A'}",
             f"门禁文件: {metrics_path}",
         ]
         if os.path.exists(metrics_path):
@@ -1651,7 +1740,7 @@ class MainWindow(QMainWindow):
     def _refresh_release_gate_status(self):
         metrics_path = os.path.join(project_path, "artifacts", "p0_metrics_latest.json")
         if not os.path.exists(metrics_path):
-            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}}
+            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}, "intraday_bar_semantic_detail": {}, "governance_nightly_detail": {}, "watermark_quality_detail": {}, "watermark_profile_audit_detail": {}, "watermark_profile_approval_detail": {}}
             self._render_release_gate_status()
             return
         try:
@@ -1659,7 +1748,7 @@ class MainWindow(QMainWindow):
                 gate = json.load(f)
             self._release_gate_status = gate if isinstance(gate, dict) else {}
         except Exception:
-            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}}
+            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}, "intraday_bar_semantic_detail": {}, "governance_nightly_detail": {}, "watermark_quality_detail": {}, "watermark_profile_audit_detail": {}, "watermark_profile_approval_detail": {}}
         self._render_release_gate_status()
 
     def _render_release_gate_status(self):
@@ -1669,13 +1758,53 @@ class MainWindow(QMainWindow):
         strict_pass = gate.get("strict_gate_pass")
         p0_open = gate.get("P0_open_count")
         detail = gate.get("duckdb_write_probe_detail") if isinstance(gate.get("duckdb_write_probe_detail"), dict) else {}
+        intraday_detail = gate.get("intraday_bar_semantic_detail") if isinstance(gate.get("intraday_bar_semantic_detail"), dict) else {}
+        governance_detail = gate.get("governance_nightly_detail") if isinstance(gate.get("governance_nightly_detail"), dict) else {}
+        watermark_detail = gate.get("watermark_quality_detail") if isinstance(gate.get("watermark_quality_detail"), dict) else {}
+        watermark_audit = gate.get("watermark_profile_audit_detail") if isinstance(gate.get("watermark_profile_audit_detail"), dict) else {}
+        watermark_approval = gate.get("watermark_profile_approval_detail") if isinstance(gate.get("watermark_profile_approval_detail"), dict) else {}
+        wm_profile = str(watermark_detail.get("profile") or "balanced")
         d_status = str(detail.get("status") or "").lower()
+        i_status = str(intraday_detail.get("status") or "").lower()
+        i_anomaly = int(intraday_detail.get("anomaly_count") or 0)
+        g_status = str(governance_detail.get("status") or "").lower()
+        g_failed = int(governance_detail.get("failed_items") or 0)
+        w_pass = bool(watermark_detail.get("q_score_pass", False))
+        w_q = float(watermark_detail.get("today_q_score", 0.0) or 0.0)
+        q_mean = float(watermark_detail.get("q_score_mean_7d", 0.0) or 0.0)
+        q_vol = float(watermark_detail.get("q_score_vol_7d", 0.0) or 0.0)
+        w_trend = watermark_detail.get("trend") if isinstance(watermark_detail.get("trend"), list) else []
+        q_spark = self._score_sparkline([float(it.get("q_score", 0.0) or 0.0) for it in w_trend if isinstance(it, dict)])
+        audit_recent = watermark_audit.get("recent") if isinstance(watermark_audit.get("recent"), list) else []
+        audit_tail = audit_recent[-3:] if audit_recent else []
+        audit_text = " | ".join(
+            [
+                f"{str(it.get('action') or '')}->{str(it.get('profile') or '')}:{'OK' if bool(it.get('success', False)) else 'FAIL'}"
+                for it in audit_tail
+                if isinstance(it, dict)
+            ]
+        ) or "N/A"
+        appr_required = bool(watermark_approval.get("required", False))
+        appr_valid = bool(watermark_approval.get("valid", False))
+        appr_risk = str(watermark_approval.get("risk_level") or "").lower()
         if strict_pass is True:
-            text = f"🟢 发布门禁: PASS P0={p0_open if p0_open is not None else 0}"
-            color = "#00aa66"
+            if appr_risk == "warn":
+                text = f"🟡 发布门禁: PASS_WITH_WARN P0={p0_open if p0_open is not None else 0} Q={w_q:.3f}/{q_mean:.3f}±{q_vol:.3f} {q_spark} A={audit_text}"
+                color = "#ef6c00"
+            else:
+                text = f"🟢 发布门禁: PASS P0={p0_open if p0_open is not None else 0} Q={w_q:.3f}/{q_mean:.3f}±{q_vol:.3f} {q_spark} A={audit_text}"
+                color = "#00aa66"
         elif strict_pass is False:
             probe_err = str(detail.get("error_type") or "gate_fail")
-            text = f"🔴 发布门禁: FAIL P0={p0_open if p0_open is not None else '?'} {probe_err}"
+            if i_status == "fail":
+                probe_err = f"intraday:{i_anomaly}"
+            elif g_status == "fail":
+                probe_err = f"governance:{g_failed}"
+            elif not w_pass:
+                probe_err = f"qscore:{w_q:.3f}"
+            elif appr_required and not appr_valid:
+                probe_err = f"approval:{watermark_approval.get('reason') or 'invalid'}"
+            text = f"🔴 发布门禁: FAIL P0={p0_open if p0_open is not None else '?'} {probe_err} Q={w_q:.3f}/{q_mean:.3f}±{q_vol:.3f} A={audit_text}"
             color = "#d32f2f"
         elif d_status in ("warn", "skip", "missing"):
             text = f"🟡 发布门禁: {d_status.upper()} P0={p0_open if p0_open is not None else '?'}"
@@ -1690,11 +1819,72 @@ class MainWindow(QMainWindow):
             f"duckdb_status={detail.get('status')}\n"
             f"db_path={detail.get('db_path')}\n"
             f"error_type={detail.get('error_type')}\n"
-            f"recommended_action={detail.get('recommended_action')}"
+            f"recommended_action={detail.get('recommended_action')}\n"
+            f"intraday_status={intraday_detail.get('status')}\n"
+            f"intraday_anomaly_count={intraday_detail.get('anomaly_count')}\n"
+            f"intraday_message={intraday_detail.get('message')}\n"
+            f"intraday_action={intraday_detail.get('recommended_action')}\n"
+            f"governance_status={governance_detail.get('status')}\n"
+            f"governance_failed_items={governance_detail.get('failed_items')}\n"
+            f"governance_message={governance_detail.get('message')}\n"
+            f"governance_action={governance_detail.get('recommended_action')}\n"
+            f"watermark_status={watermark_detail.get('status')}\n"
+            f"watermark_today_q_score={watermark_detail.get('today_q_score')}\n"
+            f"watermark_q_score_floor={watermark_detail.get('q_score_floor')}\n"
+            f"watermark_q_score_pass={watermark_detail.get('q_score_pass')}\n"
+            f"watermark_profile={wm_profile}\n"
+            f"watermark_weights={watermark_detail.get('weights')}\n"
+            f"watermark_q_score_mean_7d={watermark_detail.get('q_score_mean_7d')}\n"
+            f"watermark_q_score_vol_7d={watermark_detail.get('q_score_vol_7d')}\n"
+            f"watermark_late_mean_7d={watermark_detail.get('late_score_mean_7d')}\n"
+            f"watermark_late_vol_7d={watermark_detail.get('late_score_vol_7d')}\n"
+            f"watermark_ooo_mean_7d={watermark_detail.get('ooo_score_mean_7d')}\n"
+            f"watermark_ooo_vol_7d={watermark_detail.get('ooo_score_vol_7d')}\n"
+            f"watermark_lateness_mean_7d={watermark_detail.get('lateness_score_mean_7d')}\n"
+            f"watermark_lateness_vol_7d={watermark_detail.get('lateness_score_vol_7d')}\n"
+            f"watermark_q_spark={q_spark}\n"
+            f"watermark_trend={watermark_detail.get('trend')}\n"
+            f"watermark_profile_audit_status={watermark_audit.get('status')}\n"
+            f"watermark_profile_audit_count={watermark_audit.get('count')}\n"
+            f"watermark_profile_audit_recent={watermark_audit.get('recent')}\n"
+            f"watermark_profile_approval_required={watermark_approval.get('required')}\n"
+            f"watermark_profile_approval_valid={watermark_approval.get('valid')}\n"
+            f"watermark_profile_approval_env={watermark_approval.get('release_env')}\n"
+            f"watermark_profile_approval_profile={watermark_approval.get('profile')}\n"
+            f"watermark_profile_approval_id={watermark_approval.get('approval_id')}\n"
+            f"watermark_profile_approval_approver={watermark_approval.get('approver')}\n"
+            f"watermark_profile_approval_reason={watermark_approval.get('reason')}\n"
+            f"watermark_profile_approval_missing={watermark_approval.get('missing_fields')}\n"
+            f"watermark_profile_approval_registry={watermark_approval.get('registry_path')}\n"
+            f"watermark_profile_approval_approved_at={watermark_approval.get('approved_at')}\n"
+            f"watermark_profile_approval_expires_at={watermark_approval.get('expires_at')}\n"
+            f"watermark_profile_approval_days_to_expire={watermark_approval.get('days_to_expire')}\n"
+            f"watermark_profile_approval_signature_required={watermark_approval.get('signature_required')}\n"
+            f"watermark_profile_approval_signature_valid={watermark_approval.get('signature_valid')}\n"
+            f"watermark_profile_approval_signatures_required={watermark_approval.get('signatures_required')}\n"
+            f"watermark_profile_approval_signatures_valid_count={watermark_approval.get('signatures_valid_count')}\n"
+            f"watermark_profile_approval_max_uses={watermark_approval.get('max_uses')}\n"
+            f"watermark_profile_approval_used_count={watermark_approval.get('used_count')}\n"
+            f"watermark_profile_approval_remaining_uses={watermark_approval.get('remaining_uses')}\n"
+            f"watermark_profile_approval_warnings={watermark_approval.get('warnings')}\n"
+            f"watermark_profile_approval_risk_level={watermark_approval.get('risk_level')}\n"
+            f"watermark_profile_approval_usage_log={watermark_approval.get('usage_log_file')}"
         )
         self.release_gate_status.setText(text)
         self.release_gate_status.setStyleSheet(f"color:{color}; padding-left:8px;")
         self.release_gate_status.setToolTip(tooltip)
+
+    def _score_sparkline(self, values):
+        vals = [max(0.0, min(1.0, float(v))) for v in values if v is not None]
+        if not vals:
+            return "N/A"
+        blocks = "▁▂▃▄▅▆▇█"
+        out = []
+        for v in vals[-14:]:
+            idx = int(round(v * (len(blocks) - 1)))
+            idx = max(0, min(len(blocks) - 1, idx))
+            out.append(blocks[idx])
+        return "".join(out)
 
     def on_health_status_clicked(self, event):
         if not self._health_check_results:

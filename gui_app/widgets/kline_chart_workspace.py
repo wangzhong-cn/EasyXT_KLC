@@ -2234,21 +2234,10 @@ class KLineChartWorkspace(QWidget):
         if price <= 0:
             return
         period = self.period_combo.currentText()
-        now = pd.Timestamp.now()
-        if period in ("1d", "1w", "1M"):
-            bar_time = now.strftime("%Y-%m-%d")
-        elif period == "1m":
-            bar_time = now.floor("min")
-        elif period == "5m":
-            bar_time = now.floor("5min")
-        elif period == "15m":
-            bar_time = now.floor("15min")
-        elif period == "30m":
-            bar_time = now.floor("30min")
-        elif period == "60m":
-            bar_time = now.floor("60min")
-        else:
-            bar_time = now
+        quote_ts = self._resolve_quote_timestamp(quote)
+        if period in ("1m", "5m", "15m", "30m", "60m") and not self._is_intraday_market_time(quote_ts):
+            return
+        bar_time = self._floor_bar_time(period, quote_ts)
         total_volume = float(quote.get("volume") or 0)
         if (
             self.realtime_last_total_volume is None
@@ -2318,6 +2307,71 @@ class KLineChartWorkspace(QWidget):
         self.last_close = price
         self.last_bar_time = bar_time
         self._update_orderbook(quote)
+
+    def _resolve_quote_timestamp(self, quote: dict[str, Any]) -> pd.Timestamp:
+        fields = (
+            "trade_time",
+            "tradeTime",
+            "quote_time",
+            "quoteTime",
+            "update_time",
+            "updateTime",
+            "datetime",
+            "time",
+            "timestamp",
+            "ts",
+        )
+        for name in fields:
+            v = quote.get(name)
+            if v is None or v == "":
+                continue
+            ts = self._coerce_timestamp(v)
+            if ts is not None:
+                return ts
+        return pd.Timestamp.now()
+
+    def _coerce_timestamp(self, value: Any) -> Optional[pd.Timestamp]:
+        try:
+            if isinstance(value, (int, float)):
+                num = float(value)
+                if abs(num) > 1e14:
+                    ts = pd.to_datetime(int(num), unit="us", errors="coerce")
+                elif abs(num) > 1e11:
+                    ts = pd.to_datetime(int(num), unit="ms", errors="coerce")
+                elif abs(num) > 1e9:
+                    ts = pd.to_datetime(int(num), unit="s", errors="coerce")
+                else:
+                    ts = pd.to_datetime(num, errors="coerce")
+            else:
+                ts = pd.to_datetime(value, errors="coerce")
+            if pd.isna(ts):
+                return None
+            return pd.Timestamp(ts).tz_localize(None) if getattr(ts, "tzinfo", None) is not None else pd.Timestamp(ts)
+        except Exception:
+            return None
+
+    def _is_intraday_market_time(self, ts: pd.Timestamp) -> bool:
+        if ts.weekday() >= 5:
+            return False
+        t = ts.time()
+        return (t >= pd.Timestamp("09:30:00").time() and t <= pd.Timestamp("11:30:00").time()) or (
+            t >= pd.Timestamp("13:00:00").time() and t <= pd.Timestamp("15:00:00").time()
+        )
+
+    def _floor_bar_time(self, period: str, ts: pd.Timestamp):
+        if period in ("1d", "1w", "1M"):
+            return ts.strftime("%Y-%m-%d")
+        if period == "1m":
+            return ts.floor("min")
+        if period == "5m":
+            return ts.floor("5min")
+        if period == "15m":
+            return ts.floor("15min")
+        if period == "30m":
+            return ts.floor("30min")
+        if period == "60m":
+            return ts.floor("60min")
+        return ts
 
     def _normalize_realtime_quote(self, quote: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(quote, dict):
@@ -3375,21 +3429,14 @@ class KLineChartWorkspace(QWidget):
         price = float(quote.get("price") or 0)
         if price <= 0:
             return None
-        now = pd.Timestamp.now()
-        if period in ("1d", "1w", "1M"):
-            bar_time = now.strftime("%Y-%m-%d")
-        elif period == "1m":
-            bar_time = now.floor("min").strftime("%Y-%m-%d %H:%M:%S")
-        elif period == "5m":
-            bar_time = now.floor("5min").strftime("%Y-%m-%d %H:%M:%S")
-        elif period == "15m":
-            bar_time = now.floor("15min").strftime("%Y-%m-%d %H:%M:%S")
-        elif period == "30m":
-            bar_time = now.floor("30min").strftime("%Y-%m-%d %H:%M:%S")
-        elif period == "60m":
-            bar_time = now.floor("60min").strftime("%Y-%m-%d %H:%M:%S")
+        quote_ts = self._resolve_quote_timestamp(quote)
+        if period in ("1m", "5m", "15m", "30m", "60m") and not self._is_intraday_market_time(quote_ts):
+            return None
+        floored = self._floor_bar_time(period, quote_ts)
+        if isinstance(floored, pd.Timestamp):
+            bar_time = floored.strftime("%Y-%m-%d %H:%M:%S")
         else:
-            bar_time = now.strftime("%Y-%m-%d %H:%M:%S")
+            bar_time = str(floored)
         open_price = float(quote.get("open") or price)
         is_daily = period in ("1d", "1w", "1M")
         if is_daily:

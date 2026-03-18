@@ -35,14 +35,36 @@ _LEGACY_KEY_MAP: Dict[str, str] = {
 
 
 def _normalize_risk_dict(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """将旧版配置字段名映射到 RiskThresholds 字段名。"""
+    """将旧版配置字段名映射到 RiskThresholds 字段名。
+
+    R6 扩展：
+      - ``emergency_stop: true`` → ``intraday_drawdown_halt = 0.0``（立即熔断）
+      - ``stop_loss_ratio`` → 同时作为 ``intraday_drawdown_halt`` 的后备值
+        （若未显式配置 halt 阈值），实现止损配置与 HALT 动作的双向联动。
+    """
     result: Dict[str, Any] = {}
+    stop_loss_val: float | None = None
+
     for key, value in raw.items():
         mapped = _LEGACY_KEY_MAP.get(key, key)
         if mapped in RiskThresholds.__dataclass_fields__:
             result[mapped] = float(value)
+            if key == "stop_loss_ratio":
+                stop_loss_val = float(value)
+        elif key == "emergency_stop":
+            # R6: emergency_stop=True → HALT 阈值清零（任何回撤立即熔断）
+            if value:
+                result["intraday_drawdown_halt"] = 0.0
+                log.info("R6: emergency_stop=True，intraday_drawdown_halt 已设为 0.0")
         elif key not in ("blacklist",):  # blacklist 不是阈值参数
             log.debug("忽略未知风控配置键: %s", key)
+
+    # R6: 若未显式设置 halt 阈值，但配置了 stop_loss_ratio，
+    # 则以 stop_loss_ratio 同时作为 HALT 阈值（止损即熔断）
+    if stop_loss_val is not None and "intraday_drawdown_halt" not in result:
+        result["intraday_drawdown_halt"] = stop_loss_val
+        log.debug("R6: stop_loss_ratio=%.4f 关联至 intraday_drawdown_halt", stop_loss_val)
+
     return result
 
 

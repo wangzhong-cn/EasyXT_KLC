@@ -571,7 +571,7 @@ class DuckDBDataManagerWidget(QWidget):
                 self.data_tree.addTopLevelItem(market_item)
 
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"加载数据树失败: {e}")
+            self.status_label.setText(f"数据树加载失败: {e}")
 
     def on_tree_item_clicked(self, item: QTreeWidgetItem, column: int):
         """树形列表项点击事件"""
@@ -1280,7 +1280,7 @@ class DuckDBDataManagerWidget(QWidget):
                     QMessageBox.information(self, "统计信息", msg)
 
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"加载统计信息失败: {e}")
+            self.status_label.setText(f"统计信息加载失败: {e}")
 
     def check_integrity(self):
         """检查数据完整性"""

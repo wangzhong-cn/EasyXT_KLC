@@ -951,12 +951,28 @@ class TestNormalizeRealtimeQuote:
 
 
 class TestRealtimeBarConstruction:
-    def test_intraday_new_bar_open_uses_last_trade_not_day_open(self):
+    @staticmethod
+    def _bind_realtime_methods(stub):
         import types as _types
-        stub = _make_stub()
         stub._normalize_realtime_quote = _types.MethodType(
             KLineChartWorkspace._normalize_realtime_quote, stub
         )
+        stub._resolve_quote_timestamp = _types.MethodType(
+            KLineChartWorkspace._resolve_quote_timestamp, stub
+        )
+        stub._coerce_timestamp = _types.MethodType(
+            KLineChartWorkspace._coerce_timestamp, stub
+        )
+        stub._is_intraday_market_time = _types.MethodType(
+            KLineChartWorkspace._is_intraday_market_time, stub
+        )
+        stub._floor_bar_time = _types.MethodType(
+            KLineChartWorkspace._floor_bar_time, stub
+        )
+
+    def test_intraday_new_bar_open_uses_last_trade_not_day_open(self):
+        stub = _make_stub()
+        self._bind_realtime_methods(stub)
         stub.period_combo = MagicMock()
         stub.period_combo.currentText.return_value = "30m"
         stub.realtime_last_total_volume = 1000.0
@@ -982,17 +998,15 @@ class TestRealtimeBarConstruction:
             "high": 111.20,
             "low": 111.08,
             "volume": 1050.0,
+            "time": "2026-03-17 15:00:00",
         }
         KLineChartWorkspace._apply_realtime_quote(stub, quote, "000988.SZ")
         assert float(stub.last_data.iloc[-1]["open"]) == 111.12
         assert float(stub.last_data.iloc[-1]["close"]) == 111.12
 
     def test_daily_new_bar_open_keeps_day_open(self):
-        import types as _types
         stub = _make_stub()
-        stub._normalize_realtime_quote = _types.MethodType(
-            KLineChartWorkspace._normalize_realtime_quote, stub
-        )
+        self._bind_realtime_methods(stub)
         stub.period_combo = MagicMock()
         stub.period_combo.currentText.return_value = "1d"
         stub.realtime_last_total_volume = 1000.0
@@ -1017,11 +1031,8 @@ class TestRealtimeBarConstruction:
         assert float(stub.last_data.iloc[-1]["open"]) == 116.90
 
     def test_intraday_same_bar_ignores_daily_high_low_fields(self):
-        import types as _types
         stub = _make_stub()
-        stub._normalize_realtime_quote = _types.MethodType(
-            KLineChartWorkspace._normalize_realtime_quote, stub
-        )
+        self._bind_realtime_methods(stub)
         stub.period_combo = MagicMock()
         stub.period_combo.currentText.return_value = "5m"
         stub.realtime_last_total_volume = 1000.0
@@ -1047,16 +1058,77 @@ class TestRealtimeBarConstruction:
         assert float(stub.last_data.iloc[-1]["high"]) == 111.30
         assert float(stub.last_data.iloc[-1]["low"]) == 111.10
 
+    def test_intraday_ignores_after_hours_quote(self):
+        stub = _make_stub()
+        self._bind_realtime_methods(stub)
+        stub.period_combo = MagicMock()
+        stub.period_combo.currentText.return_value = "1m"
+        stub.realtime_last_total_volume = 1000.0
+        before = pd.DataFrame(
+            [
+                {
+                    "time": "2026-03-17 14:59:00",
+                    "open": 111.20,
+                    "high": 111.30,
+                    "low": 111.10,
+                    "close": 111.25,
+                    "volume": 3000.0,
+                }
+            ]
+        )
+        stub.last_data = before.copy()
+        stub.chart_adapter = MagicMock()
+        stub.chart = None
+        stub._request_subchart_update = MagicMock()
+        stub._update_orderbook = MagicMock()
+        quote = {"price": 111.12, "volume": 1010.0, "time": "2026-03-17 18:05:00"}
+        KLineChartWorkspace._apply_realtime_quote(stub, quote, "000988.SZ")
+        assert len(stub.last_data) == len(before)
+        assert stub.last_data.iloc[-1]["time"] == before.iloc[-1]["time"]
+
 
 class TestFallbackBarConstruction:
     def test_build_intraday_bar_uses_last_trade_only(self):
         stub = _make_stub()
-        quote = {"price": 111.12, "open": 116.90, "high": 118.20, "low": 109.90, "volume": 888.0}
+        import types as _types
+        stub._resolve_quote_timestamp = _types.MethodType(
+            KLineChartWorkspace._resolve_quote_timestamp, stub
+        )
+        stub._coerce_timestamp = _types.MethodType(
+            KLineChartWorkspace._coerce_timestamp, stub
+        )
+        stub._is_intraday_market_time = _types.MethodType(
+            KLineChartWorkspace._is_intraday_market_time, stub
+        )
+        stub._floor_bar_time = _types.MethodType(
+            KLineChartWorkspace._floor_bar_time, stub
+        )
+        quote = {"price": 111.12, "open": 116.90, "high": 118.20, "low": 109.90, "volume": 888.0, "time": "2026-03-17 14:31:00"}
         bar = KLineChartWorkspace._build_bar_from_quote(stub, quote, "30m")
         assert bar is not None
         assert float(bar["open"]) == 111.12
         assert float(bar["high"]) == 111.12
         assert float(bar["low"]) == 111.12
+
+    def test_build_intraday_bar_aligns_to_quote_timestamp(self):
+        stub = _make_stub()
+        import types as _types
+        stub._resolve_quote_timestamp = _types.MethodType(
+            KLineChartWorkspace._resolve_quote_timestamp, stub
+        )
+        stub._coerce_timestamp = _types.MethodType(
+            KLineChartWorkspace._coerce_timestamp, stub
+        )
+        stub._is_intraday_market_time = _types.MethodType(
+            KLineChartWorkspace._is_intraday_market_time, stub
+        )
+        stub._floor_bar_time = _types.MethodType(
+            KLineChartWorkspace._floor_bar_time, stub
+        )
+        quote = {"price": 111.12, "time": "2026-03-17 14:59:31"}
+        bar = KLineChartWorkspace._build_bar_from_quote(stub, quote, "5m")
+        assert bar is not None
+        assert str(bar["time"]).endswith("14:55:00")
 
 
 # ---------------------------------------------------------------------------

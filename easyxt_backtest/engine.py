@@ -452,6 +452,11 @@ class BacktestEngine:
             self._enrich_with_portfolio_risk(
                 metrics, equity_series, positions, latest_prices, final_equity,
             )
+            # R4: 将风控事件统计持久化至 DuckDB risk_events 表
+            self._persist_risk_events_to_duckdb(
+                strategy_id=strategy.strategy_id,
+                risk_stats=self._risk_engine.get_risk_stats(),
+            )
 
         return BacktestResult(
             equity_curve=equity_series,
@@ -579,6 +584,64 @@ class BacktestEngine:
             metrics["portfolio_cvar95_pct"] = var_result.portfolio_cvar95_pct
         except Exception:
             self._logger.debug("PortfolioRiskAnalyzer 计算失败，跳过")
+
+    def _persist_risk_events_to_duckdb(
+        self,
+        strategy_id: str,
+        risk_stats: Dict[str, Any],
+    ) -> None:
+        """R4: 将回测结束后的风控事件统计写入 DuckDB ``risk_events`` 表。
+
+        表结构（首次写入时自动创建）::
+
+            risk_events (
+                run_ts      TIMESTAMP,   -- 回测执行时间戳
+                strategy_id VARCHAR,     -- 策略 ID
+                account_id  VARCHAR,     -- 账户 ID
+                action      VARCHAR,     -- pass / warn / limit / halt
+                count       INTEGER      -- 该 action 出现次数
+            )
+
+        写入失败时仅记录 DEBUG 日志，不影响回测结果。
+        """
+        if not risk_stats or not self.duckdb_path:
+            return
+        try:
+            import duckdb
+            from datetime import datetime
+
+            run_ts = datetime.utcnow().isoformat(timespec="seconds")
+            rows: list[tuple] = []
+            for account_id, counters in risk_stats.items():
+                for action, count in counters.items():
+                    if count > 0:
+                        rows.append((run_ts, strategy_id, account_id, action, count))
+
+            if not rows:
+                return
+
+            conn = duckdb.connect(self.duckdb_path)
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS risk_events (
+                        run_ts      VARCHAR,
+                        strategy_id VARCHAR,
+                        account_id  VARCHAR,
+                        action      VARCHAR,
+                        count       INTEGER
+                    )
+                """)
+                conn.executemany(
+                    "INSERT INTO risk_events VALUES (?, ?, ?, ?, ?)", rows
+                )
+                conn.commit()
+                self._logger.debug(
+                    "R4: 写入 risk_events %d 行 (strategy=%s)", len(rows), strategy_id
+                )
+            finally:
+                conn.close()
+        except Exception as exc:
+            self._logger.debug("R4: risk_events 写入失败（不影响结果）: %s", exc)
 
     def _load_data(
         self,

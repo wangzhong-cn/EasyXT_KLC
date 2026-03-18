@@ -85,6 +85,78 @@ on:
         description: "峰值通知去重索引最大保留条数"
         required: false
         default: "5000"
+      rebuild_auto_symbol_limit:
+        description: "nightly 多周期重建自动抽样标的数"
+        required: false
+        default: "3"
+      rebuild_lookback_days:
+        description: "nightly 多周期重建回看天数"
+        required: false
+        default: "7"
+      watermark_qscore_floor:
+        description: "watermark日级Q-score门槛(0-1)"
+        required: false
+        default: "0.97"
+      watermark_lookback_days:
+        description: "watermark质量趋势统计天数"
+        required: false
+        default: "7"
+      watermark_profile:
+        description: "watermark治理模板 balanced/conservative/aggressive"
+        required: false
+        default: "balanced"
+      watermark_approval_required_profiles:
+        description: "生产环境需审批的模板列表（逗号分隔）"
+        required: false
+        default: "aggressive"
+      watermark_approval_id:
+        description: "模板审批单号（生产必填）"
+        required: false
+        default: ""
+      watermark_approver:
+        description: "模板审批人（生产必填）"
+        required: false
+        default: ""
+      watermark_approval_registry_file:
+        description: "模板审批白名单文件路径"
+        required: false
+        default: "artifacts/watermark_approval_registry.json"
+      watermark_approval_max_age_days:
+        description: "审批单最大有效天数"
+        required: false
+        default: "7"
+      watermark_approval_require_signature:
+        description: "是否强制审批签名校验(1/0)"
+        required: false
+        default: "1"
+      watermark_approval_usage_log_file:
+        description: "审批使用日志路径"
+        required: false
+        default: "artifacts/watermark_approval_usage.jsonl"
+      watermark_approval_multisig_threshold:
+        description: "审批多签门槛M值"
+        required: false
+        default: "1"
+      watermark_approval_signers:
+        description: "审批签署人白名单（逗号分隔）"
+        required: false
+        default: ""
+      watermark_approval_signing_key:
+        description: "审批签名密钥（建议使用 Actions Secret）"
+        required: false
+        default: ""
+      watermark_approval_expiry_warn_days:
+        description: "审批过期预警天数"
+        required: false
+        default: "2"
+      watermark_approval_usage_warn_ratio:
+        description: "审批用量预警比例(0-1)"
+        required: false
+        default: "0.8"
+      watermark_approval_warn_block:
+        description: "审批预警是否阻断(1/0)"
+        required: false
+        default: "0"
 
 env:
   PYTHONUTF8: "1"
@@ -147,6 +219,24 @@ jobs:
           PEAK_NOTIFY_RETRY_BACKOFF_SEC="${{ github.event.inputs.peak_notify_retry_backoff_sec }}"
           PEAK_NOTIFY_DEDUPE_MAX_SCAN_LINES="${{ github.event.inputs.peak_notify_dedupe_max_scan_lines }}"
           PEAK_NOTIFY_DEDUPE_INDEX_MAX_ENTRIES="${{ github.event.inputs.peak_notify_dedupe_index_max_entries }}"
+          REBUILD_AUTO_SYMBOL_LIMIT="${{ github.event.inputs.rebuild_auto_symbol_limit }}"
+          REBUILD_LOOKBACK_DAYS="${{ github.event.inputs.rebuild_lookback_days }}"
+          WATERMARK_QSCORE_FLOOR="${{ github.event.inputs.watermark_qscore_floor }}"
+          WATERMARK_LOOKBACK_DAYS="${{ github.event.inputs.watermark_lookback_days }}"
+          WATERMARK_PROFILE="${{ github.event.inputs.watermark_profile }}"
+          WATERMARK_APPROVAL_REQUIRED_PROFILES="${{ github.event.inputs.watermark_approval_required_profiles }}"
+          WATERMARK_APPROVAL_ID="${{ github.event.inputs.watermark_approval_id }}"
+          WATERMARK_APPROVER="${{ github.event.inputs.watermark_approver }}"
+          WATERMARK_APPROVAL_REGISTRY_FILE="${{ github.event.inputs.watermark_approval_registry_file }}"
+          WATERMARK_APPROVAL_MAX_AGE_DAYS="${{ github.event.inputs.watermark_approval_max_age_days }}"
+          WATERMARK_APPROVAL_REQUIRE_SIGNATURE="${{ github.event.inputs.watermark_approval_require_signature }}"
+          WATERMARK_APPROVAL_USAGE_LOG_FILE="${{ github.event.inputs.watermark_approval_usage_log_file }}"
+          WATERMARK_APPROVAL_MULTISIG_THRESHOLD="${{ github.event.inputs.watermark_approval_multisig_threshold }}"
+          WATERMARK_APPROVAL_SIGNERS="${{ github.event.inputs.watermark_approval_signers }}"
+          WATERMARK_APPROVAL_SIGNING_KEY="${{ github.event.inputs.watermark_approval_signing_key }}"
+          WATERMARK_APPROVAL_EXPIRY_WARN_DAYS="${{ github.event.inputs.watermark_approval_expiry_warn_days }}"
+          WATERMARK_APPROVAL_USAGE_WARN_RATIO="${{ github.event.inputs.watermark_approval_usage_warn_ratio }}"
+          WATERMARK_APPROVAL_WARN_BLOCK="${{ github.event.inputs.watermark_approval_warn_block }}"
           PEAK_NOTIFY_RUN_ID="${{ github.run_id }}"
           [ -n "${STEP6_WARN_DAYS}" ] || STEP6_WARN_DAYS="${EASYXT_STEP6_WARN_DAYS}"
           [ -n "${STEP6_FAIL_DAYS}" ] || STEP6_FAIL_DAYS="${EASYXT_STEP6_FAIL_DAYS}"
@@ -194,14 +284,39 @@ jobs:
           if [ "${STRATEGY_IMPACT_ENFORCE_SHARPE_SIGN}" = "true" ] || [ "${STRATEGY_IMPACT_ENFORCE_SHARPE_SIGN}" = "1" ]; then
             GOV_SHARPE_SIGN_ARGS="--strategy-impact-enforce-sharpe-sign"
           fi
+          GOV_WM_RISK_ARGS=""
+          if [ "${WATERMARK_APPROVAL_WARN_BLOCK}" = "true" ] || [ "${WATERMARK_APPROVAL_WARN_BLOCK}" = "1" ]; then
+            GOV_WM_RISK_ARGS="--strict-watermark-profile-risk"
+          fi
+          export EASYXT_WM_APPROVAL_REQUIRE_SIGNATURE="${WATERMARK_APPROVAL_REQUIRE_SIGNATURE:-1}"
           set +e
           if [ -n "${{ github.event.inputs.duckdb_path }}" ]; then
-            python tools/governance_jobs.py --job all --strict-sla --strict-dead-letter ${GOV_STRICT_IMPACT_ARGS} ${GOV_SHARPE_SIGN_ARGS} ${GOV_STRICT_BASELINE_META_ARGS} \
+            python tools/governance_jobs.py --job all --strict-sla --strict-dead-letter --strict-late-replay --strict-rebuild --strict-watermark-qscore --strict-watermark-profile-approval ${GOV_WM_RISK_ARGS} \
+              --release-env "${RELEASE_ENV}" --watermark-approval-required-profiles "${WATERMARK_APPROVAL_REQUIRED_PROFILES:-aggressive}" \
+              --watermark-approval-id "${WATERMARK_APPROVAL_ID}" --watermark-approver "${WATERMARK_APPROVER}" \
+              --watermark-approval-registry-file "${WATERMARK_APPROVAL_REGISTRY_FILE:-artifacts/watermark_approval_registry.json}" --watermark-approval-max-age-days "${WATERMARK_APPROVAL_MAX_AGE_DAYS:-7}" \
+              --watermark-approval-signing-key "${WATERMARK_APPROVAL_SIGNING_KEY}" --watermark-approval-multisig-threshold "${WATERMARK_APPROVAL_MULTISIG_THRESHOLD:-1}" --watermark-approval-signers "${WATERMARK_APPROVAL_SIGNERS}" \
+              --watermark-approval-usage-log-file "${WATERMARK_APPROVAL_USAGE_LOG_FILE:-artifacts/watermark_approval_usage.jsonl}" \
+              --watermark-approval-expiry-warn-days "${WATERMARK_APPROVAL_EXPIRY_WARN_DAYS:-2}" --watermark-approval-usage-warn-ratio "${WATERMARK_APPROVAL_USAGE_WARN_RATIO:-0.8}" \
+              --watermark-profile "${WATERMARK_PROFILE:-balanced}" \
+              --watermark-qscore-floor "${WATERMARK_QSCORE_FLOOR:-0.97}" --watermark-lookback-days "${WATERMARK_LOOKBACK_DAYS:-7}" \
+              --rebuild-auto-symbol-limit "${REBUILD_AUTO_SYMBOL_LIMIT:-3}" --rebuild-lookback-days "${REBUILD_LOOKBACK_DAYS:-7}" \
+              ${GOV_STRICT_IMPACT_ARGS} ${GOV_SHARPE_SIGN_ARGS} ${GOV_STRICT_BASELINE_META_ARGS} \
               --strategy-impact-baseline "${STRATEGY_IMPACT_BASELINE}" --strategy-impact-delta-return "${STRATEGY_IMPACT_DELTA_RETURN}" \
               --strategy-impact-delta-mdd "${STRATEGY_IMPACT_DELTA_MDD}" --duckdb-path "${{ github.event.inputs.duckdb_path }}" \
               > artifacts/governance_nightly_${DATE}.json 2>governance_stderr.txt
           else
-            python tools/governance_jobs.py --job all --strict-sla --strict-dead-letter ${GOV_STRICT_IMPACT_ARGS} ${GOV_SHARPE_SIGN_ARGS} ${GOV_STRICT_BASELINE_META_ARGS} \
+            python tools/governance_jobs.py --job all --strict-sla --strict-dead-letter --strict-late-replay --strict-rebuild --strict-watermark-qscore --strict-watermark-profile-approval ${GOV_WM_RISK_ARGS} \
+              --release-env "${RELEASE_ENV}" --watermark-approval-required-profiles "${WATERMARK_APPROVAL_REQUIRED_PROFILES:-aggressive}" \
+              --watermark-approval-id "${WATERMARK_APPROVAL_ID}" --watermark-approver "${WATERMARK_APPROVER}" \
+              --watermark-approval-registry-file "${WATERMARK_APPROVAL_REGISTRY_FILE:-artifacts/watermark_approval_registry.json}" --watermark-approval-max-age-days "${WATERMARK_APPROVAL_MAX_AGE_DAYS:-7}" \
+              --watermark-approval-signing-key "${WATERMARK_APPROVAL_SIGNING_KEY}" --watermark-approval-multisig-threshold "${WATERMARK_APPROVAL_MULTISIG_THRESHOLD:-1}" --watermark-approval-signers "${WATERMARK_APPROVAL_SIGNERS}" \
+              --watermark-approval-usage-log-file "${WATERMARK_APPROVAL_USAGE_LOG_FILE:-artifacts/watermark_approval_usage.jsonl}" \
+              --watermark-approval-expiry-warn-days "${WATERMARK_APPROVAL_EXPIRY_WARN_DAYS:-2}" --watermark-approval-usage-warn-ratio "${WATERMARK_APPROVAL_USAGE_WARN_RATIO:-0.8}" \
+              --watermark-profile "${WATERMARK_PROFILE:-balanced}" \
+              --watermark-qscore-floor "${WATERMARK_QSCORE_FLOOR:-0.97}" --watermark-lookback-days "${WATERMARK_LOOKBACK_DAYS:-7}" \
+              --rebuild-auto-symbol-limit "${REBUILD_AUTO_SYMBOL_LIMIT:-3}" --rebuild-lookback-days "${REBUILD_LOOKBACK_DAYS:-7}" \
+              ${GOV_STRICT_IMPACT_ARGS} ${GOV_SHARPE_SIGN_ARGS} ${GOV_STRICT_BASELINE_META_ARGS} \
               --strategy-impact-baseline "${STRATEGY_IMPACT_BASELINE}" --strategy-impact-delta-return "${STRATEGY_IMPACT_DELTA_RETURN}" \
               --strategy-impact-delta-mdd "${STRATEGY_IMPACT_DELTA_MDD}" \
               > artifacts/governance_nightly_${DATE}.json 2>governance_stderr.txt
@@ -217,7 +332,7 @@ jobs:
           out.write_text(json.dumps(impact, ensure_ascii=False, indent=2), encoding="utf-8")
           PY
           GOV_EC=$?
-          python tools/p0_gate_check.py --strict --json > artifacts/p0_metrics_${DATE}.json 2>p0_stderr.txt
+          EASYXT_REQUIRE_GOVERNANCE_NIGHTLY=1 python tools/p0_gate_check.py --strict --json > artifacts/p0_metrics_${DATE}.json 2>p0_stderr.txt
           cp artifacts/p0_metrics_${DATE}.json artifacts/p0_metrics_latest.json
           P0_EC=$?
           python tools/p0_trend_update.py --gate-json artifacts/p0_metrics_latest.json --governance-json artifacts/governance_metrics_latest.json --keep-days 60

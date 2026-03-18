@@ -52,7 +52,7 @@ PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 BASELINE_FILE = PROJECT_ROOT / ".p0_baseline.json"
 
 # 脚本版本号：与 baseline 签名绑定，跨版本使用旧 baseline 时会发出警告
-SCRIPT_VERSION = "2.3.0"
+SCRIPT_VERSION = "2.4.0"
 
 
 def _get_git_commit() -> str:
@@ -1098,6 +1098,313 @@ def check_realtime_quote_contract() -> CheckResult:
     return CheckResult("realtime_quote_contract_check", status, detail, violations)
 
 
+def check_intraday_bar_semantic_guard() -> CheckResult:
+    db_path = os.environ.get("EASYXT_DUCKDB_PATH", "")
+    try:
+        from data_manager.duckdb_connection_pool import resolve_duckdb_path
+        resolved = resolve_duckdb_path(db_path if db_path else None)
+    except Exception:
+        resolved = db_path or "d:/stockdata/stock_data.ddb"
+    db_file = pathlib.Path(resolved)
+    if not db_file.exists():
+        return CheckResult(
+            "intraday_bar_semantic_guard",
+            "fail",
+            f"DuckDB 文件不存在: {db_file}",
+            [
+                Violation(
+                    location=str(db_file),
+                    message="无法执行日内K线语义守卫（数据库文件缺失）",
+                    severity="high",
+                    fix_hint="初始化数据库并确认 EASYXT_DUCKDB_PATH 指向有效文件",
+                )
+            ],
+        )
+    violations: list[Violation] = []
+    lookback_days = int(os.environ.get("EASYXT_INTRADAY_GUARD_LOOKBACK_DAYS", "5"))
+    jump_limit = float(os.environ.get("EASYXT_INTRADAY_BAR_JUMP_LIMIT", "0.25"))
+    range_limit = float(os.environ.get("EASYXT_INTRADAY_BAR_RANGE_LIMIT", "0.25"))
+    max_allowed = int(os.environ.get("EASYXT_INTRADAY_ANOMALY_MAX", "0"))
+    since_dt = (datetime.datetime.now() - datetime.timedelta(days=max(1, lookback_days))).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        import duckdb
+        con = duckdb.connect(str(db_file), read_only=True)
+        try:
+            for table_name, period in (("stock_1m", "1m"), ("stock_5m", "5m")):
+                exists = con.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                    [table_name],
+                ).fetchone()[0]
+                if not exists:
+                    violations.append(
+                        Violation(
+                            location=table_name,
+                            message=f"缺少 {table_name}，无法执行 {period} 语义校验",
+                            severity="high",
+                            fix_hint="补齐分钟线表并确保行情写入任务正常运行",
+                        )
+                    )
+                    continue
+                invalid_ohlc = int(
+                    con.execute(
+                        f"""
+                        SELECT COUNT(*) FROM {table_name}
+                        WHERE period = ?
+                          AND datetime >= ?
+                          AND (
+                            open <= 0 OR high <= 0 OR low <= 0 OR close <= 0
+                            OR high < low
+                            OR high < GREATEST(open, close)
+                            OR low > LEAST(open, close)
+                          )
+                        """,
+                        [period, since_dt],
+                    ).fetchone()[0]
+                )
+                if invalid_ohlc > max_allowed:
+                    violations.append(
+                        Violation(
+                            location=f"{table_name}:{period}",
+                            message=f"近{lookback_days}天存在 {invalid_ohlc} 条OHLC语义错误",
+                            severity="high",
+                            fix_hint="执行分钟线重放并启用隔离表回补，确保 high/low 覆盖 open/close",
+                        )
+                    )
+                range_spike = int(
+                    con.execute(
+                        f"""
+                        SELECT COUNT(*) FROM {table_name}
+                        WHERE period = ?
+                          AND datetime >= ?
+                          AND ABS(open) > 1e-9
+                          AND (high - low) / ABS(open) > ?
+                        """,
+                        [period, since_dt, range_limit],
+                    ).fetchone()[0]
+                )
+                if range_spike > max_allowed:
+                    violations.append(
+                        Violation(
+                            location=f"{table_name}:{period}",
+                            message=f"近{lookback_days}天存在 {range_spike} 条振幅>{range_limit:.0%} 异常K线",
+                            severity="high",
+                            fix_hint="检查实时合成bar字段映射，禁止将日高低注入日内bar",
+                        )
+                    )
+                jump_spike = int(
+                    con.execute(
+                        f"""
+                        WITH seq AS (
+                            SELECT
+                                stock_code,
+                                datetime,
+                                close,
+                                LAG(close) OVER (PARTITION BY stock_code ORDER BY datetime) AS prev_close
+                            FROM {table_name}
+                            WHERE period = ?
+                              AND datetime >= ?
+                        )
+                        SELECT COUNT(*)
+                        FROM seq
+                        WHERE prev_close IS NOT NULL
+                          AND ABS(prev_close) > 1e-9
+                          AND ABS(close - prev_close) / ABS(prev_close) > ?
+                        """,
+                        [period, since_dt, jump_limit],
+                    ).fetchone()[0]
+                )
+                if jump_spike > max_allowed:
+                    violations.append(
+                        Violation(
+                            location=f"{table_name}:{period}",
+                            message=f"近{lookback_days}天存在 {jump_spike} 条相邻bar跳变>{jump_limit:.0%}",
+                            severity="high",
+                            fix_hint="核查复权与实时拼接边界，执行异常点隔离后重建分钟线",
+                        )
+                    )
+                out_of_session = int(
+                    con.execute(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM {table_name}
+                        WHERE period = ?
+                          AND datetime >= ?
+                          AND (
+                            EXTRACT('dow' FROM datetime) IN (0, 6)
+                            OR (
+                                CAST(datetime AS TIME) NOT BETWEEN TIME '09:30:00' AND TIME '11:30:00'
+                                AND CAST(datetime AS TIME) NOT BETWEEN TIME '13:00:00' AND TIME '15:00:00'
+                            )
+                          )
+                        """,
+                        [period, since_dt],
+                    ).fetchone()[0]
+                )
+                if out_of_session > max_allowed:
+                    violations.append(
+                        Violation(
+                            location=f"{table_name}:{period}",
+                            message=f"近{lookback_days}天存在 {out_of_session} 条盘后/非交易时段伪bar",
+                            severity="high",
+                            fix_hint="启用交易时段水位线，按 quote 时间戳对齐，丢弃盘后分钟bar",
+                        )
+                    )
+        finally:
+            con.close()
+    except Exception as e:
+        return CheckResult(
+            "intraday_bar_semantic_guard",
+            "fail",
+            f"日内语义守卫执行失败: {e}",
+            [
+                Violation(
+                    location=str(db_file),
+                    message=f"语义守卫查询失败: {e}",
+                    severity="high",
+                    fix_hint="确认 DuckDB 可读并检查 stock_1m/stock_5m 表结构",
+                )
+            ],
+        )
+    status: Status = "fail" if violations else "pass"
+    detail = "日内K线语义守卫通过" if not violations else f"发现 {len(violations)} 项日内K线异常"
+    return CheckResult("intraday_bar_semantic_guard", status, detail, violations)
+
+
+def check_governance_nightly_jobs() -> CheckResult:
+    metrics_path = PROJECT_ROOT / "artifacts" / "governance_metrics_latest.json"
+    require_metrics = os.environ.get("EASYXT_REQUIRE_GOVERNANCE_NIGHTLY", "0") in ("1", "true", "True")
+    if not metrics_path.exists():
+        if require_metrics:
+            return CheckResult(
+                "governance_nightly_jobs_check",
+                "fail",
+                "缺少 governance_metrics_latest.json",
+                [
+                    Violation(
+                        location=str(metrics_path),
+                        message="nightly 结果文件缺失",
+                        severity="high",
+                        fix_hint="先执行 nightly 治理作业：python tools/governance_jobs.py --job all",
+                    )
+                ],
+            )
+        return CheckResult("governance_nightly_jobs_check", "skip", "未发现 governance_metrics_latest.json（本地跳过）")
+    try:
+        raw = metrics_path.read_text(encoding="utf-8", errors="ignore")
+        payload = json.loads(raw)
+    except Exception:
+        payload = None
+        try:
+            for line in reversed(raw.splitlines()):
+                s = line.strip()
+                if not s:
+                    continue
+                if not s.startswith("{"):
+                    continue
+                obj = json.loads(s)
+                if isinstance(obj, dict):
+                    payload = obj
+                    break
+        except Exception:
+            payload = None
+    if not isinstance(payload, dict):
+        e = "json_object_not_found"
+        return CheckResult(
+            "governance_nightly_jobs_check",
+            "fail",
+            f"nightly 结果解析失败: {e}",
+            [
+                Violation(
+                    location=str(metrics_path),
+                    message=f"JSON 解析失败: {e}",
+                    severity="high",
+                    fix_hint="修复治理作业输出并重新生成 governance_metrics_latest.json",
+                )
+            ],
+        )
+    late = payload.get("late_event_replay") if isinstance(payload, dict) else {}
+    late = late if isinstance(late, dict) else {}
+    rebuild = payload.get("multiperiod_rebuild") if isinstance(payload, dict) else {}
+    rebuild = rebuild if isinstance(rebuild, dict) else {}
+    rebuild_receipt_check = payload.get("multiperiod_rebuild_receipt_check") if isinstance(payload, dict) else {}
+    rebuild_receipt_check = rebuild_receipt_check if isinstance(rebuild_receipt_check, dict) else {}
+    watermark_quality = payload.get("watermark_quality") if isinstance(payload, dict) else {}
+    watermark_quality = watermark_quality if isinstance(watermark_quality, dict) else {}
+    watermark_approval = payload.get("watermark_profile_approval") if isinstance(payload, dict) else {}
+    watermark_approval = watermark_approval if isinstance(watermark_approval, dict) else {}
+    warn_block = os.environ.get("EASYXT_WM_APPROVAL_WARN_BLOCK", "0") in ("1", "true", "True")
+    violations: list[Violation] = []
+    late_failed = int(late.get("failed", 0) or 0)
+    late_dead = int(late.get("dead_letter", 0) or 0)
+    if late_failed > 0 or late_dead > 0:
+        violations.append(
+            Violation(
+                location="artifacts/governance_metrics_latest.json:late_event_replay",
+                message=f"late_event_replay failed={late_failed} dead_letter={late_dead}",
+                severity="high",
+                fix_hint="先运行 python tools/governance_jobs.py --job late_replay --strict-late-replay 清零失败",
+            )
+        )
+    rebuild_failed = int(rebuild.get("failed", 0) or 0)
+    rebuild_ok = bool(rebuild.get("ok", False))
+    if rebuild_failed > 0 or not rebuild_ok:
+        violations.append(
+            Violation(
+                location="artifacts/governance_metrics_latest.json:multiperiod_rebuild",
+                message=f"multiperiod_rebuild ok={rebuild_ok} failed={rebuild_failed}",
+                severity="high",
+                fix_hint="执行 python tools/governance_jobs.py --job rebuild --strict-rebuild 并修复失败周期",
+            )
+        )
+    receipt_valid = bool(rebuild_receipt_check.get("valid", False))
+    if not receipt_valid:
+        violations.append(
+            Violation(
+                location="artifacts/governance_metrics_latest.json:multiperiod_rebuild_receipt_check",
+                message="multiperiod_rebuild_receipt_check.valid=False",
+                severity="high",
+                fix_hint="执行 python tools/governance_jobs.py --job rebuild --strict-rebuild 并确认审计回执生成成功",
+            )
+        )
+    wm_pass = bool(watermark_quality.get("q_score_pass", False))
+    wm_today = watermark_quality.get("today") if isinstance(watermark_quality.get("today"), dict) else {}
+    wm_q = float(wm_today.get("q_score", 0.0) or 0.0) if isinstance(wm_today, dict) else 0.0
+    wm_floor = float(watermark_quality.get("q_score_floor", 0.0) or 0.0)
+    if not wm_pass:
+        violations.append(
+            Violation(
+                location="artifacts/governance_metrics_latest.json:watermark_quality",
+                message=f"watermark q_score={wm_q:.4f} < floor={wm_floor:.4f}",
+                severity="high",
+                fix_hint="检查 realtime_watermark_events.jsonl 的晚到与乱序事件并回放修复",
+            )
+        )
+    appr_valid = bool(watermark_approval.get("valid", False))
+    appr_required = bool(watermark_approval.get("required", False))
+    if appr_required and not appr_valid:
+        violations.append(
+            Violation(
+                location="artifacts/governance_metrics_latest.json:watermark_profile_approval",
+                message=f"watermark profile approval invalid reason={watermark_approval.get('reason')}",
+                severity="high",
+                fix_hint="补充 EASYXT_WM_APPROVAL_ID/EASYXT_WM_APPROVER 或切换非需审批模板",
+            )
+        )
+    appr_risk = str(watermark_approval.get("risk_level") or "").lower()
+    if warn_block and appr_risk == "warn":
+        violations.append(
+            Violation(
+                location="artifacts/governance_metrics_latest.json:watermark_profile_approval",
+                message=f"watermark profile approval risk_level={appr_risk}",
+                severity="high",
+                fix_hint="处理即将过期/用量临界审批单，或关闭 EASYXT_WM_APPROVAL_WARN_BLOCK",
+            )
+        )
+    status: Status = "fail" if violations else "pass"
+    detail = "nightly late_replay/rebuild 作业通过" if not violations else f"nightly 作业失败 {len(violations)} 项"
+    return CheckResult("governance_nightly_jobs_check", status, detail, violations)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 注册表
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1111,11 +1418,13 @@ ALL_CHECKS: dict[str, object] = {
     "sla":         check_sla_gate,
     "duckdb_write": check_duckdb_write_probe,
     "realtime":    check_realtime_quote_contract,
+    "intraday_bar": check_intraday_bar_semantic_guard,
+    "governance_nightly": check_governance_nightly_jobs,
     "schema":      check_schema_version,
     "allowlist":   check_allowlist_governance,
 }
 
-P0_CHECKS = {"credential", "sql", "timestamp", "xtdata", "publish", "sla", "duckdb_write", "realtime", "allowlist"}
+P0_CHECKS = {"credential", "sql", "timestamp", "xtdata", "publish", "sla", "duckdb_write", "realtime", "intraday_bar", "governance_nightly", "allowlist"}
 P0_RESULT_NAMES = {
     "credential_scan",
     "sql_injection_scan",
@@ -1125,6 +1434,8 @@ P0_RESULT_NAMES = {
     "sla_daily_gate",
     "duckdb_write_probe",
     "realtime_quote_contract_check",
+    "intraday_bar_semantic_guard",
+    "governance_nightly_jobs_check",
     "allowlist_governance",
 }
 
@@ -1174,6 +1485,188 @@ def _extract_duckdb_write_probe_detail(results: list[CheckResult]) -> dict[str, 
     }
 
 
+def _extract_intraday_bar_semantic_detail(results: list[CheckResult]) -> dict[str, object]:
+    target = next((r for r in results if r.name == "intraday_bar_semantic_guard"), None)
+    if target is None:
+        return {
+            "status": "missing",
+            "message": "intraday_bar_semantic_guard 未执行",
+            "anomaly_count": 0,
+            "recommended_action": "运行完整门禁: python tools/p0_gate_check.py --strict --json",
+        }
+    return {
+        "status": target.status,
+        "message": target.detail,
+        "anomaly_count": len(target.violations),
+        "recommended_action": (target.violations[0].fix_hint if target.violations else ""),
+    }
+
+
+def _extract_governance_nightly_detail(results: list[CheckResult]) -> dict[str, object]:
+    target = next((r for r in results if r.name == "governance_nightly_jobs_check"), None)
+    if target is None:
+        return {
+            "status": "missing",
+            "message": "governance_nightly_jobs_check 未执行",
+            "failed_items": 0,
+            "recommended_action": "运行完整门禁: python tools/p0_gate_check.py --strict --json",
+        }
+    return {
+        "status": target.status,
+        "message": target.detail,
+        "failed_items": len(target.violations),
+        "recommended_action": (target.violations[0].fix_hint if target.violations else ""),
+    }
+
+
+def _extract_watermark_quality_detail() -> dict[str, object]:
+    metrics_path = PROJECT_ROOT / "artifacts" / "governance_metrics_latest.json"
+    if not metrics_path.exists():
+        return {
+            "status": "missing",
+            "today_q_score": 0.0,
+            "q_score_floor": 0.0,
+            "q_score_pass": False,
+            "today_late_score": 0.0,
+            "today_ooo_score": 0.0,
+            "today_lateness_score": 0.0,
+            "q_score_mean_7d": 0.0,
+            "q_score_vol_7d": 0.0,
+            "late_score_mean_7d": 0.0,
+            "late_score_vol_7d": 0.0,
+            "ooo_score_mean_7d": 0.0,
+            "ooo_score_vol_7d": 0.0,
+            "lateness_score_mean_7d": 0.0,
+            "lateness_score_vol_7d": 0.0,
+            "trend": [],
+        }
+    try:
+        raw = metrics_path.read_text(encoding="utf-8", errors="ignore")
+        payload = None
+        for line in reversed(raw.splitlines()):
+            s = line.strip()
+            if not s or not s.startswith("{"):
+                continue
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                payload = obj
+                break
+        if payload is None:
+            payload = json.loads(raw)
+    except Exception:
+        payload = {}
+    wm = payload.get("watermark_quality") if isinstance(payload, dict) else {}
+    wm = wm if isinstance(wm, dict) else {}
+    today = wm.get("today") if isinstance(wm.get("today"), dict) else {}
+    trend = wm.get("trend") if isinstance(wm.get("trend"), list) else []
+    return {
+        "status": str(wm.get("status") or "missing"),
+        "today_q_score": float(today.get("q_score", 0.0) or 0.0) if isinstance(today, dict) else 0.0,
+        "today_late_score": float(today.get("late_score", 0.0) or 0.0) if isinstance(today, dict) else 0.0,
+        "today_ooo_score": float(today.get("ooo_score", 0.0) or 0.0) if isinstance(today, dict) else 0.0,
+        "today_lateness_score": float(today.get("lateness_score", 0.0) or 0.0) if isinstance(today, dict) else 0.0,
+        "q_score_floor": float(wm.get("q_score_floor", 0.0) or 0.0),
+        "q_score_pass": bool(wm.get("q_score_pass", False)),
+        "profile": str(wm.get("profile") or "balanced"),
+        "weights": wm.get("weights") if isinstance(wm.get("weights"), dict) else {},
+        "q_score_mean_7d": float(wm.get("q_score_mean_7d", 0.0) or 0.0),
+        "q_score_vol_7d": float(wm.get("q_score_vol_7d", 0.0) or 0.0),
+        "late_score_mean_7d": float(wm.get("late_score_mean_7d", 0.0) or 0.0),
+        "late_score_vol_7d": float(wm.get("late_score_vol_7d", 0.0) or 0.0),
+        "ooo_score_mean_7d": float(wm.get("ooo_score_mean_7d", 0.0) or 0.0),
+        "ooo_score_vol_7d": float(wm.get("ooo_score_vol_7d", 0.0) or 0.0),
+        "lateness_score_mean_7d": float(wm.get("lateness_score_mean_7d", 0.0) or 0.0),
+        "lateness_score_vol_7d": float(wm.get("lateness_score_vol_7d", 0.0) or 0.0),
+        "trend": trend[-7:],
+    }
+
+
+def _extract_watermark_profile_audit_detail() -> dict[str, object]:
+    metrics_path = PROJECT_ROOT / "artifacts" / "governance_metrics_latest.json"
+    if not metrics_path.exists():
+        return {"status": "missing", "count": 0, "recent": []}
+    try:
+        raw = metrics_path.read_text(encoding="utf-8", errors="ignore")
+        payload = None
+        for line in reversed(raw.splitlines()):
+            s = line.strip()
+            if not s or not s.startswith("{"):
+                continue
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                payload = obj
+                break
+        if payload is None:
+            payload = json.loads(raw)
+    except Exception:
+        payload = {}
+    audit = payload.get("watermark_profile_audit") if isinstance(payload, dict) else {}
+    audit = audit if isinstance(audit, dict) else {}
+    recent = audit.get("recent") if isinstance(audit.get("recent"), list) else []
+    compact = []
+    for it in recent[-5:]:
+        if not isinstance(it, dict):
+            continue
+        compact.append(
+            {
+                "ts": str(it.get("ts") or ""),
+                "action": str(it.get("action") or ""),
+                "profile": str(it.get("profile") or ""),
+                "success": bool(it.get("success", False)),
+                "message": str(it.get("message") or ""),
+            }
+        )
+    return {"status": str(audit.get("status") or "missing"), "count": int(audit.get("count", 0) or 0), "recent": compact}
+
+
+def _extract_watermark_profile_approval_detail() -> dict[str, object]:
+    metrics_path = PROJECT_ROOT / "artifacts" / "governance_metrics_latest.json"
+    if not metrics_path.exists():
+        return {"required": False, "valid": False, "reason": "missing"}
+    try:
+        raw = metrics_path.read_text(encoding="utf-8", errors="ignore")
+        payload = None
+        for line in reversed(raw.splitlines()):
+            s = line.strip()
+            if not s or not s.startswith("{"):
+                continue
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                payload = obj
+                break
+        if payload is None:
+            payload = json.loads(raw)
+    except Exception:
+        payload = {}
+    appr = payload.get("watermark_profile_approval") if isinstance(payload, dict) else {}
+    appr = appr if isinstance(appr, dict) else {}
+    return {
+        "required": bool(appr.get("required", False)),
+        "valid": bool(appr.get("valid", False)),
+        "release_env": str(appr.get("release_env") or ""),
+        "profile": str(appr.get("profile") or ""),
+        "approval_id": str(appr.get("approval_id") or ""),
+        "approver": str(appr.get("approver") or ""),
+        "reason": str(appr.get("reason") or ""),
+        "registry_path": str(appr.get("registry_path") or ""),
+        "approved_at": str(appr.get("approved_at") or ""),
+        "expires_at": str(appr.get("expires_at") or ""),
+        "approval_max_age_days": int(appr.get("approval_max_age_days", 0) or 0),
+        "days_to_expire": int(appr.get("days_to_expire", 0) or 0),
+        "signature_required": bool(appr.get("signature_required", False)),
+        "signature_valid": bool(appr.get("signature_valid", False)),
+        "signatures_required": int(appr.get("signatures_required", 0) or 0),
+        "signatures_valid_count": int(appr.get("signatures_valid_count", 0) or 0),
+        "max_uses": int(appr.get("max_uses", 0) or 0),
+        "used_count": int(appr.get("used_count", 0) or 0),
+        "remaining_uses": int(appr.get("remaining_uses", 0) or 0),
+        "usage_log_file": str(appr.get("usage_log_file") or ""),
+        "warnings": appr.get("warnings") if isinstance(appr.get("warnings"), list) else [],
+        "risk_level": str(appr.get("risk_level") or "unknown"),
+        "missing_fields": appr.get("missing_fields") if isinstance(appr.get("missing_fields"), list) else [],
+    }
+
+
 def _build_json_output(results: list[CheckResult], *, new_only: bool) -> dict[str, object]:
     p0_names = _p0_names()
     sev_counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
@@ -1216,6 +1709,11 @@ def _build_json_output(results: list[CheckResult], *, new_only: bool) -> dict[st
         "allowlist_expired": al_expired,
         "allowlist_due_90d": al_due_90d,
         "duckdb_write_probe_detail": _extract_duckdb_write_probe_detail(results),
+        "intraday_bar_semantic_detail": _extract_intraday_bar_semantic_detail(results),
+        "governance_nightly_detail": _extract_governance_nightly_detail(results),
+        "watermark_quality_detail": _extract_watermark_quality_detail(),
+        "watermark_profile_audit_detail": _extract_watermark_profile_audit_detail(),
+        "watermark_profile_approval_detail": _extract_watermark_profile_approval_detail(),
         "checks": [r.to_dict() for r in results],
     }
     return output

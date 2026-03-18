@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import time
 from collections import deque
@@ -37,6 +38,18 @@ class RealtimePipelineManager:
         self._window_dropped: deque[float] = deque()
         self._window_exceed_since: Optional[float] = None
         self._sustained_alert: bool = False
+        self._event_watermark_s = max(
+            1.0, min(1800.0, float(os.environ.get("EASYXT_RT_EVENT_WATERMARK_S", "120")))
+        )
+        self._drop_out_of_order_sequence = os.environ.get("EASYXT_RT_DROP_OOO_SEQUENCE", "1") in ("1", "true", "True")
+        self._max_event_ts: Optional[pd.Timestamp] = None
+        self._last_sequence_num: Optional[int] = None
+        self._late_event_dropped: int = 0
+        self._ooo_sequence_dropped: int = 0
+        self._max_lateness_ms: int = 0
+        self._watermark_audit_file = os.environ.get(
+            "EASYXT_RT_WATERMARK_AUDIT_FILE", "artifacts/realtime_watermark_events.jsonl"
+        )
 
     def configure(self, symbol: str, period: str, last_data: Optional[pd.DataFrame]) -> None:
         symbol = str(symbol or "").strip()
@@ -50,6 +63,11 @@ class RealtimePipelineManager:
             self._dropped_quotes = 0
             self._window_exceed_since = None
             self._sustained_alert = False
+            self._max_event_ts = None
+            self._last_sequence_num = None
+            self._late_event_dropped = 0
+            self._ooo_sequence_dropped = 0
+            self._max_lateness_ms = 0
         self._symbol = symbol
         self._period = period
         if last_data is None or last_data.empty:
@@ -62,6 +80,54 @@ class RealtimePipelineManager:
         if not isinstance(quote, dict):
             return
         now = time.monotonic()
+        ingest_ts = pd.Timestamp.now()
+        event_ts = self._resolve_quote_timestamp(quote)
+        lateness_ms = max(int((ingest_ts - event_ts).total_seconds() * 1000), 0)
+        self._max_lateness_ms = max(self._max_lateness_ms, lateness_ms)
+        sequence_id = self._resolve_sequence_id(quote)
+        seq_num = self._sequence_to_int(sequence_id)
+        if self._max_event_ts is None or event_ts > self._max_event_ts:
+            self._max_event_ts = event_ts
+        watermark_floor = self._max_event_ts - pd.Timedelta(seconds=self._event_watermark_s) if self._max_event_ts is not None else event_ts
+        if event_ts < watermark_floor:
+            self._late_event_dropped += 1
+            self._append_watermark_audit(
+                stock_code=self._symbol,
+                period=self._period,
+                sequence_id=sequence_id,
+                event_time=event_ts,
+                ingest_time=ingest_ts,
+                watermark_ms=int(self._event_watermark_s * 1000),
+                lateness_ms=lateness_ms,
+                decision="drop",
+                reason="late_watermark_exceeded",
+            )
+            return
+        if (
+            self._drop_out_of_order_sequence
+            and seq_num is not None
+            and self._last_sequence_num is not None
+            and seq_num < self._last_sequence_num
+        ):
+            self._ooo_sequence_dropped += 1
+            self._append_watermark_audit(
+                stock_code=self._symbol,
+                period=self._period,
+                sequence_id=sequence_id,
+                event_time=event_ts,
+                ingest_time=ingest_ts,
+                watermark_ms=int(self._event_watermark_s * 1000),
+                lateness_ms=lateness_ms,
+                decision="drop",
+                reason="out_of_order_sequence",
+            )
+            return
+        if seq_num is not None:
+            self._last_sequence_num = seq_num
+        quote["_sequence_id"] = sequence_id
+        quote["_source_event_time"] = event_ts.isoformat()
+        quote["_ingest_time"] = ingest_ts.isoformat()
+        quote["_lateness_ms"] = lateness_ms
         self._total_quotes += 1
         self._window_quotes.append(now)
         if len(self._queue) >= self.max_queue:
@@ -150,6 +216,10 @@ class RealtimePipelineManager:
             "sustained_drop_alert": self._sustained_alert,
             "alert_sustain_s": int(self._alert_sustain_s),
             "recovery_threshold": round(self._recovery_threshold * 100, 2),  # 恢复阈值
+            "event_watermark_s": int(self._event_watermark_s),
+            "late_event_dropped": self._late_event_dropped,
+            "out_of_order_sequence_dropped": self._ooo_sequence_dropped,
+            "max_lateness_ms": self._max_lateness_ms,
         }
 
     def _trim_window(self, now: float) -> None:
@@ -160,32 +230,93 @@ class RealtimePipelineManager:
             self._window_dropped.popleft()
 
     @staticmethod
-    def _compute_bar_time(now: pd.Timestamp, period: str) -> str:
+    def _compute_bar_time(ts: pd.Timestamp, period: str) -> str:
         """Fix 58: 统一计算所有周期的 bar_time，支持 1m/5m/15m/30m/60m/1d/1w/1M
         始终返回字符串，确保与 last_data['time'] 的字符串值对比时类型一致。"""
         if period in ("1d", "1w", "1M"):
-            return now.strftime("%Y-%m-%d")
+            return ts.strftime("%Y-%m-%d")
         if period == "1m":
-            return now.floor("min").strftime("%Y-%m-%d %H:%M:%S")
+            return ts.floor("min").strftime("%Y-%m-%d %H:%M:%S")
         if period == "5m":
-            return now.floor("5min").strftime("%Y-%m-%d %H:%M:%S")
+            return ts.floor("5min").strftime("%Y-%m-%d %H:%M:%S")
         if period == "15m":
-            return now.floor("15min").strftime("%Y-%m-%d %H:%M:%S")
+            return ts.floor("15min").strftime("%Y-%m-%d %H:%M:%S")
         if period == "30m":
-            return now.floor("30min").strftime("%Y-%m-%d %H:%M:%S")
+            return ts.floor("30min").strftime("%Y-%m-%d %H:%M:%S")
         if period == "60m":
-            return now.floor("60min").strftime("%Y-%m-%d %H:%M:%S")
-        return now.strftime("%Y-%m-%d %H:%M:%S")
+            return ts.floor("60min").strftime("%Y-%m-%d %H:%M:%S")
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _coerce_timestamp(value: Any) -> Optional[pd.Timestamp]:
+        try:
+            if isinstance(value, (int, float)):
+                num = float(value)
+                if abs(num) > 1e14:
+                    ts = pd.to_datetime(int(num), unit="us", errors="coerce")
+                elif abs(num) > 1e11:
+                    ts = pd.to_datetime(int(num), unit="ms", errors="coerce")
+                elif abs(num) > 1e9:
+                    ts = pd.to_datetime(int(num), unit="s", errors="coerce")
+                else:
+                    ts = pd.to_datetime(num, errors="coerce")
+            else:
+                ts = pd.to_datetime(value, errors="coerce")
+            if pd.isna(ts):
+                return None
+            ts_obj = pd.Timestamp(ts)
+            return ts_obj.tz_localize(None) if ts_obj.tzinfo is not None else ts_obj
+        except Exception:
+            return None
+
+    def _resolve_quote_timestamp(self, quote: dict[str, Any]) -> pd.Timestamp:
+        fields = (
+            "trade_time",
+            "tradeTime",
+            "quote_time",
+            "quoteTime",
+            "update_time",
+            "updateTime",
+            "datetime",
+            "time",
+            "timestamp",
+            "ts",
+        )
+        for name in fields:
+            v = quote.get(name)
+            if v is None or v == "":
+                continue
+            ts = self._coerce_timestamp(v)
+            if ts is not None:
+                return ts
+        return pd.Timestamp.now()
+
+    @staticmethod
+    def _is_intraday_market_time(ts: pd.Timestamp) -> bool:
+        if ts.weekday() >= 5:
+            return False
+        t = ts.time()
+        return (t >= pd.Timestamp("09:30:00").time() and t <= pd.Timestamp("11:30:00").time()) or (
+            t >= pd.Timestamp("13:00:00").time() and t <= pd.Timestamp("15:00:00").time()
+        )
 
     def _build_bar_from_quote(self, quote: dict[str, Any], period: str) -> Optional[dict[str, Any]]:
         price = float(quote.get("price") or 0)
         if price <= 0:
             return None
-        now = pd.Timestamp.now()
-        bar_time: Any = self._compute_bar_time(now, period)
+        quote_ts = self._resolve_quote_timestamp(quote)
+        if period in ("1m", "5m", "15m", "30m", "60m") and not self._is_intraday_market_time(quote_ts):
+            return None
+        bar_time: Any = self._compute_bar_time(quote_ts, period)
         open_price = float(quote.get("open") or price)
-        high = max(price, float(quote.get("high") or price))
-        low = min(price, float(quote.get("low") or price))
+        is_daily = period in ("1d", "1w", "1M")
+        if is_daily:
+            high = max(price, float(quote.get("high") or price))
+            low = min(price, float(quote.get("low") or price))
+        else:
+            open_price = price
+            high = price
+            low = price
         volume = float(quote.get("volume") or 0)
         return {
             "time": bar_time,
@@ -196,13 +327,72 @@ class RealtimePipelineManager:
             "volume": volume,
         }
 
+    @staticmethod
+    def _sequence_to_int(sequence_id: str) -> Optional[int]:
+        s = str(sequence_id or "").strip()
+        if not s:
+            return None
+        if s.isdigit():
+            try:
+                return int(s)
+            except Exception:
+                return None
+        return None
+
+    def _resolve_sequence_id(self, quote: dict[str, Any]) -> str:
+        for key in ("sequence_id", "sequenceId", "seq", "seq_no", "serial_no", "trade_id", "tradeId"):
+            value = quote.get(key)
+            if value is None or value == "":
+                continue
+            return str(value)
+        ev = self._resolve_quote_timestamp(quote).isoformat()
+        return f"fallback:{self._symbol}:{self._period}:{ev}:{quote.get('price')}:{quote.get('volume')}"
+
+    def _append_watermark_audit(
+        self,
+        *,
+        stock_code: str,
+        period: str,
+        sequence_id: str,
+        event_time: pd.Timestamp,
+        ingest_time: pd.Timestamp,
+        watermark_ms: int,
+        lateness_ms: int,
+        decision: str,
+        reason: str,
+    ) -> None:
+        payload = {
+            "stock_code": stock_code,
+            "period": period,
+            "sequence_id": sequence_id,
+            "source_event_time": event_time.isoformat(),
+            "ingest_time": ingest_time.isoformat(),
+            "watermark_ms": int(watermark_ms),
+            "lateness_ms": int(lateness_ms),
+            "watermark_late": reason == "late_watermark_exceeded",
+            "decision": decision,
+            "reason": reason,
+            "created_at": pd.Timestamp.now().isoformat(),
+        }
+        try:
+            p = self._watermark_audit_file
+            if not os.path.isabs(p):
+                p = os.path.join(os.getcwd(), p)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
     def _apply_quote_to_series(self, quote: dict[str, Any]) -> Optional[dict[str, Any]]:
         price = float(quote.get("price") or 0)
         if price <= 0:
             return None
 
-        now = pd.Timestamp.now()
-        bar_time: Any = self._compute_bar_time(now, self._period)
+        quote_ts = self._resolve_quote_timestamp(quote)
+        if self._period in ("1m", "5m", "15m", "30m", "60m") and not self._is_intraday_market_time(quote_ts):
+            return None
+        bar_time: Any = self._compute_bar_time(quote_ts, self._period)
 
         total_volume = float(quote.get("volume") or 0)
         if self._last_total_volume is None or total_volume < self._last_total_volume:
@@ -213,8 +403,13 @@ class RealtimePipelineManager:
         last_row = self._last_data.iloc[-1].copy()
         last_time = last_row.get("time")
         if last_time == bar_time:
-            high = max(float(last_row["high"]), price, float(quote.get("high") or price))
-            low = min(float(last_row["low"]), price, float(quote.get("low") or price))
+            is_daily = self._period in ("1d", "1w", "1M")
+            if is_daily:
+                high = max(float(last_row["high"]), price, float(quote.get("high") or price))
+                low = min(float(last_row["low"]), price, float(quote.get("low") or price))
+            else:
+                high = max(float(last_row["high"]), price)
+                low = min(float(last_row["low"]), price)
             open_price = float(last_row["open"])
             volume = float(last_row.get("volume") or 0) + volume_delta
             updated = {
@@ -228,9 +423,15 @@ class RealtimePipelineManager:
             for col, value in updated.items():
                 self._last_data.at[self._last_data.index[-1], col] = value
         else:
-            open_price = float(quote.get("open") or price)
-            high = max(price, float(quote.get("high") or price))
-            low = min(price, float(quote.get("low") or price))
+            is_daily = self._period in ("1d", "1w", "1M")
+            if is_daily:
+                open_price = float(quote.get("open") or price)
+                high = max(price, float(quote.get("high") or price))
+                low = min(price, float(quote.get("low") or price))
+            else:
+                open_price = price
+                high = price
+                low = price
             updated = {
                 "time": bar_time,
                 "open": open_price,
@@ -282,7 +483,6 @@ class RealtimePipelineManager:
                     self._dropped_quotes += 1
 
         # 重置窗口状态，以避免使用旧参数造成的不一致
-        now = time.monotonic()
         self._window_quotes.clear()
         self._window_dropped.clear()
         self._window_exceed_since = None

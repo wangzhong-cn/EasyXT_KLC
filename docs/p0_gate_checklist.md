@@ -18,6 +18,8 @@ snapshot_publish_atomic  == pass
 sla_daily_gate           == pass
 duckdb_write_probe       == pass
 realtime_quote_contract_check == pass
+intraday_bar_semantic_guard == pass
+governance_nightly_jobs_check == pass
 ```
 
 **一键全量验收**（推荐 CI 使用）：

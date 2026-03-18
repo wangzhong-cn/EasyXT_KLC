@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from PyQt5.QtCore import QThread, QTimer, pyqtSignal
@@ -1205,6 +1206,39 @@ class _EnvironmentConfigTab(QWidget):
         super().__init__(parent)
         self._ctrl = controller
         self._thread: _ControllerThread | None = None
+        self._env_value_map: dict[str, str] = {}
+        self._wm_last_snapshot: dict[str, str] = {}
+        self._wm_profile_audit_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "artifacts",
+            "watermark_profile_audit.jsonl",
+        )
+        self._wm_profile_presets: dict[str, dict[str, str]] = {
+            "balanced": {
+                "EASYXT_WM_PROFILE": "balanced",
+                "EASYXT_WM_WEIGHT_LATE": "0.45",
+                "EASYXT_WM_WEIGHT_OOO": "0.35",
+                "EASYXT_WM_WEIGHT_LATENESS": "0.20",
+                "EASYXT_WM_QSCORE_FLOOR": "0.97",
+                "EASYXT_WM_LOOKBACK_DAYS": "7",
+            },
+            "conservative": {
+                "EASYXT_WM_PROFILE": "conservative",
+                "EASYXT_WM_WEIGHT_LATE": "0.50",
+                "EASYXT_WM_WEIGHT_OOO": "0.35",
+                "EASYXT_WM_WEIGHT_LATENESS": "0.15",
+                "EASYXT_WM_QSCORE_FLOOR": "0.985",
+                "EASYXT_WM_LOOKBACK_DAYS": "14",
+            },
+            "aggressive": {
+                "EASYXT_WM_PROFILE": "aggressive",
+                "EASYXT_WM_WEIGHT_LATE": "0.40",
+                "EASYXT_WM_WEIGHT_OOO": "0.30",
+                "EASYXT_WM_WEIGHT_LATENESS": "0.30",
+                "EASYXT_WM_QSCORE_FLOOR": "0.95",
+                "EASYXT_WM_LOOKBACK_DAYS": "7",
+            },
+        }
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -1250,6 +1284,18 @@ class _EnvironmentConfigTab(QWidget):
         self._save_btn = QPushButton("保存到 .env")
         self._save_btn.clicked.connect(self._save_env)
         eg_layout.addRow("", self._save_btn)
+        self._wm_profile_combo = QComboBox()
+        self._wm_profile_combo.addItems(["balanced", "conservative", "aggressive"])
+        eg_layout.addRow("Q-score模板：", self._wm_profile_combo)
+        wm_btn_row = QHBoxLayout()
+        self._wm_apply_btn = QPushButton("一键应用模板")
+        self._wm_apply_btn.clicked.connect(self._apply_watermark_profile)
+        wm_btn_row.addWidget(self._wm_apply_btn)
+        self._wm_rollback_btn = QPushButton("回滚上次模板")
+        self._wm_rollback_btn.clicked.connect(self._rollback_watermark_profile)
+        wm_btn_row.addWidget(self._wm_rollback_btn)
+        wm_btn_row.addStretch()
+        eg_layout.addRow("", wm_btn_row)
         layout.addWidget(edit_group)
 
         self._log = QPlainTextEdit()
@@ -1283,11 +1329,19 @@ class _EnvironmentConfigTab(QWidget):
         groups: dict = result.get("groups", {})
         all_items = []
         editable_keys = []
+        env_map: dict[str, str] = {}
         for group_name, items in groups.items():
             for item in items:
                 all_items.append((group_name, item))
                 if not item.get("sensitive"):
                     editable_keys.append(item["key"])
+                env_map[str(item.get("key") or "")] = str(item.get("value") or "")
+        self._env_value_map = env_map
+        current_profile = self._env_value_map.get("EASYXT_WM_PROFILE", "").strip().lower()
+        if current_profile in self._wm_profile_presets:
+            idx = self._wm_profile_combo.findText(current_profile)
+            if idx >= 0:
+                self._wm_profile_combo.setCurrentIndex(idx)
 
         self._table.setRowCount(len(all_items))
         for row, (group_name, item) in enumerate(all_items):
@@ -1373,6 +1427,110 @@ class _EnvironmentConfigTab(QWidget):
         self._refresh_btn.setEnabled(True)
         self._test_btn.setEnabled(True)
         self._log.appendPlainText(f"[FATAL] {msg}")
+
+    def _snapshot_watermark_env(self) -> dict[str, str]:
+        keys = set()
+        for cfg in self._wm_profile_presets.values():
+            keys.update(cfg.keys())
+        snapshot: dict[str, str] = {}
+        for key in keys:
+            snapshot[key] = self._env_value_map.get(key, "")
+        return snapshot
+
+    def _apply_watermark_profile(self) -> None:
+        profile = self._wm_profile_combo.currentText().strip().lower()
+        cfg = self._wm_profile_presets.get(profile)
+        if not cfg:
+            QMessageBox.warning(self, "失败", f"未知模板: {profile}")
+            return
+        self._wm_last_snapshot = self._snapshot_watermark_env()
+        errors: list[str] = []
+        for key, value in cfg.items():
+            res = self._ctrl.save_env_to_dotenv(key, value)
+            if not res.get("ok"):
+                errors.append(str(res.get("error") or f"{key} 保存失败"))
+        if errors:
+            self._log.appendPlainText(f"[FAIL] 模板应用失败: {'; '.join(errors)}")
+            QMessageBox.warning(self, "失败", "\n".join(errors[:5]))
+            return
+        self._append_watermark_profile_audit(
+            action="apply",
+            profile=profile,
+            before=self._wm_last_snapshot,
+            after=cfg,
+            success=True,
+            message="ok",
+        )
+        self._log.appendPlainText(f"[OK]  已应用 Q-score 模板: {profile}")
+        try:
+            signal_bus.emit(Events.ENV_CONFIG_SAVED, key="EASYXT_WM_PROFILE", source="env_config_tab_profile")
+        except Exception:
+            pass
+        self._refresh()
+
+    def _rollback_watermark_profile(self) -> None:
+        if not self._wm_last_snapshot:
+            QMessageBox.information(self, "提示", "暂无可回滚的模板快照")
+            return
+        before = self._snapshot_watermark_env()
+        errors: list[str] = []
+        for key, value in self._wm_last_snapshot.items():
+            res = self._ctrl.save_env_to_dotenv(key, value)
+            if not res.get("ok"):
+                errors.append(str(res.get("error") or f"{key} 回滚失败"))
+        if errors:
+            self._append_watermark_profile_audit(
+                action="rollback",
+                profile=self._wm_last_snapshot.get("EASYXT_WM_PROFILE", ""),
+                before=before,
+                after=self._wm_last_snapshot,
+                success=False,
+                message="; ".join(errors[:5]),
+            )
+            self._log.appendPlainText(f"[FAIL] 模板回滚失败: {'; '.join(errors)}")
+            QMessageBox.warning(self, "失败", "\n".join(errors[:5]))
+            return
+        self._append_watermark_profile_audit(
+            action="rollback",
+            profile=self._wm_last_snapshot.get("EASYXT_WM_PROFILE", ""),
+            before=before,
+            after=self._wm_last_snapshot,
+            success=True,
+            message="ok",
+        )
+        self._log.appendPlainText("[OK]  已回滚到上次模板快照")
+        try:
+            signal_bus.emit(Events.ENV_CONFIG_SAVED, key="EASYXT_WM_PROFILE", source="env_config_tab_profile_rollback")
+        except Exception:
+            pass
+        self._refresh()
+
+    def _append_watermark_profile_audit(
+        self,
+        *,
+        action: str,
+        profile: str,
+        before: dict[str, str],
+        after: dict[str, str],
+        success: bool,
+        message: str,
+    ) -> None:
+        payload = {
+            "ts": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+            "action": str(action),
+            "profile": str(profile),
+            "success": bool(success),
+            "message": str(message),
+            "before": before,
+            "after": after,
+            "source": "env_config_tab",
+        }
+        try:
+            os.makedirs(os.path.dirname(self._wm_profile_audit_path), exist_ok=True)
+            with open(self._wm_profile_audit_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
 
 # ─── Tab 10：实时链路监控 ─────────────────────────────────────────────────
