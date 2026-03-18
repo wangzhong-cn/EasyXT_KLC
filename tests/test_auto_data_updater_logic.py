@@ -1,4 +1,5 @@
 """Tests for auto_data_updater module – pure logic paths."""
+import sys
 import pytest
 from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -770,3 +771,305 @@ class TestStartEnvValidation:
             updater.start()
         assert updater.running is True
         updater.stop()
+
+
+# ===========================================================================
+# Additional coverage: uncovered branches
+# ===========================================================================
+
+
+class TestInitializeDataManagerSuccess:
+    """Lines 132-134: initialize_data_manager success path."""
+
+    def _make_updater(self):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=':memory:'):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            return AutoDataUpdater(':memory:')
+
+    def test_success_stores_data_manager(self):
+        updater = self._make_updater()
+        mock_dm = MagicMock()
+        mock_dm_cls = MagicMock(return_value=mock_dm)
+        mock_module = MagicMock()
+        mock_module.DataManager = mock_dm_cls
+        with patch('importlib.import_module', return_value=mock_module):
+            updater.initialize_data_manager()
+        assert updater.data_manager is mock_dm
+
+
+class TestInitializeInterfaceSuccess:
+    """Lines 144-145: initialize_interface success path."""
+
+    def _make_updater(self):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=':memory:'):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            return AutoDataUpdater(':memory:')
+
+    def test_success_stores_interface_and_calls_connect(self):
+        updater = self._make_updater()
+        mock_iface = MagicMock()
+        mock_iface_cls = MagicMock(return_value=mock_iface)
+        import data_manager.unified_data_interface as _udi_mod
+        with patch.object(_udi_mod, 'UnifiedDataInterface', mock_iface_cls):
+            updater.initialize_interface()
+        assert updater.interface is mock_iface
+        mock_iface.connect.assert_called_once_with(read_only=False)
+
+
+class TestGetListingDateExceptionPaths:
+    """Lines 285-286, 298-299: exception paths in get_listing_date."""
+
+    def _make_updater(self):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=':memory:'):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            return AutoDataUpdater(':memory:')
+
+    def test_xtquant_import_error_falls_back_to_default(self):
+        """Lines 285-286: xtquant import raises → default '1990-01-01'."""
+        updater = self._make_updater()
+        updater.interface = None
+        with patch.dict('os.environ', {'EASYXT_ENABLE_XT_LISTING_DATE': '1'}), \
+             patch.dict(sys.modules, {'xtquant': None, 'xtquant.xtdata': None}):
+            result = updater.get_listing_date('000001.SZ')
+        assert result == '1990-01-01'
+
+    def test_interface_con_execute_raises_falls_back(self):
+        """Lines 298-299: interface.con.execute() raises → default '1990-01-01'."""
+        updater = self._make_updater()
+        mock_con = MagicMock()
+        mock_con.execute.side_effect = RuntimeError("db error")
+        mock_iface = MagicMock()
+        mock_iface.con = mock_con
+        updater.interface = mock_iface
+        result = updater.get_listing_date('000001.SZ')
+        assert result == '1990-01-01'
+
+
+class TestUpdateAllPeriodsForStockException:
+    """Lines 379-381: exception in get_stock_data recorded."""
+
+    def _make_updater(self):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=':memory:'):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            return AutoDataUpdater(':memory:')
+
+    def test_get_stock_data_raises_failure_recorded(self):
+        updater = self._make_updater()
+        mock_iface = MagicMock()
+        mock_iface.get_stock_data.side_effect = RuntimeError("API down")
+        updater.interface = mock_iface
+        result = updater.update_all_periods_for_stock('000001.SZ', periods=['1d'])
+        assert not result['periods']['1d']['success']
+        assert 'API down' in result['periods']['1d']['message']
+
+
+class TestBulkDownloadAutoMode:
+    """Lines 423, 426: None periods/stock_codes."""
+
+    def _make_updater(self):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=':memory:'):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            return AutoDataUpdater(':memory:')
+
+    def test_none_periods_uses_all_periods(self):
+        """Line 423: periods=None → ALL_PERIODS."""
+        updater = self._make_updater()
+        updater.interface = MagicMock()
+        with patch.object(updater, 'update_all_periods_for_stock', return_value={
+            'stock_code': '000001.SZ', 'success_periods': 1,
+            'total_records': 10, 'periods': {}
+        }) as mock_update:
+            result = updater.bulk_download(stock_codes=['000001.SZ'], periods=None)
+        assert result['total_stocks'] == 1
+        # Called with ALL_PERIODS
+        _, kwargs = mock_update.call_args
+        assert kwargs.get('periods') == updater.ALL_PERIODS
+
+    def test_none_stock_codes_fetches_from_db(self):
+        """Line 426: stock_codes=None → _get_all_stock_codes() called."""
+        updater = self._make_updater()
+        updater.interface = MagicMock()
+        with patch.object(updater, '_get_all_stock_codes',
+                          return_value=['600000.SH']) as mock_get, \
+             patch.object(updater, 'update_all_periods_for_stock', return_value={
+                 'stock_code': '600000.SH', 'success_periods': 0,
+                 'total_records': 0, 'periods': {}
+             }):
+            result = updater.bulk_download(stock_codes=None, periods=['1d'])
+        mock_get.assert_called_once()
+        assert result['total_stocks'] == 1
+
+
+class TestBulkDownloadFailureAndProgress:
+    """Lines 466-467, 472-473: stock failure + on_progress exception."""
+
+    def _make_updater(self):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=':memory:'):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            return AutoDataUpdater(':memory:')
+
+    def test_failed_stock_increments_failed_count(self):
+        """Lines 466-467: success_periods=0 → failed_stocks incremented."""
+        updater = self._make_updater()
+        updater.interface = MagicMock()
+        with patch.object(updater, 'update_all_periods_for_stock', return_value={
+            'stock_code': '000001.SZ', 'success_periods': 0,
+            'total_records': 0, 'periods': {}
+        }):
+            result = updater.bulk_download(
+                stock_codes=['000001.SZ'], periods=['1d'])
+        assert result['failed_stocks'] == 1
+        assert result['success_stocks'] == 0
+
+    def test_on_progress_exception_swallowed(self):
+        """Lines 472-473: on_progress raises → swallowed."""
+        updater = self._make_updater()
+        updater.interface = MagicMock()
+
+        def bad_progress(*args):
+            raise RuntimeError("progress error")
+
+        with patch.object(updater, 'update_all_periods_for_stock', return_value={
+            'stock_code': '000001.SZ', 'success_periods': 1,
+            'total_records': 5, 'periods': {}
+        }):
+            result = updater.bulk_download(
+                stock_codes=['000001.SZ'], periods=['1d'],
+                on_progress=bad_progress)
+        assert result['success_stocks'] == 1
+
+
+class TestBulkDownloadSignalBusFails:
+    """Lines 482-483: signal_bus emit fails → swallowed."""
+
+    def _make_updater(self):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=':memory:'):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            return AutoDataUpdater(':memory:')
+
+    def test_signal_bus_emit_failure_swallowed(self):
+        updater = self._make_updater()
+        updater.interface = MagicMock()
+        mock_sb = MagicMock()
+        mock_sb.emit.side_effect = RuntimeError("bus error")
+        mock_signal_bus_mod = MagicMock(signal_bus=mock_sb)
+        mock_events_mod = MagicMock()
+        with patch.object(updater, 'update_all_periods_for_stock', return_value={
+            'stock_code': '000001.SZ', 'success_periods': 1,
+            'total_records': 10, 'periods': {}
+        }), \
+        patch.dict(sys.modules, {
+            'core.signal_bus': mock_signal_bus_mod,
+            'core.events': mock_events_mod,
+        }):
+            result = updater.bulk_download(
+                stock_codes=['000001.SZ'], periods=['1d'])
+        assert result['total_stocks'] == 1
+
+
+class TestSaveCheckpointException:
+    """Lines 523-528: json.dump fails → no crash."""
+
+    def _make_updater(self, tmp_path):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=str(tmp_path / 'db.ddb')):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            upd = AutoDataUpdater(str(tmp_path / 'db.ddb'))
+        upd._checkpoint_path = tmp_path / 'checkpoint.json'
+        return upd
+
+    def test_json_dump_fails_no_raise(self, tmp_path):
+        updater = self._make_updater(tmp_path)
+        with patch('json.dump', side_effect=OSError("disk full")):
+            updater._save_checkpoint('2026-01-01', 0, 10, 5, 1, [])
+        # Must not raise
+
+
+class TestLoadCheckpointException:
+    """Lines 538-539: file corrupt → return {}."""
+
+    def _make_updater(self, tmp_path):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=str(tmp_path / 'db.ddb')):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            upd = AutoDataUpdater(str(tmp_path / 'db.ddb'))
+        upd._checkpoint_path = tmp_path / 'checkpoint.json'
+        return upd
+
+    def test_corrupt_checkpoint_returns_empty_dict(self, tmp_path):
+        updater = self._make_updater(tmp_path)
+        updater._checkpoint_path.write_text("not valid json!!!{")
+        result = updater._load_checkpoint('2026-01-01')
+        assert result == {}
+
+
+class TestUpdateAllStocksCheckpointSave:
+    """Line 611: auto mode (stock_codes=None) saves checkpoint."""
+
+    def _make_updater(self, tmp_path):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=str(tmp_path / 'db.ddb')):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            upd = AutoDataUpdater(str(tmp_path / 'db.ddb'))
+        upd._checkpoint_path = tmp_path / 'checkpoint.json'
+        return upd
+
+    def test_auto_mode_saves_checkpoint(self, tmp_path):
+        updater = self._make_updater(tmp_path)
+        updater.data_manager = MagicMock()  # Skip initialize_data_manager
+        save_calls = []
+        original_save = updater._save_checkpoint
+
+        def tracking_save(*args, **kwargs):
+            save_calls.append(True)
+            return original_save(*args, **kwargs)
+
+        updater._save_checkpoint = tracking_save
+        with patch.object(updater, '_get_all_stock_codes',
+                          return_value=['000001.SZ']), \
+             patch.object(updater, 'update_single_stock',
+                          return_value={'success': True, 'records': 5}):
+            result = updater.update_all_stocks(stock_codes=None)
+        assert len(save_calls) >= 1
+        assert result['success'] == 1
+
+
+class TestGetAllStockCodesEdgeCases:
+    """Line 659: board loader returns non-list → return []."""
+
+    def _make_updater(self):
+        with patch('data_manager.duckdb_connection_pool.resolve_duckdb_path',
+                   return_value=':memory:'):
+            from data_manager.auto_data_updater import AutoDataUpdater
+            return AutoDataUpdater(':memory:')
+
+    def test_non_list_fresh_codes_returns_empty(self):
+        import pandas as pd
+        updater = self._make_updater()
+        mock_manager = MagicMock()
+        mock_con = MagicMock()
+        mock_con.execute.return_value.fetchdf.return_value = pd.DataFrame(
+            {'stock_code': []})
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=mock_con)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_manager.get_read_connection.return_value = ctx
+
+        mock_loader = MagicMock()
+        mock_loader.get_board_stocks.return_value = {'invalid': 'dict'}  # not a list
+        mock_loader_cls = MagicMock(return_value=mock_loader)
+        mock_module = MagicMock()
+        mock_module.BoardStocksLoader = mock_loader_cls
+
+        with patch('data_manager.duckdb_connection_pool.get_db_manager',
+                   return_value=mock_manager), \
+             patch('importlib.import_module', return_value=mock_module):
+            codes = updater._get_all_stock_codes()
+        assert codes == []
