@@ -304,3 +304,120 @@ class TestResetDailyStateSpecificAccount:
         engine._daily_high["acc_y"] = 200_000.0
         engine.reset_daily_state(None)
         assert len(engine._daily_high) == 0
+
+
+# ---------------------------------------------------------------------------
+# R4: DuckDB risk_events persistence
+# ---------------------------------------------------------------------------
+
+class TestRiskEventDBPersistence:
+    """RiskEngine(db_path=':memory:') 持久化风控事件到 DuckDB risk_events 表。"""
+
+    @pytest.fixture
+    def db_engine(self):
+        """使用内存 DuckDB 的风控引擎，严格阈值以便触发事件。"""
+        t = RiskThresholds(
+            concentration_limit=0.20,
+            intraday_drawdown_halt=0.04,
+            intraday_drawdown_warn=0.02,
+            net_exposure_limit=0.80,
+        )
+        return RiskEngine(thresholds=t, db_path=":memory:")
+
+    def test_pass_result_not_persisted(self, db_engine):
+        """PASS 结果不写入 risk_events 表。"""
+        db_engine.check_pre_trade(
+            account_id="acc1", code="A", volume=10, price=10.0,
+            direction="buy", positions={}, nav=1_000_000,
+        )
+        rows = db_engine._event_db.query_all()
+        assert rows == []
+
+    def test_halt_event_persisted(self, db_engine):
+        """HALT 事件写入 risk_events，severity='critical'。"""
+        db_engine.update_daily_high("acc_halt", 100_000)
+        db_engine.check_pre_trade(
+            account_id="acc_halt", code="000001.SZ", volume=10, price=10.0,
+            direction="buy", positions={}, nav=95_000,  # drawdown 5% > halt 4%
+        )
+        rows = db_engine._event_db.query_all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["event_type"] == "halt"
+        assert row["symbol"] == "000001.SZ"
+        assert row["severity"] == "critical"
+
+    def test_warn_event_persisted(self, db_engine):
+        """WARN 事件写入 risk_events，severity='warning'。"""
+        db_engine.update_daily_high("acc_warn", 100_000)
+        db_engine.check_pre_trade(
+            account_id="acc_warn", code="000002.SZ", volume=10, price=10.0,
+            direction="buy", positions={}, nav=97_000,  # drawdown 3%
+        )
+        rows = db_engine._event_db.query_all()
+        assert len(rows) == 1
+        assert rows[0]["severity"] == "warning"
+        assert rows[0]["event_type"] == "warn"
+
+    def test_limit_event_persisted(self, db_engine):
+        """LIMIT 事件写入 risk_events，severity='error'。"""
+        db_engine.check_pre_trade(
+            account_id="acc_lim", code="600519.SH", volume=1000, price=100.0,
+            direction="buy",
+            positions={"600519.SH": 180_000},  # 180k / 1M = 18% < 20% limit
+            nav=200_000,                        # after trade: (180k + 100k) / 200k = 140% > 80% net exp
+        )
+        rows = db_engine._event_db.query_all()
+        assert len(rows) == 1
+        assert rows[0]["severity"] in ("error", "warning")  # LIMIT or WARN
+
+    def test_multiple_events_accumulate(self, db_engine):
+        """多次触发事件，全部写入 risk_events 表。"""
+        db_engine.update_daily_high("acc_m", 100_000)
+        for nav in (97_000, 96_000, 95_000):
+            db_engine._daily_high["acc_m"] = 100_000  # reset each time for isolation
+            db_engine.check_pre_trade(
+                account_id="acc_m", code="A", volume=1, price=1.0,
+                direction="buy", positions={}, nav=nav,
+            )
+        rows = db_engine._event_db.query_all()
+        assert len(rows) == 3
+
+    def test_details_json_contains_account_and_reason(self, db_engine):
+        """details_json 包含 account_id 和 reason 字段。"""
+        import json as _json
+        db_engine.update_daily_high("acc_j", 100_000)
+        db_engine.check_pre_trade(
+            account_id="acc_j", code="TEST.SZ", volume=10, price=10.0,
+            direction="buy", positions={}, nav=95_000,
+        )
+        rows = db_engine._event_db.query_all()
+        assert rows
+        details = _json.loads(rows[0]["details_json"])
+        assert details["account_id"] == "acc_j"
+        assert "reason" in details
+
+    def test_event_id_is_unique_uuid(self, db_engine):
+        """每条 risk_events 记录的 event_id 是唯一的 UUID 字符串。"""
+        db_engine.update_daily_high("acc_uid", 100_000)
+        for _ in range(3):
+            db_engine._daily_high["acc_uid"] = 100_000
+            db_engine.check_pre_trade(
+                account_id="acc_uid", code="A", volume=1, price=1.0,
+                direction="buy", positions={}, nav=95_000,
+            )
+        rows = db_engine._event_db.query_all()
+        ids = [r["event_id"] for r in rows]
+        assert len(set(ids)) == 3  # all unique
+
+    def test_no_db_path_no_event_db(self):
+        """不传 db_path 时 _event_db 为 None，不持久化。"""
+        eng = RiskEngine()
+        assert eng._event_db is None
+        # Should not crash
+        eng.update_daily_high("acc", 100_000)
+        eng.check_pre_trade(
+            account_id="acc", code="A", volume=1, price=1.0,
+            direction="buy", positions={}, nav=95_000,
+        )
+

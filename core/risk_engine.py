@@ -9,13 +9,103 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# DuckDB persistence helper
+# ---------------------------------------------------------------------------
+
+_CREATE_RISK_EVENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS risk_events (
+    event_id    VARCHAR PRIMARY KEY,
+    ts          TIMESTAMPTZ NOT NULL,
+    event_type  VARCHAR NOT NULL,
+    symbol      VARCHAR NOT NULL,
+    details_json JSON,
+    severity    VARCHAR NOT NULL
+)
+"""
+
+
+class _RiskEventDB:
+    """薄层封装：将风控触发事件写入 DuckDB ``risk_events`` 表。
+
+    仅在 ``db_path`` 非空时生效；不强依赖 duckdb（import 失败时静默降级）。
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self._db_path = db_path
+        self._conn = None
+        try:
+            import duckdb
+            self._conn = duckdb.connect(db_path)
+            self._conn.execute(_CREATE_RISK_EVENTS_TABLE)
+            self._conn.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("risk_events DuckDB 初始化失败，事件持久化已禁用: %s", exc)
+            self._conn = None
+
+    def insert(
+        self,
+        event_type: str,
+        symbol: str,
+        details: dict,
+        severity: str,
+    ) -> None:
+        if self._conn is None:
+            return
+        try:
+            self._conn.execute(
+                "INSERT INTO risk_events VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    str(uuid.uuid4()),
+                    datetime.now(tz=timezone.utc).isoformat(),
+                    event_type,
+                    symbol,
+                    json.dumps(details, ensure_ascii=False),
+                    severity,
+                ],
+            )
+            self._conn.commit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("risk_events 写入失败: %s", exc)
+
+    def query_all(self) -> list:
+        """返回全部事件行（测试 / 审计用）。"""
+        if self._conn is None:
+            return []
+        rows = self._conn.execute(
+            "SELECT event_id, ts, event_type, symbol, details_json, severity "
+            "FROM risk_events ORDER BY ts"
+        ).fetchall()
+        return [
+            {
+                "event_id": r[0],
+                "ts": r[1],
+                "event_type": r[2],
+                "symbol": r[3],
+                "details_json": r[4],
+                "severity": r[5],
+            }
+            for r in rows
+        ]
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:  # pragma: no cover
+                pass
+
 
 # ---------------------------------------------------------------------------
 # Enums & Value Types
@@ -79,7 +169,11 @@ class RiskEngine:
     维护在 ``_daily_high`` 字典里，可在每日开盘重置。
     """
 
-    def __init__(self, thresholds: Optional[RiskThresholds] = None) -> None:
+    def __init__(
+        self,
+        thresholds: Optional[RiskThresholds] = None,
+        db_path: Optional[str] = None,
+    ) -> None:
         self.thresholds = thresholds or RiskThresholds()
         # account_id -> 日内高点
         self._daily_high: Dict[str, float] = {}
@@ -87,6 +181,10 @@ class RiskEngine:
         self._thresholds_registry: Dict[str, RiskThresholds] = {}
         # 风控事件计数器：account_id -> {action_value -> count}
         self._risk_counters: Dict[str, Dict[str, int]] = {}
+        # 可选 DuckDB 持久化
+        self._event_db: Optional[_RiskEventDB] = (
+            _RiskEventDB(db_path) if db_path else None
+        )
 
     # ------------------------------------------------------------------
     # Pre-trade gate
@@ -105,7 +203,7 @@ class RiskEngine:
         strategy_id: str = "",             # 策略 ID（可选，用于分层阈值查找）
     ) -> RiskCheckResult:
         """完整的预交易风控检查。支持分层阈值：account_id专属 > strategy_id专属 > 全局默认。
-        所有触发事件自动记入风控统计（get_risk_stats()）。"""
+        所有触发事件自动记入风控统计（get_risk_stats()）；非PASS事件持久化到 risk_events 表。"""
         result = self._do_check_pre_trade(
             account_id=account_id,
             code=code,
@@ -118,6 +216,24 @@ class RiskEngine:
             strategy_id=strategy_id,
         )
         self._record_risk_event(account_id, result.action)
+        if result.action != RiskAction.PASS and self._event_db is not None:
+            self._event_db.insert(
+                event_type=result.action.value,
+                symbol=code,
+                details={
+                    "account_id": account_id,
+                    "reason": result.reason,
+                    "direction": direction,
+                    "volume": volume,
+                    "price": price,
+                    "metrics": result.metrics,
+                },
+                severity=(
+                    "critical" if result.action == RiskAction.HALT
+                    else "warning" if result.action == RiskAction.WARN
+                    else "error"
+                ),
+            )
         return result
 
     def _do_check_pre_trade(
