@@ -460,4 +460,3 @@ class TestQuickVarEdges:
             {"A": {"nav": 80000.0, "returns": rets}}, total_nav=100000.0
         )
         assert quick.portfolio_var95 == direct.portfolio_var95
-

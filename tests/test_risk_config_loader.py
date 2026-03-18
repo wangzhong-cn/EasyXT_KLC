@@ -159,4 +159,3 @@ class TestR6EmergencyStop:
         e = load_risk_engine(str(f))
         assert e.thresholds.intraday_drawdown_halt == 0.0
         assert e.thresholds.concentration_limit == 0.25
-

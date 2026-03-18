@@ -687,5 +687,3 @@ class TestPreTradeCheckEdgeCases:
             strategy_id="strat_strict",
         )
         assert result.action == RiskAction.LIMIT
-
-
