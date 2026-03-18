@@ -1,0 +1,83 @@
+name: Diff-Cover Gate
+
+# PR 新增行覆盖率门控：确保每个 PR 中新增/修改行的测试覆盖率 ≥ 80%
+#
+# 设计原则：
+#   - 只检测本 PR 变更的行，而非全量覆盖率（避免历史存量代码阻塞 PR）
+#   - 覆盖范围：core/ 及 tests/（排除 GUI、外部依赖、myenv）
+#   - fail-under=80：新增代码中 80% 的行需有测试覆盖
+#   - 自動生成 HTML + 终端报告供 PR 评审人查阅
+
+on:
+  pull_request:
+    branches: ["main", "master", "develop"]
+  workflow_dispatch:
+
+env:
+  PYTHONUTF8: "1"
+  EASYXT_TUSHARE_TOKEN: ""
+  TUSHARE_TOKEN: ""
+
+jobs:
+  diff-cover:
+    name: "Diff-Cover PR Gate (new lines ≥ 80%)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 获取完整历史，diff-cover 需要与 base branch 对比
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt --no-cache-dir
+          pip install pytest pytest-asyncio pytest-cov diff-cover
+
+      - name: Run tests with coverage
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pytest \
+            tests/ \
+            -m "not integration and not gui" \
+            --cov=core \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --tb=short \
+            -q \
+            --no-header \
+            || true
+          # || true：允许测试失败（diff-cover 独立判断），避免覆盖率报告未生成
+
+      - name: Run diff-cover gate
+        run: |
+          diff-cover coverage.xml \
+            --compare-branch=origin/${{ github.base_ref }} \
+            --fail-under=80 \
+            --html-report diff-cover-report.html \
+            --diff-range-notation ".."
+
+      - name: Upload diff-cover HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diff-cover-report
+          path: diff-cover-report.html
+          retention-days: 14
+
+      - name: Annotate failure summary
+        if: failure()
+        run: |
+          echo "::error::Diff-Cover 门控失败：本 PR 新增/修改行的测试覆盖率低于 80%"
+          echo "::error::  请为新增代码补充单元测试，或在 diff-cover-report.html 中查看未覆盖行"
+          echo "::error::  详见 development_rules.md § 测试规范"
+          diff-cover coverage.xml \
+            --compare-branch=origin/${{ github.base_ref }} \
+            --diff-range-notation ".." \
+            2>&1 | tail -30 || true
