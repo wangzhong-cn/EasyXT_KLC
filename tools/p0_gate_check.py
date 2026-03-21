@@ -185,6 +185,41 @@ ALLOWLIST: dict[str, list[AllowEntry]] = {
             expire="2027-01-01",
             issue_ref="#cred-fp-parse-tdx",
         ),
+        AllowEntry(
+            pattern="config/production_template.json",
+            reason="模板文件中的已知QMT测试账户凭据（test1234！），仅本地开发环境，不与外部生产共享",
+            owner="team",
+            expire="2027-01-01",
+            issue_ref="#cred-local-config-test1234",
+        ),
+        AllowEntry(
+            pattern="config/real_trading.json",
+            reason="本地实盘配置文件中的已知QMT测试账户凭据（test1234！），不提交公共仓库",
+            owner="team",
+            expire="2027-01-01",
+            issue_ref="#cred-local-config-test1234",
+        ),
+        AllowEntry(
+            pattern="config/unified_config.json",
+            reason="本地统一配置文件中的已知QMT测试账户凭据（test1234！），不提交公共仓库",
+            owner="team",
+            expire="2027-01-01",
+            issue_ref="#cred-local-config-test1234",
+        ),
+        AllowEntry(
+            pattern="config/xueqiu_config.json",
+            reason="本地雪球配置文件中的已知QMT测试账户凭据（test1234！），不提交公共仓库",
+            owner="team",
+            expire="2027-01-01",
+            issue_ref="#cred-local-config-test1234",
+        ),
+        AllowEntry(
+            pattern="tools/test_qmt_connection.py",
+            reason="QMT连接测试脚本中的已知测试账户ID（test1101），非生产账户，不连接真实资产",
+            owner="team",
+            expire="2027-01-01",
+            issue_ref="#cred-local-test-qmt",
+        ),
     ],
     # 示例：已知技术债，在修复 sprint 内豁免（修复后必须删除）
     # "timestamp_contract_check": [

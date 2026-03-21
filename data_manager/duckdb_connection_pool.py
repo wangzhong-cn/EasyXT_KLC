@@ -191,8 +191,8 @@ class DuckDBConnectionManager:
                 df = con.execute("SELECT * FROM stock_daily").df()
         """
         con = None
-        max_retries = 5
-        retry_delay = 0.5
+        max_retries = 30
+        retry_delay = 1.0
 
         for attempt in range(max_retries):
             try:
@@ -206,7 +206,7 @@ class DuckDBConnectionManager:
                 if self._is_lock_error(e):
                     self._lock_metrics["attempts"] += 1
                     if attempt < max_retries - 1:
-                        sleep_s = retry_delay * (attempt + 1)
+                        sleep_s = retry_delay
                         log.warning("[读取] 数据库被占用，重试 %d/%d (%.1fs)...", attempt + 1, max_retries, sleep_s)
                         t0 = time.monotonic()
                         time.sleep(sleep_s)

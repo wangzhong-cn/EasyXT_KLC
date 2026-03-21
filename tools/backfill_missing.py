@@ -69,8 +69,8 @@ def main():
     with mgr.get_read_connection() as con:
         for t in ["stock_daily", "stock_5m", "custom_period_bars"]:
             try:
-                rc = con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                sc = con.execute(f"SELECT COUNT(DISTINCT stock_code) FROM {t}").fetchone()[0]
+                rc = con.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
+                sc = con.execute("SELECT COUNT(DISTINCT stock_code) FROM " + t).fetchone()[0]
                 log.info("  %s: %s 行, %s 只标的", t, f"{rc:,}", f"{sc:,}")
             except Exception as e:
                 log.info("  %s: %s", t, e)

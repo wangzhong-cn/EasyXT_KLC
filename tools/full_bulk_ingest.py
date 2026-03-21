@@ -156,9 +156,9 @@ def verify_results():
     tables = ["stock_daily", "stock_5m", "custom_period_bars", "data_ingestion_status"]
     for t in tables:
         try:
-            row_count = con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            row_count = con.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
             stock_count = con.execute(
-                f"SELECT COUNT(DISTINCT stock_code) FROM {t}"
+                "SELECT COUNT(DISTINCT stock_code) FROM " + t
             ).fetchone()[0]
             log.info("  %s: %s 行, %s 只标的", t, f"{row_count:,}", f"{stock_count:,}")
         except Exception as e:
