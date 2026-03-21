@@ -192,6 +192,7 @@ class UnifiedDataInterface:
             "fail_threshold": int(fail_threshold),
         }
         self._cb_disabled = False  # 批量入库时可临时禁用熔断
+        self._skip_third_party_fallback = False  # 批量入库时跳过 Tushare/AKShare 回退
         self._cache_stale_quarantine_enabled = (
             str(os.environ.get("EASYXT_CACHE_STALE_QUARANTINE_ENABLED", "1")).lower()
             in ("1", "true", "yes", "on")
@@ -1442,7 +1443,8 @@ class UnifiedDataInterface:
                         ingestion_source = "dat"
                         self._logger.debug("DAT 兜底成功 %d 条", len(qmt_data))
                 # 期货/港股代码不走 Tushare/AKShare（不支持该资产类别）
-                if not self._is_futures_or_hk(stock_code):
+                # 批量入库模式下跳过第三方回退（QMT download_history_data 已尝试，无数据即跳过）
+                if not self._is_futures_or_hk(stock_code) and not self._skip_third_party_fallback:
                     if qmt_data is None or qmt_data.empty:
                         self._logger.debug("经由 DataSourceRegistry 尝试 Tushare / AKShare 兜底")
                         try:

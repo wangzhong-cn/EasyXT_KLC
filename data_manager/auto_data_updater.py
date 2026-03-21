@@ -445,8 +445,11 @@ class AutoDataUpdater:
         total_records = 0
 
         # 批量入库时禁用远程数据源熔断（QMT 是本地调用，不应被限流）
+        # 同时跳过 Tushare/AKShare 回退（QMT download_history_data 已尝试，无数据即跳过）
         prev_cb_disabled = getattr(self.interface, '_cb_disabled', False)
+        prev_skip_tp = getattr(self.interface, '_skip_third_party_fallback', False)
         self.interface._cb_disabled = True
+        self.interface._skip_third_party_fallback = True
         total = len(stock_codes)
 
         for idx, code in enumerate(stock_codes):
@@ -500,8 +503,9 @@ class AutoDataUpdater:
                 stop_event=stop_event,
             )
 
-        # 恢复熔断状态
+        # 恢复熔断状态和第三方回退设置
         self.interface._cb_disabled = prev_cb_disabled
+        self.interface._skip_third_party_fallback = prev_skip_tp
 
         return {
             'total_stocks': total,
