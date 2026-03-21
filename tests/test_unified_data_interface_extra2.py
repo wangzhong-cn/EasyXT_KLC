@@ -1066,3 +1066,112 @@ class TestRunMultiperiodRebuild:
         result = udi.run_multiperiod_rebuild("000001.SZ", "2024-01-01", "2024-01-31")
         assert result["ok"] is False
         assert result.get("error") == "duckdb_connect_failed"
+
+    def test_multiday_period_runs_cross_validate(self):
+        udi = _make_udi_with_tables()
+        try:
+            sample = pd.DataFrame(
+                {
+                    "time": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                    "open": [1.0, 1.1, 1.2],
+                    "high": [1.2, 1.3, 1.4],
+                    "low": [0.9, 1.0, 1.1],
+                    "close": [1.1, 1.2, 1.3],
+                    "volume": [100, 120, 130],
+                }
+            )
+            builder = MagicMock()
+            builder.build_multiday_bars.return_value = sample.copy()
+            builder.cross_validate.return_value = None
+            udi.get_stock_data = MagicMock(return_value=sample.copy())
+            udi.get_listing_date = MagicMock(return_value="2024-01-02")
+            udi._make_period_bar_builder = MagicMock(return_value=builder)
+            udi._atomic_replace_rebuild_periods = MagicMock(return_value=(True, ""))
+            udi._write_rebuild_receipt = MagicMock(return_value={"status": "success", "receipt_hash": "h"})
+            result = udi.run_multiperiod_rebuild("000001.SZ", "2024-01-01", "2024-01-31", periods=["2d"])
+            assert result["ok"] is True
+            assert builder.cross_validate.called
+        finally:
+            udi.con.close()
+
+    def test_natural_calendar_period_runs_cross_validate(self):
+        udi = _make_udi_with_tables()
+        try:
+            sample = pd.DataFrame(
+                {
+                    "time": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                    "open": [1.0, 1.1, 1.2],
+                    "high": [1.2, 1.3, 1.4],
+                    "low": [0.9, 1.0, 1.1],
+                    "close": [1.1, 1.2, 1.3],
+                    "volume": [100, 120, 130],
+                }
+            )
+            builder = MagicMock()
+            builder.build_natural_calendar_bars.return_value = sample.copy()
+            builder.cross_validate.return_value = None
+            udi.get_stock_data = MagicMock(return_value=sample.copy())
+            udi._make_period_bar_builder = MagicMock(return_value=builder)
+            udi._atomic_replace_rebuild_periods = MagicMock(return_value=(True, ""))
+            udi._write_rebuild_receipt = MagicMock(return_value={"status": "success", "receipt_hash": "h"})
+            result = udi.run_multiperiod_rebuild("000001.SZ", "2024-01-01", "2024-01-31", periods=["1w"])
+            assert result["ok"] is True
+            assert builder.cross_validate.called
+        finally:
+            udi.con.close()
+
+    def test_multiday_builder_exception_marks_failed_and_skips_atomic_replace(self):
+        udi = _make_udi_with_tables()
+        try:
+            sample = pd.DataFrame(
+                {
+                    "time": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                    "open": [1.0, 1.1, 1.2],
+                    "high": [1.2, 1.3, 1.4],
+                    "low": [0.9, 1.0, 1.1],
+                    "close": [1.1, 1.2, 1.3],
+                    "volume": [100, 120, 130],
+                }
+            )
+            builder = MagicMock()
+            builder.build_multiday_bars.side_effect = RuntimeError("listing_date gap too large")
+            udi.get_stock_data = MagicMock(return_value=sample.copy())
+            udi.get_listing_date = MagicMock(return_value="2024-01-02")
+            udi._make_period_bar_builder = MagicMock(return_value=builder)
+            udi._atomic_replace_rebuild_periods = MagicMock(return_value=(True, ""))
+            udi._write_rebuild_receipt = MagicMock(return_value={"status": "failed", "receipt_hash": "h"})
+            result = udi.run_multiperiod_rebuild("000001.SZ", "2024-01-01", "2024-01-31", periods=["2d"])
+            assert result["ok"] is False
+            assert result["atomic_replace"] is False
+            assert udi._atomic_replace_rebuild_periods.call_count == 0
+            assert result["failed"] >= 1
+            reasons = [str(x.get("reason", "")) for x in result.get("details", [])]
+            assert any("listing_date gap too large" in r for r in reasons)
+        finally:
+            udi.con.close()
+
+    def test_atomic_replace_failure_reflected_in_result_and_receipt(self):
+        udi = _make_udi_with_tables()
+        try:
+            sample = pd.DataFrame(
+                {
+                    "time": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                    "open": [1.0, 1.1],
+                    "high": [1.2, 1.3],
+                    "low": [0.9, 1.0],
+                    "close": [1.1, 1.2],
+                    "volume": [100, 120],
+                }
+            )
+            udi.get_stock_data = MagicMock(return_value=sample.copy())
+            udi._make_period_bar_builder = MagicMock(return_value=MagicMock())
+            udi._atomic_replace_rebuild_periods = MagicMock(return_value=(False, "tx_failed"))
+            udi._write_rebuild_receipt = MagicMock(return_value={"status": "failed", "receipt_hash": "h2"})
+            result = udi.run_multiperiod_rebuild("000001.SZ", "2024-01-01", "2024-01-31", periods=["1d"])
+            assert result["ok"] is False
+            assert result["atomic_replace"] is False
+            assert result["atomic_error"] == "tx_failed"
+            assert result["failed"] >= 1
+            assert result.get("audit_receipt", {}).get("status") == "failed"
+        finally:
+            udi.con.close()

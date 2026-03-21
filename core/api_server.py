@@ -395,8 +395,17 @@ class _MarketBroadcaster:
         """
         t0 = time.monotonic()
         seq = self._next_seq(symbol)
+        now_ms = int(time.time() * 1000)
+        out_payload = dict(payload)
+        if out_payload.get("source_event_ts_ms") in (None, ""):
+            src_ts = out_payload.get("event_ts_ms")
+            if src_ts not in (None, ""):
+                out_payload["source_event_ts_ms"] = src_ts
+        if out_payload.get("event_ts_ms") in (None, ""):
+            out_payload["event_ts_ms"] = now_ms
+        out_payload["gateway_event_ts_ms"] = now_ms
         msg = json.dumps(
-            {**payload, "event_ts_ms": int(time.time() * 1000), "seq": seq},
+            {**out_payload, "seq": seq},
             ensure_ascii=False,
         )
         attempts = 0

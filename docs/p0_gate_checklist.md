@@ -1,6 +1,6 @@
 # EasyXT P0 门禁检查清单 — 固化验收命令
 
-> **版本**: v1.0 | **日期**: 2026-03-09
+> **版本**: v1.3 | **日期**: 2026-03-20
 > **配套报告**: [data_infrastructure_diagnosis_v2.md](./data_infrastructure_diagnosis_v2.md)（v2.1）
 > **执行脚本**: [tools/p0_gate_check.py](../tools/p0_gate_check.py)
 > **适用阶段**: 每次 PR 合并前 / 版本发布前 / 生产部署前
@@ -10,16 +10,19 @@
 ## 放行铁门槛（全部通过方可发布）
 
 ```
-P0_open_count            == 0
-strict_pass              == true
-timestamp_contract_check == pass
-credential_scan          == pass
-snapshot_publish_atomic  == pass
-sla_daily_gate           == pass
-duckdb_write_probe       == pass
-realtime_quote_contract_check == pass
-intraday_bar_semantic_guard == pass
-governance_nightly_jobs_check == pass
+P0_open_count                    == 0
+strict_pass                      == true
+timestamp_contract_check         == pass
+credential_scan                  == pass
+snapshot_publish_atomic          == pass
+sla_daily_gate                   == pass
+duckdb_write_probe               == pass
+duckdb_crash_signature_gate      == pass   # ★ 新增 v1.3
+realtime_quote_contract_check    == pass
+intraday_bar_semantic_guard      == pass
+governance_nightly_jobs_check    == pass
+period_validation_report_check   == pass   # ★ 新增 v1.3
+watchdog_slo_gate                == pass   # ★ 新增 v1.3
 ```
 
 **一键全量验收**（推荐 CI 使用）：
@@ -146,6 +149,62 @@ def _check_qmt(self) -> bool:
 
 ---
 
+### P0-G1: 周期校验报告（`period_validation_report_check`）
+
+**背景**: 派生周期（多日周期 2d/3d/5d 及自然日历 1w/1M/1Q 等）必须经 cross_validate 确认 is_valid=True 方可放行。
+
+**⚠️ 重要**: 正确入口为 `tools/run_period_validation.py`（不是 `governance_jobs.py --job period_validation`，该子命令已弃用）。
+
+| 步骤 | 命令 | 期望输出 |
+|------|------|---------|
+| 单项检查 | `python tools/p0_gate_check.py --check period_validation` | `period_validation_report_check = pass` |
+| 独立执行（重建+校验） | `python tools/run_period_validation.py --json` | `{"status":"pass","passed":true,...}` |
+| 查看失败条目 | `python tools/run_period_validation.py --json \| python -m json.tool` | `"failed_items": 0` |
+
+**fail-fast 条件**: `failed_items > 0` 或报告文件缺失（prod 环境下缺失直接阻断，不降级）。
+
+**修复动作**: 执行 `python tools/run_period_validation.py` 重建并验证，日志在 `artifacts/period_validation_report.jsonl`。
+
+---
+
+### P0-G2: DuckDB 崩溃签名（`duckdb_crash_signature_gate`）
+
+**背景**: 扫描运行日志中的致命崩溃特征，覆盖：access violation、segmentation fault、DuckDB fatal/checkpoint 失败、QThread 线程销毁、BSON 断言。
+
+| 步骤 | 命令 | 期望输出 |
+|------|------|---------|
+| 单项检查 | `python tools/p0_gate_check.py --check duckdb_crash` | `duckdb_crash_signature_gate = pass` |
+| 独立扫描 | `python tools/duckdb_crash_signature_gate.py` | `"status": "pass", "hit_count": 0` |
+| 检查扫描范围 | `python tools/duckdb_crash_signature_gate.py --verbose` | 展示扫描文件列表 |
+
+**fail-fast 条件**: `hit_count > 0`（已命中崩溃签名）→ CI 阻断。
+
+**已覆盖签名**（当前 7 条）：
+- `access violation` / `segmentation fault`
+- `duckdb.*fatal` / `duckdb.*checkpoint.*fail` / `checkpoint thread.*crash`
+- `QThread.*Destroyed while thread is still running` ← v1.3 新增
+- `bsonobj\.cpp.*assertion|assertion.*bsonobj` ← v1.3 新增
+
+---
+
+### P0-G3: 主线程延迟 SLO（`watchdog_slo_gate`）
+
+**背景**: 主线程 500ms 心跳 watchdog 每 60s 统计一次 p99，连续 ≥3 次 p99 > 1.2s 则触发门禁阻断。
+
+| 步骤 | 命令 | 期望输出 |
+|------|------|---------|
+| 单项检查 | `python tools/p0_gate_check.py --check watchdog_slo` | `watchdog_slo_gate = pass` |
+| 查看日志 | `Get-Content logs\main_thread_latency.log -Tail 10 \| % { $_ \| python -m json.tool }` | `"slo_violation": false` 或 `"consecutive_violations" < 3` |
+
+**fail-fast 条件**: `consecutive_violations >= EASYXT_WATCHDOG_SLO_CONSECUTIVE_FAIL_THRESHOLD`（默认 3）→ CI 阻断。
+
+**环境变量**:
+- `EASYXT_WATCHDOG_P99_SLO_S`（默认 `1.2`）：p99 阈值（秒）
+- `EASYXT_WATCHDOG_SLO_CONSECUTIVE_FAIL_THRESHOLD`（默认 `3`）：连续违规阻断次数
+- `EASYXT_WATCHDOG_LOG_PATH`：覆盖日志路径
+
+---
+
 ### P0-D3: 原子发布（`snapshot_publish_atomic`）
 
 **问题根因**: 4 个文件中 DELETE+INSERT 无事务，崩溃时数据半删半写。
@@ -220,4 +279,4 @@ python tools/p0_gate_check.py --strict --summary
 ---
 
 *本文档与 `data_infrastructure_diagnosis_v2.md` v2.1 配套，作为独立可执行验收清单。*
-*最后更新: 2026-03-09*
+*最后更新: 2026-03-20 | v1.3: 新增 period_validation / duckdb_crash / watchdog_slo 三项发布硬约束*

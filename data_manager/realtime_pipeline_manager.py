@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import threading
 import time
 from collections import deque
 from typing import Any, Optional
@@ -26,6 +27,7 @@ class RealtimePipelineManager:
         # 添加滞回阈值，用于避免抖动
         self._recovery_threshold = self._drop_rate_threshold * 0.6  # 恢复阈值为告警阈值的60%
 
+        self._lock = threading.Lock()
         self._queue: deque[dict[str, Any]] = deque()
         self._symbol: str = ""
         self._period: str = "1d"
@@ -54,27 +56,28 @@ class RealtimePipelineManager:
     def configure(self, symbol: str, period: str, last_data: Optional[pd.DataFrame]) -> None:
         symbol = str(symbol or "").strip()
         period = str(period or "1d").strip()
-        if symbol != self._symbol or period != self._period:
-            self._queue.clear()
-            self._last_total_volume = None
-            self._window_quotes.clear()
-            self._window_dropped.clear()
-            self._total_quotes = 0
-            self._dropped_quotes = 0
-            self._window_exceed_since = None
-            self._sustained_alert = False
-            self._max_event_ts = None
-            self._last_sequence_num = None
-            self._late_event_dropped = 0
-            self._ooo_sequence_dropped = 0
-            self._max_lateness_ms = 0
-        self._symbol = symbol
-        self._period = period
-        if last_data is None or last_data.empty:
-            self._last_data = pd.DataFrame()
-        else:
-            # Fix 56: 只保留最后 5 行而非全量拷贝，避免大 DataFrame 的 O(n) copy
-            self._last_data = last_data.tail(5).copy()
+        with self._lock:
+            if symbol != self._symbol or period != self._period:
+                self._queue.clear()
+                self._last_total_volume = None
+                self._window_quotes.clear()
+                self._window_dropped.clear()
+                self._total_quotes = 0
+                self._dropped_quotes = 0
+                self._window_exceed_since = None
+                self._sustained_alert = False
+                self._max_event_ts = None
+                self._last_sequence_num = None
+                self._late_event_dropped = 0
+                self._ooo_sequence_dropped = 0
+                self._max_lateness_ms = 0
+            self._symbol = symbol
+            self._period = period
+            if last_data is None or last_data.empty:
+                self._last_data = pd.DataFrame()
+            else:
+                # Fix 56: 只保留最后 5 行而非全量拷贝，避免大 DataFrame 的 O(n) copy
+                self._last_data = last_data.tail(5).copy()
 
     def enqueue_quote(self, quote: dict[str, Any]) -> None:
         if not isinstance(quote, dict):
@@ -83,70 +86,72 @@ class RealtimePipelineManager:
         ingest_ts = pd.Timestamp.now()
         event_ts = self._resolve_quote_timestamp(quote)
         lateness_ms = max(int((ingest_ts - event_ts).total_seconds() * 1000), 0)
-        self._max_lateness_ms = max(self._max_lateness_ms, lateness_ms)
         sequence_id = self._resolve_sequence_id(quote)
         seq_num = self._sequence_to_int(sequence_id)
-        if self._max_event_ts is None or event_ts > self._max_event_ts:
-            self._max_event_ts = event_ts
-        watermark_floor = self._max_event_ts - pd.Timedelta(seconds=self._event_watermark_s) if self._max_event_ts is not None else event_ts
-        if event_ts < watermark_floor:
-            self._late_event_dropped += 1
-            self._append_watermark_audit(
-                stock_code=self._symbol,
-                period=self._period,
-                sequence_id=sequence_id,
-                event_time=event_ts,
-                ingest_time=ingest_ts,
-                watermark_ms=int(self._event_watermark_s * 1000),
-                lateness_ms=lateness_ms,
-                decision="drop",
-                reason="late_watermark_exceeded",
-            )
-            return
-        if (
-            self._drop_out_of_order_sequence
-            and seq_num is not None
-            and self._last_sequence_num is not None
-            and seq_num < self._last_sequence_num
-        ):
-            self._ooo_sequence_dropped += 1
-            self._append_watermark_audit(
-                stock_code=self._symbol,
-                period=self._period,
-                sequence_id=sequence_id,
-                event_time=event_ts,
-                ingest_time=ingest_ts,
-                watermark_ms=int(self._event_watermark_s * 1000),
-                lateness_ms=lateness_ms,
-                decision="drop",
-                reason="out_of_order_sequence",
-            )
-            return
-        if seq_num is not None:
-            self._last_sequence_num = seq_num
-        quote["_sequence_id"] = sequence_id
-        quote["_source_event_time"] = event_ts.isoformat()
-        quote["_ingest_time"] = ingest_ts.isoformat()
-        quote["_lateness_ms"] = lateness_ms
-        self._total_quotes += 1
-        self._window_quotes.append(now)
-        if len(self._queue) >= self.max_queue:
-            self._queue.popleft()
-            self._dropped_quotes += 1
-            self._window_dropped.append(now)
-        self._queue.append(quote)
-        self._trim_window(now)
+        with self._lock:
+            self._max_lateness_ms = max(self._max_lateness_ms, lateness_ms)
+            if self._max_event_ts is None or event_ts > self._max_event_ts:
+                self._max_event_ts = event_ts
+            watermark_floor = self._max_event_ts - pd.Timedelta(seconds=self._event_watermark_s) if self._max_event_ts is not None else event_ts
+            if event_ts < watermark_floor:
+                self._late_event_dropped += 1
+                self._append_watermark_audit(
+                    stock_code=self._symbol,
+                    period=self._period,
+                    sequence_id=sequence_id,
+                    event_time=event_ts,
+                    ingest_time=ingest_ts,
+                    watermark_ms=int(self._event_watermark_s * 1000),
+                    lateness_ms=lateness_ms,
+                    decision="drop",
+                    reason="late_watermark_exceeded",
+                )
+                return
+            if (
+                self._drop_out_of_order_sequence
+                and seq_num is not None
+                and self._last_sequence_num is not None
+                and seq_num < self._last_sequence_num
+            ):
+                self._ooo_sequence_dropped += 1
+                self._append_watermark_audit(
+                    stock_code=self._symbol,
+                    period=self._period,
+                    sequence_id=sequence_id,
+                    event_time=event_ts,
+                    ingest_time=ingest_ts,
+                    watermark_ms=int(self._event_watermark_s * 1000),
+                    lateness_ms=lateness_ms,
+                    decision="drop",
+                    reason="out_of_order_sequence",
+                )
+                return
+            if seq_num is not None:
+                self._last_sequence_num = seq_num
+            quote["_sequence_id"] = sequence_id
+            quote["_source_event_time"] = event_ts.isoformat()
+            quote["_ingest_time"] = ingest_ts.isoformat()
+            quote["_lateness_ms"] = lateness_ms
+            self._total_quotes += 1
+            self._window_quotes.append(now)
+            if len(self._queue) >= self.max_queue:
+                self._queue.popleft()
+                self._dropped_quotes += 1
+                self._window_dropped.append(now)
+            self._queue.append(quote)
+            self._trim_window(now)
 
     def flush(self, force: bool = False) -> Optional[dict[str, Any]]:
-        if not self._queue:
-            return None
-        now = time.monotonic()
-        if not force and (now - self._last_flush_ts) < self.flush_interval_s:
-            return None
-        self._last_flush_ts = now
+        with self._lock:
+            if not self._queue:
+                return None
+            now = time.monotonic()
+            if not force and (now - self._last_flush_ts) < self.flush_interval_s:
+                return None
+            self._last_flush_ts = now
 
-        quote = self._queue[-1]
-        self._queue.clear()
+            quote = self._queue[-1]
+            self._queue.clear()
         price = float(quote.get("price") or 0)
         if price <= 0:
             return None
@@ -177,6 +182,10 @@ class RealtimePipelineManager:
         }
 
     def metrics(self) -> dict[str, Any]:
+        with self._lock:
+            return self._metrics_unlocked()
+
+    def _metrics_unlocked(self) -> dict[str, Any]:
         now = time.monotonic()
         self._trim_window(now)
         drop_rate = 0.0
@@ -270,6 +279,14 @@ class RealtimePipelineManager:
             return None
 
     def _resolve_quote_timestamp(self, quote: dict[str, Any]) -> pd.Timestamp:
+        # event_ts_ms (epoch millis) 具有最高优先级
+        ets = quote.get("event_ts_ms")
+        if ets is not None:
+            try:
+                return pd.Timestamp(int(ets), unit="ms")
+            except (ValueError, OverflowError):
+                pass
+
         fields = (
             "trade_time",
             "tradeTime",
@@ -454,39 +471,40 @@ class RealtimePipelineManager:
         max_queue: Optional[float] = None,
     ):
         """动态更新配置参数，实现热更新"""
-        if drop_rate_threshold is not None:
-            # 边界校验
-            self._drop_rate_threshold = max(0.001, min(0.999, float(drop_rate_threshold)))
-            # 恢复阈值也相应更新
-            self._recovery_threshold = self._drop_rate_threshold * 0.6
+        with self._lock:
+            if drop_rate_threshold is not None:
+                # 边界校验
+                self._drop_rate_threshold = max(0.001, min(0.999, float(drop_rate_threshold)))
+                # 恢复阈值也相应更新
+                self._recovery_threshold = self._drop_rate_threshold * 0.6
 
-        if window_seconds is not None:
-            # 边界校验
-            self._window_seconds = max(1.0, min(3600.0, float(window_seconds)))
+            if window_seconds is not None:
+                # 边界校验
+                self._window_seconds = max(1.0, min(3600.0, float(window_seconds)))
 
-        if alert_sustain_s is not None:
-            # 边界校验
-            self._alert_sustain_s = max(0.1, min(600.0, float(alert_sustain_s)))
+            if alert_sustain_s is not None:
+                # 边界校验
+                self._alert_sustain_s = max(0.1, min(600.0, float(alert_sustain_s)))
 
-        if flush_interval_ms is not None:
-            # 边界校验
-            self.flush_interval_s = max(0.05, float(flush_interval_ms) / 1000.0)
+            if flush_interval_ms is not None:
+                # 边界校验
+                self.flush_interval_s = max(0.05, float(flush_interval_ms) / 1000.0)
 
-        if max_queue is not None:
-            # 边界校验并更新最大队列长度
-            new_max_queue = max(32, int(max_queue))
-            if new_max_queue != self.max_queue:
-                self.max_queue = new_max_queue
-                # 如果当前队列长度超过新设置的限制，需要清理队列
-                while len(self._queue) > self.max_queue:
-                    self._queue.popleft()
-                    self._dropped_quotes += 1
+            if max_queue is not None:
+                # 边界校验并更新最大队列长度
+                new_max_queue = max(32, int(max_queue))
+                if new_max_queue != self.max_queue:
+                    self.max_queue = new_max_queue
+                    # 如果当前队列长度超过新设置的限制，需要清理队列
+                    while len(self._queue) > self.max_queue:
+                        self._queue.popleft()
+                        self._dropped_quotes += 1
 
-        # 重置窗口状态，以避免使用旧参数造成的不一致
-        self._window_quotes.clear()
-        self._window_dropped.clear()
-        self._window_exceed_since = None
-        self._sustained_alert = False
+            # 重置窗口状态，以避免使用旧参数造成的不一致
+            self._window_quotes.clear()
+            self._window_dropped.clear()
+            self._window_exceed_since = None
+            self._sustained_alert = False
 
     def get_config(self) -> dict[str, Any]:
         return {

@@ -21,6 +21,7 @@ import pytest
 def _qt_available() -> bool:
     try:
         from PyQt5.QtWidgets import QApplication  # noqa: F401
+        import pytestqt  # noqa: F401
         return True
     except Exception:
         return False

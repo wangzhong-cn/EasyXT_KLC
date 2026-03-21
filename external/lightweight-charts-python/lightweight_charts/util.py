@@ -161,6 +161,17 @@ class Events:
             wrapper=lambda o, c, *arg: o(c, *[float(a) for a in arg])
         )
 
+        def _click_arg_convert(a):
+            if a == 'null':
+                return None
+            # coordinateToTime may return ISO date string for daily charts
+            if isinstance(a, str) and len(a) >= 10 and a[4:5] == '-' and a[7:8] == '-':
+                return a
+            try:
+                return float(a)
+            except (ValueError, TypeError):
+                return a
+
         self.click = JSEmitter(chart, f'subscribe_click{salt}',
             lambda o: chart.run_script(f'''
             let clickHandler{salt} = (param) => {{
@@ -171,7 +182,7 @@ class Events:
             }}
             {chart.id}.chart.subscribeClick(clickHandler{salt})
             '''),
-            wrapper=lambda func, c, *args: func(c, *[float(a) if a != 'null' else None for a in args])
+            wrapper=lambda func, c, *args: func(c, *[_click_arg_convert(a) for a in args])
         )
 
 class BulkRunScript:

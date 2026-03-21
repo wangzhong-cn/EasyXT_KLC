@@ -44,6 +44,8 @@ def test_main_supports_custom_strategy_impact_path(tmp_path, monkeypatch):
             {
                 "level": "warn",
                 "gap_to_fail_days": 3,
+                "period_validation_failed_items": 2,
+                "max_period_validation_failed_items": 0,
             }
         ),
         encoding="utf-8",
@@ -62,3 +64,10 @@ def test_main_supports_custom_strategy_impact_path(tmp_path, monkeypatch):
     assert "联动分析 4：策略影响门禁" in text
     assert "❌ FAIL" in text
     assert "peak_release_gate(SSOT)" in text
+    assert "gate_detail" in text
+    assert "contract_health" in text
+    assert "RAG评分" in text
+    assert "PV[🟡 WARN（2>0）]" in text
+    assert "RAG[" in text
+    assert "GATE_DETAIL[" in text
+    assert "HEALTHY" in text

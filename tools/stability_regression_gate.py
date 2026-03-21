@@ -26,15 +26,23 @@ GROUPS: dict[str, dict[str, object]] = {
         "paths": [
             "tests/test_unified_data_interface.py",
             "tests/test_unified_data_interface_extra.py",
+            "tests/test_unified_session_profile_rules.py",
         ],
-        "kexpr": "derived_period or get_stock_data_local or get_stock_date_range_derived",
+        "kexpr": "derived_period or get_stock_data_local or get_stock_date_range_derived or resolve_session_profile_for_symbol",
     },
     "write_observability_chain": {
         "paths": [
             "tests/test_unified_data_interface.py",
             "tests/test_unified_data_interface_extra.py",
+            "tests/test_p0_period_validation_gate.py",
+            "tests/test_stability_evidence_and_baseline_manager.py",
+            "tests/test_p0_trend_update.py",
+            "tests/test_peak_release_gate.py",
+            "tests/test_peak_release_block_note.py",
+            "tests/test_release_rag_policy.py",
+            "tests/test_data_governance_panel_smoke.py",
         ],
-        "kexpr": "post_write_verify_failed or quarantine or data_quality_alert or write_audit",
+        "kexpr": "post_write_verify_failed or quarantine or data_quality_alert or write_audit or period_validation_report_check or stability_evidence_board_includes_period_validation_summary or make_row_includes_period_validation_metrics or peak_release_gate or period_validation_gate_pass or release_rag_policy or render_release_gate_status",
     },
     "fallback_recovery_chain": {
         "paths": [
@@ -46,9 +54,10 @@ GROUPS: dict[str, dict[str, object]] = {
     "convergence_contract_chain": {
         "paths": [
             "tests/test_convergence_contract.py",
+            "tests/test_period_bar_builder_v2.py",
         ],
         # 全部契约测试：base_data + intraday + multiday + cross_source + aggregation_chain
-        "kexpr": "TestBaseDataStructure or TestIntradayConvergence or TestMultidayLeftAlign or TestCrossSourceConsistency or TestGetListingDate or TestAggregationChain",
+        "kexpr": "TestBaseDataStructure or TestIntradayConvergence or TestMultidayLeftAlign or TestCrossSourceConsistency or TestGetListingDate or TestAggregationChain or test_intraday_metadata_columns_and_session_profile or test_anchor_none_does_not_force_daily_close or test_cross_validate_emits_jsonl_report or test_session_profile_file_override",
     },
     "thread_lifecycle_chain": {
         "paths": [
@@ -57,6 +66,14 @@ GROUPS: dict[str, dict[str, object]] = {
             "tests/test_pipeline_bar_guard.py",
         ],
         "kexpr": "TestThreadSafetyHelpers or TestEnsureRealtimeApi or TestComputeInitialRange or TestNativeLwcFallback",
+    },
+    "timestamp_contract_chain": {
+        "paths": [
+            "tests/test_broadcast_pipeline.py",
+            "tests/test_realtime_pipeline_manager.py",
+            "tests/test_kline_chart_workspace_logic.py",
+        ],
+        "kexpr": "event_ts_ms or source_event_ts_ms or resolve_timestamp_prefers_source_event_ts_ms or event_ts_ms_priority_over_time_field",
     },
 }
 

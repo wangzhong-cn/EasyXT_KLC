@@ -33,6 +33,11 @@ import pathlib
 from datetime import datetime, timezone
 from typing import Any
 
+try:
+    from .release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary, rag_tag
+except Exception:
+    from release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary, rag_tag
+
 PROJECT_ROOT  = pathlib.Path(__file__).parent.parent
 HISTORY_PATH  = PROJECT_ROOT / "artifacts" / "p0_trend_history.json"
 RESULTS_DIR   = PROJECT_ROOT / "strategies" / "results"
@@ -410,6 +415,10 @@ def build_dashboard(
     s1_total    = len(stage1_results)
     peak_level = str((peak_release_gate or {}).get("level", "") or "").lower()
     peak_gap_days = int((peak_release_gate or {}).get("gap_to_fail_days", 0) or 0)
+    period_failed_items, period_max_allowed = period_validation_summary(stability_evidence, peak_release_gate)
+    period_payload = (stability_evidence or {}).get("period_validation", {}) if isinstance(stability_evidence, dict) else {}
+    period_msg = str(period_payload.get("message") or "")
+    period_action = str(period_payload.get("recommended_action") or "")
     release_env = str((peak_release_gate or {}).get("release_env", "") or "").strip()
     if peak_level == "":
         peak_ready = bool((stability_evidence or {}).get("peak_ready", False))
@@ -431,6 +440,23 @@ def build_dashboard(
         peak_status = "N/A"
     if release_env:
         peak_status = f"{peak_status} @ {release_env}"
+    header_rag = header_rag_status(
+        strict_pass=latest_gate,
+        p0_open=int(latest_p0) if latest_p0 != "?" else 999,
+        ach=int(latest_ach) if latest_ach != "?" else 999,
+        peak_level=peak_level,
+        period_failed=period_failed_items,
+        period_max_allowed=period_max_allowed,
+    )
+    gate_detail = gate_detail_tag(
+        header_rag,
+        period_failed_items,
+        period_max_allowed,
+        message=period_msg,
+        action=period_action,
+    )
+    parsed_gate_detail = parse_gate_detail_tag(gate_detail)
+    contract_health = "HEALTHY" if bool(parsed_gate_detail.get("ok", False)) else "BROKEN"
 
     header = "\n".join([
         "# 治理-业务双轨联动看板",
@@ -445,10 +471,13 @@ def build_dashboard(
         f"| 治理轨 | strict_pass | {'✅ PASS' if latest_gate else '❌ FAIL'} |",
         f"| 治理轨 | P0_open_count | {'✅ 0' if latest_p0 == 0 else f'❌ {latest_p0}'} |",
         f"| 治理轨 | active_critical_high | {'✅ 0' if latest_ach == 0 else f'⚠️ {latest_ach}'} |",
+        f"| 治理轨 | gate_detail | {gate_detail} |",
+        f"| 治理轨 | contract_health | {contract_health} |",
         f"| 策略轨 | Stage 1 通过率 | "
         f"{'✅' if s1_pass_cnt == s1_total and s1_total > 0 else '⏳'} "
         f"{s1_pass_cnt}/{s1_total} |",
         f"| 峰值轨 | peak_release_gate(SSOT) | {peak_status} |",
+        f"| 总览 | RAG评分 | {rag_tag(header_rag)} |",
     ])
 
     section1 = _section_quality_vs_drawdown(history, stage1_results)

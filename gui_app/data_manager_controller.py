@@ -705,7 +705,7 @@ class DataManagerController:
             for _, row in tables_df.iterrows():
                 tname = row["table_name"]
                 try:
-                    cnt_df = mgr.execute_read_query(f"SELECT COUNT(*) AS n FROM {tname}")  # noqa: S608
+                    cnt_df = mgr.execute_read_query(f'SELECT COUNT(*) AS n FROM "{tname}"')  # noqa: S608
                     row_count = int(cnt_df.iloc[0]["n"]) if not cnt_df.empty else 0
                 except Exception:
                     row_count = -1
@@ -723,7 +723,7 @@ class DataManagerController:
                 last_date = "N/A"
                 if has_date and row_count > 0:
                     try:
-                        ld_df = mgr.execute_read_query(f"SELECT MAX(date) AS ld FROM {tname}")  # noqa: S608
+                        ld_df = mgr.execute_read_query(f'SELECT MAX(date) AS ld FROM "{tname}"')  # noqa: S608
                         last_date = str(ld_df.iloc[0]["ld"] or "N/A")
                     except Exception:
                         pass
@@ -813,6 +813,14 @@ class DataManagerController:
         ("EASYXT_WM_APPROVAL_SIGNING_KEY",        "数据质量",   "审批签名密钥(HMAC)",           True),
         ("EASYXT_RT_EVENT_WATERMARK_S",           "数据质量",   "实时事件时间watermark秒数",    False),
         ("EASYXT_RT_DROP_OOO_SEQUENCE",           "数据质量",   "1=丢弃乱序sequence事件",       False),
+        ("EASYXT_SESSION_PROFILE",                "数据质量",   "周期构建会话模板(CN_A/CN_A_AUCTION/FUTURES_COMMODITY)", False),
+        ("EASYXT_SESSION_PROFILE_FILE",           "数据质量",   "周期构建会话模板文件(JSON)",     False),
+        ("EASYXT_SESSION_PROFILE_RULES_FILE",     "数据质量",   "标的到会话模板映射规则文件(JSON)", False),
+        ("EASYXT_PERIOD_ALIGNMENT",               "数据质量",   "周期对齐方式(默认left)",        False),
+        ("EASYXT_PERIOD_ANCHOR",                  "数据质量",   "日内收敛锚点(daily_close/none)", False),
+        ("EASYXT_PERIOD_VALIDATION_REPORT_PATH",  "数据质量",   "周期校验报告JSONL路径",         False),
+        ("EASYXT_PERIOD_VALIDATION_FAIL_BLOCK",   "数据质量",   "1=周期校验失败阻断P0",          False),
+        ("EASYXT_PEAK_MAX_PERIOD_VALIDATION_FAILED_ITEMS", "数据质量", "峰值门禁允许周期失败行数上限", False),
         ("EASYXT_PROFILE_STARTUP",                "性能",       "1=启用启动耗时分析",            False),
         ("EASYXT_PRELOAD_TABS",                   "性能",       "1=启动时预加载所有 Tab",        False),
         ("EASYXT_AUTOSTART_SERVICES",             "性能",       "1=自动启动后台服务",            False),
@@ -1004,6 +1012,14 @@ class DataManagerController:
         "EASYXT_WM_APPROVAL_USAGE_LOG_PATH",
         "EASYXT_RT_EVENT_WATERMARK_S",
         "EASYXT_RT_DROP_OOO_SEQUENCE",
+        "EASYXT_SESSION_PROFILE",
+        "EASYXT_SESSION_PROFILE_FILE",
+        "EASYXT_SESSION_PROFILE_RULES_FILE",
+        "EASYXT_PERIOD_ALIGNMENT",
+        "EASYXT_PERIOD_ANCHOR",
+        "EASYXT_PERIOD_VALIDATION_REPORT_PATH",
+        "EASYXT_PERIOD_VALIDATION_FAIL_BLOCK",
+        "EASYXT_PEAK_MAX_PERIOD_VALIDATION_FAILED_ITEMS",
         "EASYXT_PRELOAD_TABS",
         "EASYXT_AUTOSTART_SERVICES",
     })
@@ -1174,9 +1190,7 @@ class DataManagerController:
             mgr = get_db(self._duckdb_path)
             placeholders = ", ".join("?" * len(stock_codes))
             df = mgr.execute_read_query(
-                f"SELECT * FROM stock_daily "
-                f"WHERE code IN ({placeholders}) AND date >= ? AND date <= ? "
-                f"ORDER BY code, date",
+                f"SELECT * FROM stock_daily WHERE code IN ({placeholders}) AND date >= ? AND date <= ? ORDER BY code, date",  # noqa: S608
                 stock_codes + [start_date, end_date],
             )
             if df is None or df.empty:

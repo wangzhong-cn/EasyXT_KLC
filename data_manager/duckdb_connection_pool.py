@@ -124,6 +124,15 @@ class DuckDBConnectionManager:
         self._checkpoint_enabled = os.environ.get("EASYXT_ENABLE_AUTO_CHECKPOINT", "1") in (
             "1", "true", "True"
         )
+        self._checkpoint_nonblocking = os.environ.get("EASYXT_CHECKPOINT_NONBLOCKING", "1") in (
+            "1", "true", "True"
+        )
+        self._checkpoint_skip_when_busy = os.environ.get("EASYXT_CHECKPOINT_SKIP_WHEN_BUSY", "1") in (
+            "1", "true", "True"
+        )
+        self._checkpoint_on_process_exit = os.environ.get("EASYXT_CHECKPOINT_ON_PROCESS_EXIT", "1") in (
+            "1", "true", "True"
+        )
         if self._checkpoint_enabled:
             self._start_checkpoint_worker()
         atexit.register(self._on_process_exit)
@@ -209,9 +218,10 @@ class DuckDBConnectionManager:
                 if con:
                     try:
                         con.close()
-                        self._connection_count -= 1
                     except Exception:
                         pass
+                    finally:
+                        self._connection_count -= 1
 
     @contextmanager
     def get_write_connection(self):
@@ -260,9 +270,10 @@ class DuckDBConnectionManager:
                     if con:
                         try:
                             con.close()
-                            self._connection_count -= 1
                         except Exception:
                             pass
+                        finally:
+                            self._connection_count -= 1
 
     @contextmanager
     def _acquire_cross_process_write_lock(self):
@@ -393,7 +404,18 @@ class DuckDBConnectionManager:
         强制 WAL 检查点，将 WAL 内容刷入主数据库文件。
         建议在大批量写入后或应用退出前调用。
         """
+        if self.duckdb_path == ":memory:":
+            return True  # 内存数据库无 WAL，无需 checkpoint
+        if getattr(self, '_checkpoint_skip_when_busy', False) and getattr(self, '_connection_count', 0) > 0:
+            log.debug("DuckDB checkpoint 跳过: active_connections=%s", getattr(self, '_connection_count', 0))
+            return False
+        locked = False
         try:
+            if getattr(self, '_checkpoint_nonblocking', True):
+                locked = self._write_lock.acquire(blocking=False)
+                if not locked:
+                    log.debug("DuckDB checkpoint 跳过: write_lock busy")
+                    return False
             with self.get_write_connection() as con:
                 con.execute("CHECKPOINT")
             log.debug("DuckDB checkpoint 完成: %s", self.duckdb_path)
@@ -401,13 +423,50 @@ class DuckDBConnectionManager:
         except Exception as e:
             log.warning("DuckDB checkpoint 失败: %s", e)
             return False
+        finally:
+            if locked:
+                try:
+                    self._write_lock.release()
+                except Exception:
+                    pass
+
+    def _safe_checkpoint(self, trigger: str) -> bool:
+        if not threading.main_thread().is_alive():
+            return False
+        try:
+            return self.checkpoint()
+        except Exception as e:
+            log.warning("DuckDB checkpoint 异常 trigger=%s err=%s", trigger, e)
+            return False
 
     def _checkpoint_loop(self) -> None:
-        while not self._checkpoint_stop.wait(self._checkpoint_interval_s):
-            try:
-                self.checkpoint()
-            except Exception as e:
-                log.warning("自动checkpoint失败: %s", e)
+        """后台 WAL 检查点循环，对解释器退出完全安全。"""
+        try:
+            while True:
+                # 主线程已退出（解释器关闭）→ 安全退出，避免访问已卸载的 C 扩展
+                if not threading.main_thread().is_alive():
+                    return
+                # wait() 返回 True 表示 stop 事件触发
+                try:
+                    if self._checkpoint_stop.wait(self._checkpoint_interval_s):
+                        return
+                except Exception:
+                    return  # 解释器关闭时 Event 可能抛异常
+                if not threading.main_thread().is_alive():
+                    return
+                try:
+                    self._safe_checkpoint("auto")
+                except Exception as e:
+                    log.warning("自动checkpoint失败: %s", e)
+        except Exception:
+            pass  # 解释器关闭期间的任何异常均静默退出
+
+    def stop_checkpoint_worker(self, timeout: float = 3.0) -> None:
+        """停止后台 checkpoint 线程（可供测试 fixture 显式调用）。"""
+        self._checkpoint_stop.set()
+        t = self._checkpoint_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=timeout)
 
     def _start_checkpoint_worker(self) -> None:
         if self._checkpoint_thread is not None and self._checkpoint_thread.is_alive():
@@ -423,7 +482,17 @@ class DuckDBConnectionManager:
     def _on_process_exit(self) -> None:
         try:
             self._checkpoint_stop.set()
-            self.checkpoint()
+        except Exception:
+            pass
+        try:
+            t = getattr(self, '_checkpoint_thread', None)
+            if t is not None and t.is_alive():
+                t.join(timeout=2.0)  # 最多等 2 秒，优先等待后台线程自然退出
+        except Exception:
+            pass
+        try:
+            if getattr(self, '_checkpoint_on_process_exit', True) and threading.main_thread().is_alive():
+                self._safe_checkpoint("process_exit")
         except Exception as e:
             log.warning("进程退出checkpoint失败: %s", e)
 

@@ -92,6 +92,33 @@ def test_cross_validate_emits_jsonl_report(tmp_path):
     assert payload["anchor"] == "daily_close"
 
 
+def test_cross_validate_error_report_details_schema_stable(tmp_path):
+    report_file = tmp_path / "period_validation_report.jsonl"
+    df_1m = _make_intraday_df()
+    df_1d = pd.DataFrame(
+        {
+            "time": [pd.Timestamp("2024-01-02")],
+            "open": [10.0],
+            "high": [13.0],
+            "low": [9.5],
+            "close": [12.5],
+            "volume": [float(df_1m["volume"].sum())],
+        }
+    )
+    builder = PeriodBarBuilder(validation_report_file=str(report_file))
+    bars = builder.build_intraday_bars(df_1m, period_minutes=10, daily_ref=df_1d)
+    bad_daily = df_1d.copy()
+    bad_daily.loc[:, "close"] = float(df_1d.iloc[0]["close"]) + 3.0
+    vr = builder.cross_validate("10m", bars, daily_ref=bad_daily)
+    assert vr.is_valid is False
+    lines = report_file.read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(lines[-1])
+    assert payload["is_valid"] is False
+    assert isinstance(payload.get("details"), list) and payload["details"]
+    for d in payload["details"]:
+        assert {"metric", "actual", "expected", "delta"}.issubset(set(d.keys()))
+
+
 # ---------------------------------------------------------------------------
 # ValidationResult – to_dict / add_detail
 # ---------------------------------------------------------------------------

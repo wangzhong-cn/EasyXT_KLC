@@ -39,8 +39,10 @@ Tick  → 1m  ：分钟聚合量 == 1m 成交量（±0%，逐笔求和）
 
 from __future__ import annotations
 
+import json
 import logging
 from enum import Enum
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -70,6 +72,11 @@ COMMODITY_SESSIONS: List[Tuple[str, str]] = [
     ("10:30", "11:30"),  # 上午2段
     ("13:30", "15:00"),  # 下午
 ]
+SESSION_PROFILES: Dict[str, List[Tuple[str, str]]] = {
+    "CN_A": ASHARE_SESSIONS,
+    "CN_A_AUCTION": ASHARE_WITH_AUCTION_SESSIONS,
+    "FUTURES_COMMODITY": COMMODITY_SESSIONS,
+}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -146,6 +153,7 @@ class ValidationResult:
         self.is_valid = True
         self.errors: list[str] = []
         self.warnings: list[str] = []
+        self.details: list[dict] = []
 
     def add_error(self, msg: str) -> None:
         self.is_valid = False
@@ -153,6 +161,18 @@ class ValidationResult:
 
     def add_warning(self, msg: str) -> None:
         self.warnings.append(msg)
+
+    def add_detail(self, payload: dict) -> None:
+        if isinstance(payload, dict):
+            self.details.append(payload)
+
+    def to_dict(self) -> dict:
+        return {
+            "is_valid": bool(self.is_valid),
+            "errors": list(self.errors),
+            "warnings": list(self.warnings),
+            "details": list(self.details),
+        }
 
     def __repr__(self) -> str:
         status = "PASS" if self.is_valid else "FAIL"
@@ -193,10 +213,28 @@ class PeriodBarBuilder:
         sessions: Optional[List[Tuple[str, str]]] = None,
         convergence_tolerance: float = 0.001,  # 收敛价差容忍：1‰
         volume_tolerance: float = 0.05,         # 成交量容忍：5%
+        session_profile: str = "CN_A",
+        session_profile_file: Optional[str] = None,
+        alignment: str = "left",
+        anchor: str = "daily_close",
+        validation_report_file: Optional[str] = None,
     ) -> None:
-        self._sessions = sessions or ASHARE_SESSIONS
+        profiles = self._resolve_session_profiles(session_profile_file)
+        profile = str(session_profile or "CN_A").upper()
+        align = str(alignment or "left").lower()
+        anchor_mode = str(anchor or "daily_close").lower()
+        if align != "left":
+            raise ValueError(f"unsupported alignment={alignment}")
+        if anchor_mode not in {"daily_close", "none"}:
+            raise ValueError(f"unsupported anchor={anchor}")
+        self._session_profile = profile if profile in profiles else "CN_A"
+        self._sessions = sessions or profiles.get(self._session_profile, ASHARE_SESSIONS)
         self._conv_tol = convergence_tolerance
         self._vol_tol = volume_tolerance
+        self._alignment = align
+        self._anchor = anchor_mode
+        self._validation_report_file = str(validation_report_file or "").strip()
+        self._session_profile_file = str(session_profile_file or "").strip()
 
     # ── 统一入口 ──────────────────────────────────────────────────────────────
 
@@ -334,7 +372,12 @@ class PeriodBarBuilder:
                 close_val = float(chunk.iloc[-1]["close"])
 
                 # 严格收敛规则：日内最后一根 K 线 close == 1D 收盘价
-                if is_last_session and is_last_chunk and daily_close is not None:
+                if (
+                    self._anchor == "daily_close"
+                    and is_last_session
+                    and is_last_chunk
+                    and daily_close is not None
+                ):
                     if abs(close_val - daily_close) > self._conv_tol * daily_close:
                         _logger.debug(
                             "收敛修正 %s %dm: %.4f → %.4f",
@@ -350,6 +393,9 @@ class PeriodBarBuilder:
                     "close":      close_val,
                     "volume":     float(chunk["volume"].sum()),
                     "is_partial": is_partial,
+                    "alignment": self._alignment,
+                    "anchor": self._anchor,
+                    "session_profile": self._session_profile,
                 })
                 i += period_minutes
 
@@ -377,6 +423,28 @@ class PeriodBarBuilder:
         df = _prepare_1d(data_1d, listing_date)
         if df.empty:
             return _empty_ohlcv()
+        self._listing_date_gap_days = 0
+
+        # ── T1.3: listing_date 间隙验证 ──
+        # 左对齐刚性约束：实际数据起点必须在 listing_date 附近（≤5 个交易日容差）
+        # 如果间隙过大，编号偏移导致所有 K 线边界错误
+        if listing_date is not None and not df.empty:
+            expected_start = pd.Timestamp(listing_date)
+            actual_start = df.iloc[0]["time"]
+            gap_days = (actual_start - expected_start).days
+            _MAX_GAP_CALENDAR_DAYS = 10  # ≈ 5 交易日 + 周末
+            if gap_days > _MAX_GAP_CALENDAR_DAYS:
+                import logging
+                _pb_logger = logging.getLogger("period_bar_builder")
+                _pb_logger.warning(
+                    "listing_date 间隙过大: listing_date=%s 实际起点=%s 间隙=%d天 "
+                    "— 主动拒绝构建",
+                    listing_date,
+                    actual_start.strftime("%Y-%m-%d"), gap_days,
+                )
+                # 记录到 ValidationResult 供调用方检查
+                self._listing_date_gap_days = gap_days
+                return _empty_ohlcv()
 
         # 从 0 开始按顺序编号交易日，每 N 日为一期
         df = df.reset_index(drop=True)
@@ -398,6 +466,9 @@ class PeriodBarBuilder:
                 "close":      float(group.iloc[-1]["close"]),
                 "volume":     float(group["volume"].sum()),
                 "is_partial": is_partial,
+                "alignment": self._alignment,
+                "anchor": "period_end",
+                "session_profile": self._session_profile,
             })
 
         return pd.DataFrame(result_bars)
@@ -435,6 +506,9 @@ class PeriodBarBuilder:
 
         resampled = resampled.dropna(subset=["open"]).reset_index()
         resampled["is_partial"] = False
+        resampled["alignment"] = "calendar_right"
+        resampled["anchor"] = "period_end"
+        resampled["session_profile"] = self._session_profile
         return resampled
 
     # ── 四源交叉验证 ──────────────────────────────────────────────────────────
@@ -468,6 +542,7 @@ class PeriodBarBuilder:
             self._validate_intraday_vs_daily(custom_bars, daily_ref, vr)
         elif ptype == PeriodType.MULTIDAY_CUSTOM and daily_ref is not None and not daily_ref.empty:
             self._validate_multiday_vs_daily(custom_bars, daily_ref, vr)
+        self._emit_validation_report(period=period, vr=vr, rows=int(len(custom_bars)))
 
         return vr
 
@@ -508,6 +583,16 @@ class PeriodBarBuilder:
                     f"{trade_date}: 收盘价未收敛 intraday={row['close']:.4f} "
                     f"daily={d_close:.4f} diff={abs(row['close']-d_close):.4f}"
                 )
+                vr.add_detail(
+                    {
+                        "period_type": "intraday",
+                        "date": str(trade_date),
+                        "metric": "close_diff",
+                        "actual": float(row["close"]),
+                        "expected": d_close,
+                        "delta": abs(float(row["close"]) - d_close),
+                    }
+                )
 
             # 成交量允许 vol_tol 误差
             if d_vol > 0 and abs(row["volume"] - d_vol) / d_vol > self._vol_tol:
@@ -515,6 +600,17 @@ class PeriodBarBuilder:
                     f"{trade_date}: 成交量偏差 "
                     f"intraday={row['volume']:.0f} daily={d_vol:.0f} "
                     f"({abs(row['volume']-d_vol)/d_vol*100:.1f}%)"
+                )
+                vr.add_detail(
+                    {
+                        "period_type": "intraday",
+                        "date": str(trade_date),
+                        "metric": "volume_diff_ratio",
+                        "actual": float(row["volume"]),
+                        "expected": d_vol,
+                        "delta": abs(float(row["volume"]) - d_vol),
+                        "delta_ratio": abs(float(row["volume"]) - d_vol) / d_vol,
+                    }
                 )
 
     def _validate_multiday_vs_daily(
@@ -548,7 +644,74 @@ class PeriodBarBuilder:
                     f"多日K线 {bar_end.date()}: close={actual_close:.4f} "
                     f"!= 期末日收={expected_close:.4f}"
                 )
+                vr.add_detail(
+                    {
+                        "period_type": "multiday",
+                        "date": str(bar_end.date()),
+                        "metric": "close_diff",
+                        "actual": actual_close,
+                        "expected": expected_close,
+                        "delta": abs(actual_close - expected_close),
+                    }
+                )
             prev_end = bar_end
+
+    def _emit_validation_report(self, period: str, vr: ValidationResult, rows: int) -> None:
+        out = self._validation_report_file
+        if not out:
+            return
+        path = Path(out)
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        payload = {
+            "period": str(period),
+            "rows": int(rows),
+            "is_valid": bool(vr.is_valid),
+            "errors": list(vr.errors),
+            "warnings": list(vr.warnings),
+            "details": list(vr.details),
+            "alignment": self._alignment,
+            "anchor": self._anchor,
+            "session_profile": self._session_profile,
+            "generated_at": pd.Timestamp.now().isoformat(),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    @staticmethod
+    def _resolve_session_profiles(session_profile_file: Optional[str]) -> Dict[str, List[Tuple[str, str]]]:
+        profiles: Dict[str, List[Tuple[str, str]]] = dict(SESSION_PROFILES)
+        file_path = str(session_profile_file or "").strip()
+        if not file_path:
+            return profiles
+        path = Path(file_path)
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        if not path.exists():
+            return profiles
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return profiles
+            for key, value in payload.items():
+                if not isinstance(key, str) or not isinstance(value, list):
+                    continue
+                rows: list[Tuple[str, str]] = []
+                for item in value:
+                    if isinstance(item, list) and len(item) == 2:
+                        start = str(item[0]).strip()
+                        end = str(item[1]).strip()
+                        if start and end:
+                            rows.append((start, end))
+                if rows:
+                    profiles[key.upper()] = rows
+        except Exception:
+            return profiles
+        return profiles
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -557,7 +720,18 @@ class PeriodBarBuilder:
 
 def _empty_ohlcv() -> pd.DataFrame:
     return pd.DataFrame(
-        columns=["time", "open", "high", "low", "close", "volume", "is_partial"]
+        columns=[
+            "time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "is_partial",
+            "alignment",
+            "anchor",
+            "session_profile",
+        ]
     )
 
 

@@ -476,6 +476,7 @@ class DataGovernancePanel(QWidget):
         self._ctrl = controller or DataManagerController()
         self._tabs = QTabWidget()
         self._auto_refreshed: set[int] = set()  # 首次切换后只触发一次自动刷新
+        self._closed = False
         self._init_ui()
         self._connect_events()
 
@@ -556,6 +557,28 @@ class DataGovernancePanel(QWidget):
         except Exception:
             pass
 
+    def closeEvent(self, event) -> None:
+        """关闭时取消所有 signal_bus 订阅，防止僵尸面板响应事件并触发后台线程。"""
+        self._closed = True
+        _unsub_pairs = [
+            (Events.REALTIME_PIPELINE_STATUS_UPDATED, self._on_rt_pipeline_event),
+            (Events.DATA_QUALITY_ALERT, self._on_data_quality_alert_event),
+            (Events.BACKFILL_TASK_UPDATED, self._on_backfill_task_updated),
+            (Events.DATA_INGESTION_COMPLETE, self._on_ingestion_complete),
+        ]
+        for evt, handler in _unsub_pairs:
+            try:
+                signal_bus.unsubscribe(evt, handler)
+            except Exception:
+                pass
+        # 显式关闭内嵌子组件（子 widget 不自动调用 closeEvent）
+        try:
+            if hasattr(self, "_coverage_tab") and hasattr(self._coverage_tab, "close"):
+                self._coverage_tab.close()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
     def _on_rt_pipeline_event(self, **payload) -> None:
         try:
             self._realtime_tab.on_pipeline_event(**payload)
@@ -576,6 +599,8 @@ class DataGovernancePanel(QWidget):
 
     def _on_ingestion_complete(self, **payload) -> None:
         """全周期入库完成后刷新数据覆盖矩阵 Tab。"""
+        if self._closed:
+            return
         try:
             if hasattr(self._coverage_tab, 'refresh'):
                 self._coverage_tab.refresh()

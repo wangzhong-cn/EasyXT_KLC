@@ -18,12 +18,21 @@ P3 — 跨源一致性阈值断言（OHLCV 偏差 ≤ 2%，bar 数差 ≤ 1）
 from __future__ import annotations
 
 import math
+import types
 from datetime import date, timedelta
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+
+
+def _fake_xtquant_patch(get_detail):
+    xtdata_mod = types.ModuleType("xtquant.xtdata")
+    xtdata_mod.get_instrument_detail = get_detail
+    xt_mod = types.ModuleType("xtquant")
+    xt_mod.xtdata = xtdata_mod
+    return patch.dict("sys.modules", {"xtquant": xt_mod, "xtquant.xtdata": xtdata_mod})
 
 # ── 辅助工厂 ──────────────────────────────────────────────────────────────────
 
@@ -413,7 +422,7 @@ class TestGetListingDate:
         udi = self._make_udi()
         fake_detail = {"OpenDate": 20050101}
         with patch.dict("os.environ", {"EASYXT_ENABLE_XT_LISTING_DATE": "1"}):
-            with patch("xtquant.xtdata.get_instrument_detail", return_value=fake_detail):
+            with _fake_xtquant_patch(lambda _code: fake_detail):
                 result = udi.get_listing_date("000001.SZ")
         assert result == "2005-01-01"
 
@@ -422,7 +431,7 @@ class TestGetListingDate:
         udi = self._make_udi()
         fake_detail = {"CreateDate": 20100315}
         with patch.dict("os.environ", {"EASYXT_ENABLE_XT_LISTING_DATE": "1"}):
-            with patch("xtquant.xtdata.get_instrument_detail", return_value=fake_detail):
+            with _fake_xtquant_patch(lambda _code: fake_detail):
                 result = udi.get_listing_date("IF2503.CFX")
         assert result == "2010-03-15"
 
@@ -438,7 +447,7 @@ class TestGetListingDate:
         udi = self._make_udi()
         udi._listing_date_cache["000001.SZ"] = "2003-07-10"
         called = []
-        with patch("xtquant.xtdata.get_instrument_detail", side_effect=lambda c: called.append(c)):
+        with _fake_xtquant_patch(lambda c: called.append(c)):
             result = udi.get_listing_date("000001.SZ")
         assert result == "2003-07-10"
         assert not called, "缓存命中不应调用 XTQuant"
@@ -454,7 +463,7 @@ class TestGetListingDate:
             return fake_detail
 
         with patch.dict("os.environ", {"EASYXT_ENABLE_XT_LISTING_DATE": "1"}):
-            with patch("xtquant.xtdata.get_instrument_detail", side_effect=_mock_detail):
+            with _fake_xtquant_patch(_mock_detail):
                 r1 = udi.get_listing_date("600036.SH")
                 r2 = udi.get_listing_date("600036.SH")
         assert r1 == r2 == "2001-08-08"

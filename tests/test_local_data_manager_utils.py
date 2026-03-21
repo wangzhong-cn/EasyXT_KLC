@@ -70,53 +70,59 @@ class TestAlignDataframeToColumns:
 # ===========================================================================
 class TestBuildStockDailyDeleteSql:
     def test_basic_sql_structure(self):
-        sql = _build_stock_daily_delete_sql(["000001.SZ"], ["stock_code"])
+        sql, params = _build_stock_daily_delete_sql(["000001.SZ"], ["stock_code"])
         assert "DELETE FROM stock_daily WHERE" in sql
-        assert "000001.SZ" in sql
+        assert "000001.SZ" in params
 
     def test_single_stock(self):
-        sql = _build_stock_daily_delete_sql(["600519.SH"], ["stock_code"])
-        assert "stock_code IN ('600519.SH')" in sql
+        sql, params = _build_stock_daily_delete_sql(["600519.SH"], ["stock_code"])
+        assert "stock_code IN (?)" in sql
+        assert "600519.SH" in params
 
     def test_multiple_stocks(self):
-        sql = _build_stock_daily_delete_sql(
+        sql, params = _build_stock_daily_delete_sql(
             ["000001.SZ", "600519.SH"], ["stock_code"]
         )
-        assert "000001.SZ" in sql
-        assert "600519.SH" in sql
+        assert "000001.SZ" in params
+        assert "600519.SH" in params
 
     def test_period_clause_added_when_column_present(self):
-        sql = _build_stock_daily_delete_sql(
+        sql, params = _build_stock_daily_delete_sql(
             ["000001.SZ"], ["stock_code", "period"], period="1d"
         )
-        assert "period = '1d'" in sql
+        assert "period = ?" in sql
+        assert "1d" in params
 
     def test_period_clause_omitted_when_column_absent(self):
-        sql = _build_stock_daily_delete_sql(
+        sql, params = _build_stock_daily_delete_sql(
             ["000001.SZ"], ["stock_code"], period="1d"
         )
         assert "period" not in sql
 
     def test_adjust_type_added_when_column_present(self):
-        sql = _build_stock_daily_delete_sql(
+        sql, params = _build_stock_daily_delete_sql(
             ["000001.SZ"], ["stock_code", "adjust_type"], adjust_type="front"
         )
-        assert "adjust_type = 'front'" in sql
+        assert "adjust_type = ?" in sql
+        assert "front" in params
 
     def test_adjust_type_default_none(self):
-        sql = _build_stock_daily_delete_sql(
+        sql, params = _build_stock_daily_delete_sql(
             ["000001.SZ"], ["stock_code", "adjust_type"]
         )
-        assert "adjust_type = 'none'" in sql
+        assert "adjust_type = ?" in sql
+        assert "none" in params
 
     def test_both_period_and_adjust_type(self):
-        sql = _build_stock_daily_delete_sql(
+        sql, params = _build_stock_daily_delete_sql(
             ["000001.SZ"], ["stock_code", "period", "adjust_type"],
             period="5m", adjust_type="back"
         )
-        assert "period = '5m'" in sql
-        assert "adjust_type = 'back'" in sql
+        assert "period = ?" in sql
+        assert "adjust_type = ?" in sql
         assert sql.count("AND") == 2
+        assert "5m" in params
+        assert "back" in params
 
 
 # ===========================================================================
@@ -256,34 +262,35 @@ class TestGetTableColumns:
     def mem_con(self):
         import duckdb
         con = duckdb.connect(":memory:")
+        # 使用白名单内的表名（_ALLOWED_WRITE_TABLES 包含 stock_daily）
         con.execute(
-            "CREATE TABLE test_tbl (stock_code VARCHAR, date TIMESTAMP, close DOUBLE)"
+            "CREATE TABLE stock_daily (stock_code VARCHAR, date TIMESTAMP, close DOUBLE)"
         )
         yield con
         con.close()
 
     def test_returns_column_list(self, mem_con):
-        cols = _ldm._get_table_columns(mem_con, "test_tbl")
+        cols = _ldm._get_table_columns(mem_con, "stock_daily")
         assert isinstance(cols, list)
         assert len(cols) > 0
 
     def test_contains_expected_columns(self, mem_con):
-        cols = _ldm._get_table_columns(mem_con, "test_tbl")
+        cols = _ldm._get_table_columns(mem_con, "stock_daily")
         assert "stock_code" in cols
         assert "date" in cols
         assert "close" in cols
 
     def test_nonexistent_table_returns_empty(self, mem_con):
+        # 不在白名单内的表名直接返回空列表
         cols = _ldm._get_table_columns(mem_con, "no_such_table")
-        assert isinstance(cols, list)
-        # 可能是空列表（两个 try 都失败 → return []）
-        assert cols == [] or isinstance(cols, list)
+        assert cols == []
 
     def test_column_order_preserved(self, mem_con):
         import duckdb
         con = duckdb.connect(":memory:")
-        con.execute("CREATE TABLE ordered (a INT, b VARCHAR, c DOUBLE)")
-        cols = _ldm._get_table_columns(con, "ordered")
+        # stock_1m 在白名单内
+        con.execute("CREATE TABLE stock_1m (a INT, b VARCHAR, c DOUBLE)")
+        cols = _ldm._get_table_columns(con, "stock_1m")
         con.close()
         assert cols == ["a", "b", "c"]
 

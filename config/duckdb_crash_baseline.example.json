@@ -1,0 +1,6 @@
+{
+  "ignore_signatures": [],
+  "ignore_patterns": [
+    "known_flaky_signature_example"
+  ]
+}

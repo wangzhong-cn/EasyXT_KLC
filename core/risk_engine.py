@@ -12,7 +12,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 import uuid
+from collections import deque
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -153,6 +156,10 @@ class RiskThresholds:
     var95_limit: float = 0.02
     # 净敞口上限（多 - 空 / 净值）
     net_exposure_limit: float = 0.95
+    # 每分钟最大下单次数（fat-finger 防护）
+    max_orders_per_minute: int = 30
+    # 单笔最大委托金额（0 表示不限制）
+    max_single_order_value: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +192,9 @@ class RiskEngine:
         self._event_db: Optional[_RiskEventDB] = (
             _RiskEventDB(db_path) if db_path else None
         )
+        # 下单频率追踪：account_id -> deque[timestamp]
+        self._order_timestamps: Dict[str, deque] = {}
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Pre-trade gate
@@ -266,9 +276,37 @@ class RiskEngine:
         if nav <= 0:
             return RiskCheckResult(RiskAction.HALT, reason="净值非正，拒绝交易")
 
+        trade_value = volume * price
+        metrics: Dict[str, float] = {}
+
+        # 0a. Fat-finger 单笔委托金额检查
+        if thresholds.max_single_order_value > 0 and trade_value > thresholds.max_single_order_value:
+            metrics["order_value"] = trade_value
+            return RiskCheckResult(
+                RiskAction.HALT,
+                reason=f"单笔委托金额 {trade_value:.0f} 超限 {thresholds.max_single_order_value:.0f}",
+                metrics=metrics,
+            )
+
+        # 0b. 下单频率检查
+        if thresholds.max_orders_per_minute > 0:
+            now = datetime.now(tz=timezone.utc).timestamp()
+            with self._lock:
+                ts_deque = self._order_timestamps.setdefault(account_id, deque())
+                cutoff = now - 60.0
+                while ts_deque and ts_deque[0] < cutoff:
+                    ts_deque.popleft()
+                if len(ts_deque) >= thresholds.max_orders_per_minute:
+                    metrics["orders_per_minute"] = float(len(ts_deque))
+                    return RiskCheckResult(
+                        RiskAction.LIMIT,
+                        reason=f"每分钟下单 {len(ts_deque)} 次超限 {thresholds.max_orders_per_minute}",
+                        metrics=metrics,
+                    )
+                ts_deque.append(now)
+
         # 模拟成交后的新持仓（仅用于集中度/HHI 前瞻检查）
         projected = dict(positions)
-        trade_value = volume * price
         if direction == "buy":
             projected[code] = projected.get(code, 0.0) + trade_value
         else:
@@ -384,7 +422,7 @@ class RiskEngine:
 
         # VaR95 内联 calc_var95 逻辑（避免在静态方法里调用实例方法）
         sorted_r = sorted(returns)
-        idx = max(0, int(math.floor(len(sorted_r) * 0.05)) - 1)
+        idx = max(0, int(math.ceil(len(sorted_r) * 0.05)) - 1)
         var95_raw = abs(min(sorted_r[idx], 0.0))
 
         var95_limit = round(min(var95_raw * var95_safety_margin, 0.05), 4)
@@ -459,25 +497,30 @@ class RiskEngine:
         日内回撤 = (日内高点 - 当前净值) / 日内高点。
         调用此方法会自动更新日内高点。
         """
-        high = self._daily_high.get(account_id, current_nav)
-        if current_nav > high:
-            self._daily_high[account_id] = current_nav
-            return 0.0
-        self._daily_high[account_id] = high
+        with self._lock:
+            high = self._daily_high.get(account_id, current_nav)
+            if current_nav > high:
+                self._daily_high[account_id] = current_nav
+                return 0.0
+            self._daily_high[account_id] = high
         if high <= 0:
             return 0.0
         return (high - current_nav) / high
 
     def update_daily_high(self, account_id: str, nav: float) -> None:
         """手动更新日内高点（开盘时调用，以当日开盘净值初始化）。"""
-        self._daily_high[account_id] = max(self._daily_high.get(account_id, nav), nav)
+        with self._lock:
+            self._daily_high[account_id] = max(self._daily_high.get(account_id, nav), nav)
 
     def reset_daily_state(self, account_id: Optional[str] = None) -> None:
-        """每日开盘前重置日内高点（account_id=None 则清空全部）。"""
-        if account_id is None:
-            self._daily_high.clear()
-        else:
-            self._daily_high.pop(account_id, None)
+        """每日开盘前重置日内高点和下单频率计数器（account_id=None 则清空全部）。"""
+        with self._lock:
+            if account_id is None:
+                self._daily_high.clear()
+                self._order_timestamps.clear()
+            else:
+                self._daily_high.pop(account_id, None)
+                self._order_timestamps.pop(account_id, None)
 
     @staticmethod
     def calc_var95(returns: List[float]) -> float:
@@ -488,6 +531,6 @@ class RiskEngine:
         if not returns:
             return 0.0
         sorted_r = sorted(returns)
-        idx = max(0, int(math.floor(len(sorted_r) * 0.05)) - 1)
+        idx = max(0, int(math.ceil(len(sorted_r) * 0.05)) - 1)
         worst = sorted_r[idx]
         return abs(min(worst, 0.0))

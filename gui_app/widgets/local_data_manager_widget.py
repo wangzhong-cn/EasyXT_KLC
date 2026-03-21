@@ -96,16 +96,31 @@ class _PandasTableModel(QAbstractTableModel):
             return str(section + 1)
         return QVariant()
 
+_ALLOWED_WRITE_TABLES: frozenset[str] = frozenset({
+    "stock_daily", "stock_1m", "stock_5m", "stock_15m", "stock_30m", "stock_60m",
+    "stock_tick", "stock_transaction", "data_ingestion_status",
+    "custom_period_bars", "risk_events", "strategy_snapshots",
+})
+_VALID_KLINE_PERIODS: frozenset[str] = frozenset({"1d", "1m", "5m", "15m", "30m", "60m"})
+
+
 def _get_table_columns(con, table_name: str) -> list[str]:
+    if table_name not in _ALLOWED_WRITE_TABLES:
+        return []
     try:
-        rows = con.execute(f"SELECT column_name FROM pragma_table_info('{table_name}')").fetchall()
+        rows = con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='main' AND table_name=? ORDER BY ordinal_position",
+            [table_name],
+        ).fetchall()
         if rows:
             return [row[0] for row in rows]
     except Exception:
         pass
-
     try:
-        rows = con.execute(f"SELECT name FROM pragma_table_info('{table_name}')").fetchall()
+        rows = con.execute(
+            f"SELECT column_name FROM pragma_table_info('{table_name}')"  # noqa: S608 table_name validated above
+        ).fetchall()
         return [row[0] for row in rows]
     except Exception:
         return []
@@ -119,14 +134,17 @@ def _align_dataframe_to_columns(df: pd.DataFrame, columns: list[str]) -> pd.Data
     return aligned
 
 
-def _build_stock_daily_delete_sql(stock_codes: list[str], columns: list[str], period: str = '1d', adjust_type: str = 'none') -> str:
-    symbols_sql = ", ".join([f"'{s}'" for s in stock_codes])
-    where_clauses = [f"stock_code IN ({symbols_sql})"]
+def _build_stock_daily_delete_sql(stock_codes: list[str], columns: list[str], period: str = '1d', adjust_type: str = 'none') -> tuple[str, list]:
+    placeholders = ', '.join(['?' for _ in stock_codes])
+    where_clauses = [f"stock_code IN ({placeholders})"]
+    params: list = list(stock_codes)
     if 'period' in columns:
-        where_clauses.append(f"period = '{period}'")
+        where_clauses.append("period = ?")
+        params.append(period)
     if 'adjust_type' in columns:
-        where_clauses.append(f"adjust_type = '{adjust_type}'")
-    return "DELETE FROM stock_daily WHERE " + " AND ".join(where_clauses)
+        where_clauses.append("adjust_type = ?")
+        params.append(adjust_type)
+    return "DELETE FROM stock_daily WHERE " + " AND ".join(where_clauses), params  # noqa: S608
 
 
 def _upsert_ingestion_status(
@@ -390,17 +408,17 @@ class DataDownloadThread(QThread):
                                             duckdb_columns = _get_table_columns(con, 'stock_daily')
                                         if not duckdb_columns:
                                             raise ValueError("stock_daily 表不存在或字段为空")
-                                        delete_sql = _build_stock_daily_delete_sql(
+                                        delete_sql, delete_params = _build_stock_daily_delete_sql(
                                             df_all['stock_code'].unique().tolist(),
                                             duckdb_columns,
                                             period='1d',
                                             adjust_type='none'
                                         )
-                                        con.execute(delete_sql)
+                                        con.execute(delete_sql, delete_params)
                                         df_aligned = _align_dataframe_to_columns(df_all, duckdb_columns)
                                         con.register('temp_bulk', df_aligned)
                                         cols_sql = ", ".join(duckdb_columns)
-                                        con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")
+                                        con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")  # noqa: S608
                                         con.unregister('temp_bulk')
                                         for stock_code in df_all['stock_code'].unique().tolist():
                                             df_symbol = df_all[df_all['stock_code'] == stock_code]
@@ -440,17 +458,17 @@ class DataDownloadThread(QThread):
                             duckdb_columns = _get_table_columns(con, 'stock_daily')
                         if not duckdb_columns:
                             raise ValueError("stock_daily 表不存在或字段为空")
-                        delete_sql = _build_stock_daily_delete_sql(
+                        delete_sql, delete_params = _build_stock_daily_delete_sql(
                             df_all['stock_code'].unique().tolist(),
                             duckdb_columns,
                             period='1d',
                             adjust_type='none'
                         )
-                        con.execute(delete_sql)
+                        con.execute(delete_sql, delete_params)
                         df_aligned = _align_dataframe_to_columns(df_all, duckdb_columns)
                         con.register('temp_bulk', df_aligned)
                         cols_sql = ", ".join(duckdb_columns)
-                        con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")
+                        con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")  # noqa: S608
                         con.unregister('temp_bulk')
                         for stock_code in df_all['stock_code'].unique().tolist():
                             df_symbol = df_all[df_all['stock_code'] == stock_code]
@@ -600,17 +618,17 @@ class DataDownloadThread(QThread):
                                             duckdb_columns = _get_table_columns(con, 'stock_daily')
                                         if not duckdb_columns:
                                             raise ValueError("stock_daily 表不存在或字段为空")
-                                        delete_sql = _build_stock_daily_delete_sql(
+                                        delete_sql, delete_params = _build_stock_daily_delete_sql(
                                             df_all['stock_code'].unique().tolist(),
                                             duckdb_columns,
                                             period='1d',
                                             adjust_type='none'
                                         )
-                                        con.execute(delete_sql)
+                                        con.execute(delete_sql, delete_params)
                                         df_aligned = _align_dataframe_to_columns(df_all, duckdb_columns)
                                         con.register('temp_bulk', df_aligned)
                                         cols_sql = ", ".join(duckdb_columns)
-                                        con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")
+                                        con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")  # noqa: S608
                                         con.unregister('temp_bulk')
                                         for stock_code in df_all['stock_code'].unique().tolist():
                                             df_symbol = df_all[df_all['stock_code'] == stock_code]
@@ -650,17 +668,17 @@ class DataDownloadThread(QThread):
                             duckdb_columns = _get_table_columns(con, 'stock_daily')
                         if not duckdb_columns:
                             raise ValueError("stock_daily 表不存在或字段为空")
-                        delete_sql = _build_stock_daily_delete_sql(
+                        delete_sql, delete_params = _build_stock_daily_delete_sql(
                             df_all['stock_code'].unique().tolist(),
                             duckdb_columns,
                             period='1d',
                             adjust_type='none'
                         )
-                        con.execute(delete_sql)
+                        con.execute(delete_sql, delete_params)
                         df_aligned = _align_dataframe_to_columns(df_all, duckdb_columns)
                         con.register('temp_bulk', df_aligned)
                         cols_sql = ", ".join(duckdb_columns)
-                        con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")
+                        con.execute(f"INSERT INTO stock_daily ({cols_sql}) SELECT {cols_sql} FROM temp_bulk")  # noqa: S608
                         con.unregister('temp_bulk')
                 except Exception as e:
                     self.log_signal.emit(f"⚠️ DuckDB写入失败: {str(e)[:60]}")
@@ -1414,8 +1432,11 @@ class SingleStockDownloadThread(QThread):
                     """)
                 with manager.get_write_connection() as con:
                     con.register('temp_data', df_processed)
-                    con.execute(f"DELETE FROM {table_name} WHERE stock_code = '{self.stock_code}' AND datetime >= '{start_dt}' AND datetime <= '{end_dt}'")
-                    con.execute(f"INSERT INTO {table_name} SELECT * FROM temp_data")
+                    con.execute(
+                        "DELETE FROM stock_transaction WHERE stock_code = ? AND datetime >= ? AND datetime <= ?",
+                        [self.stock_code, str(start_dt), str(end_dt)],
+                    )
+                    con.execute(f"INSERT INTO {table_name} SELECT * FROM temp_data")  # noqa: S608
                     con.unregister('temp_data')
                 try:
                     series = df_processed.set_index('datetime')['price'].astype(float)
@@ -1453,9 +1474,12 @@ class SingleStockDownloadThread(QThread):
                         columns = _get_table_columns(con, 'stock_1m')
                         df_aligned = _align_dataframe_to_columns(bars, columns)
                         con.register('temp_1m', df_aligned)
-                        con.execute(f"DELETE FROM stock_1m WHERE stock_code = '{self.stock_code}' AND datetime >= '{start_dt}' AND datetime <= '{end_dt_dt}'")
+                        con.execute(
+                            "DELETE FROM stock_1m WHERE stock_code = ? AND datetime >= ? AND datetime <= ?",
+                            [self.stock_code, str(start_dt), str(end_dt_dt)],
+                        )
                         cols_sql = ", ".join(columns)
-                        con.execute(f"INSERT INTO stock_1m ({cols_sql}) SELECT {cols_sql} FROM temp_1m")
+                        con.execute(f"INSERT INTO stock_1m ({cols_sql}) SELECT {cols_sql} FROM temp_1m")  # noqa: S608
                         con.unregister('temp_1m')
                     self.log_signal.emit("✅ 分笔聚合1m写入完成")
                 except Exception as e:
@@ -1511,9 +1535,12 @@ class SingleStockDownloadThread(QThread):
                 with manager.get_write_connection() as con:
                     con.register('temp_data', df_processed)
                     # 删除该股票在日期范围内的旧数据
-                    con.execute(f"DELETE FROM {table_name} WHERE stock_code = '{self.stock_code}' AND datetime >= '{start_dt}' AND datetime <= '{end_dt}'")
+                    con.execute(
+                        "DELETE FROM stock_tick WHERE stock_code = ? AND datetime >= ? AND datetime <= ?",
+                        [self.stock_code, str(start_dt), str(end_dt)],
+                    )
                     # 插入新数据
-                    con.execute(f"INSERT INTO {table_name} SELECT * FROM temp_data")
+                    con.execute(f"INSERT INTO {table_name} SELECT * FROM temp_data")  # noqa: S608
                     con.unregister('temp_data')
 
                 self.log_signal.emit(f"✅ 已保存 {len(df_processed)} 条tick记录到DuckDB")
@@ -1554,9 +1581,12 @@ class SingleStockDownloadThread(QThread):
                         columns = _get_table_columns(con, 'stock_1m')
                         df_aligned = _align_dataframe_to_columns(bars, columns)
                         con.register('temp_1m', df_aligned)
-                        con.execute(f"DELETE FROM stock_1m WHERE stock_code = '{self.stock_code}' AND datetime >= '{start_dt}' AND datetime <= '{end_dt_dt}'")
+                        con.execute(
+                            "DELETE FROM stock_1m WHERE stock_code = ? AND datetime >= ? AND datetime <= ?",
+                            [self.stock_code, str(start_dt), str(end_dt_dt)],
+                        )
                         cols_sql = ", ".join(columns)
-                        con.execute(f"INSERT INTO stock_1m ({cols_sql}) SELECT {cols_sql} FROM temp_1m")
+                        con.execute(f"INSERT INTO stock_1m ({cols_sql}) SELECT {cols_sql} FROM temp_1m")  # noqa: S608
                         con.unregister('temp_1m')
                     self.log_signal.emit("✅ Tick聚合1m写入完成")
                 except Exception as e:
@@ -1612,6 +1642,8 @@ class SingleStockDownloadThread(QThread):
                 if self.period == '1d':
                     table_name = 'stock_daily'
                 else:
+                    if self.period not in _VALID_KLINE_PERIODS:
+                        raise ValueError(f"不支持的K线周期: {self.period!r}")
                     table_name = f'stock_{self.period}'
 
                 with manager.get_write_connection() as con:
@@ -1641,8 +1673,8 @@ class SingleStockDownloadThread(QThread):
                     df_aligned = _align_dataframe_to_columns(df_processed, columns)
                     con.register('temp_data', df_aligned)
                     cols_sql = ", ".join(columns)
-                    con.execute(f"DELETE FROM {table_name} WHERE stock_code = '{self.stock_code}'")
-                    con.execute(f"INSERT INTO {table_name} ({cols_sql}) SELECT {cols_sql} FROM temp_data")
+                    con.execute(f"DELETE FROM {table_name} WHERE stock_code = ?", [self.stock_code])  # noqa: S608
+                    con.execute(f"INSERT INTO {table_name} ({cols_sql}) SELECT {cols_sql} FROM temp_data")  # noqa: S608
                     con.unregister('temp_data')
 
                 self.log_signal.emit(f"✅ 已保存 {len(df_processed)} 条记录到DuckDB")
@@ -1695,14 +1727,11 @@ class VerifyDataThread(QThread):
                 start_1min = ''
                 end_1min = ''
                 try:
-                    result = con.execute(f"""
-                        SELECT
-                            COUNT(*) as cnt,
-                            MIN(date) as start_date,
-                            MAX(date) as end_date
-                        FROM stock_1m
-                        WHERE stock_code = '{self.stock_code}'
-                    """).fetchone()
+                    result = con.execute(
+                        "SELECT COUNT(*) as cnt, MIN(date) as start_date, MAX(date) as end_date"
+                        " FROM stock_1m WHERE stock_code = ?",
+                        [self.stock_code],
+                    ).fetchone()
                     if result and result[0] > 0:
                         has_1min = True
                         records_1min = result[0]
@@ -1718,14 +1747,11 @@ class VerifyDataThread(QThread):
                 start_daily = ''
                 end_daily = ''
                 try:
-                    result = con.execute(f"""
-                        SELECT
-                            COUNT(*) as cnt,
-                            MIN(date) as start_date,
-                            MAX(date) as end_date
-                        FROM stock_daily
-                        WHERE stock_code = '{self.stock_code}'
-                    """).fetchone()
+                    result = con.execute(
+                        "SELECT COUNT(*) as cnt, MIN(date) as start_date, MAX(date) as end_date"
+                        " FROM stock_daily WHERE stock_code = ?",
+                        [self.stock_code],
+                    ).fetchone()
                     if result and result[0] > 0:
                         has_daily = True
                         records_daily = result[0]
@@ -1741,14 +1767,11 @@ class VerifyDataThread(QThread):
                 start_tick = ''
                 end_tick = ''
                 try:
-                    result = con.execute(f"""
-                        SELECT
-                            COUNT(*) as cnt,
-                            MIN(datetime) as start_time,
-                            MAX(datetime) as end_time
-                        FROM stock_tick
-                        WHERE stock_code = '{self.stock_code}'
-                    """).fetchone()
+                    result = con.execute(
+                        "SELECT COUNT(*) as cnt, MIN(datetime) as start_time, MAX(datetime) as end_time"
+                        " FROM stock_tick WHERE stock_code = ?",
+                        [self.stock_code],
+                    ).fetchone()
                     if result and result[0] > 0:
                         has_tick = True
                         records_tick = result[0]
@@ -2107,7 +2130,7 @@ class LocalStatsLoadThread(QThread):
                             f"""
                             SELECT COUNT(*) as records
                             FROM {table}
-                            """
+                            """  # noqa: S608
                         ).fetchone()
                         if result:
                             minute_records += int(result[0] or 0)
@@ -3739,28 +3762,19 @@ class DataViewerDialog(QDialog):
                     self.stats_label.setText("❌ stock_daily 表不存在或无列")
                     return
 
-                conditions = [f"stock_code = '{self.stock_code}'"]
+                conditions = ["stock_code = ?"]
+                params: list = [self.stock_code]
                 if 'period' in columns:
-                    conditions.append("period = '1d'")
+                    conditions.append("period = ?")
+                    params.append('1d')
                 if 'adjust_type' in columns:
-                    conditions.append(f"adjust_type = '{duckdb_adjust}'")
+                    conditions.append("adjust_type = ?")
+                    params.append(duckdb_adjust)
                 where_clause = " AND ".join(conditions)
 
-                query = f"""
-                    SELECT
-                        date,
-                        open,
-                        high,
-                        low,
-                        close,
-                        volume,
-                        amount
-                    FROM stock_daily
-                    WHERE {where_clause}
-                    ORDER BY date
-                """
+                query = f"SELECT date, open, high, low, close, volume, amount FROM stock_daily WHERE {where_clause} ORDER BY date"  # noqa: S608
 
-                df = con.execute(query).df()
+                df = con.execute(query, params).df()
 
             if df.empty:
                 self.stats_label.setText(f"❌ 未找到 {self.stock_code} 的数据")
@@ -3822,27 +3836,18 @@ class DataViewerDialog(QDialog):
                     self.stats_label.setText("❌ stock_daily 表不存在或无列")
                     return
 
-                conditions = [f"stock_code = '{self.stock_code}'"]
+                conditions = ["stock_code = ?"]
+                params: list = [self.stock_code]
                 if 'period' in columns:
-                    conditions.append("period = '1d'")
+                    conditions.append("period = ?")
+                    params.append('1d')
                 if 'adjust_type' in columns:
-                    conditions.append(f"adjust_type = '{duckdb_adjust}'")
+                    conditions.append("adjust_type = ?")
+                    params.append(duckdb_adjust)
                 where_clause = " AND ".join(conditions)
 
-                query = f"""
-                    SELECT
-                        date,
-                        open,
-                        high,
-                        low,
-                        close,
-                        volume,
-                        amount
-                    FROM stock_daily
-                    WHERE {where_clause}
-                    ORDER BY date
-                """
-                df = con.execute(query).df()
+                query = f"SELECT date, open, high, low, close, volume, amount FROM stock_daily WHERE {where_clause} ORDER BY date"  # noqa: S608
+                df = con.execute(query, params).df()
 
             # 设置日期为索引
             df.set_index('date', inplace=True)

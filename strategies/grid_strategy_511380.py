@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 """
-511380.SH 网格策略回测
-专门针对债券ETF的网格策略实现和参数优化
+511380.SH 网格策略回测 (Backtrader-ONLY)
+
+本模块包含基于 Backtrader/Cerebro 的回测专用网格策略，
+**不兼容** EasyXT 实时执行引擎。
+
+如需 EasyXT 原生网格策略，请使用:
+    from strategies.grid_trading.fixed_grid_strategy import FixedGridStrategy
+
+严禁通过 strategy_registry.register() 注册本模块内的任何类。
 """
+
+__all__: list[str] = []  # 阻止意外导入到 EasyXT 策略注册表
 
 import sys
 import importlib

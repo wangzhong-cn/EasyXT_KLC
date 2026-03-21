@@ -924,6 +924,104 @@ class TestMainWindowNewEventHandlers:
         win._on_data_repaired(stock_code="600519.SH")
         win._on_env_config_saved(key="EASYXT_PORT")
 
+    def test_render_release_gate_status_uses_shared_rag_policy(self, qapp):
+        from gui_app.main_window import MainWindow
+
+        class _Label:
+            def __init__(self):
+                self.text_value = ""
+                self.style_value = ""
+                self.tip_value = ""
+
+            def setText(self, v):
+                self.text_value = v
+
+            def setStyleSheet(self, v):
+                self.style_value = v
+
+            def setToolTip(self, v):
+                self.tip_value = v
+
+        win = MainWindow.__new__(MainWindow)
+        win.release_gate_status = _Label()
+        win._release_gate_status = {
+            "strict_gate_pass": True,
+            "P0_open_count": 0,
+            "active_critical_high": 0,
+            "duckdb_write_probe_detail": {},
+            "intraday_bar_semantic_detail": {},
+            "governance_nightly_detail": {},
+            "period_validation_detail": {"status": "pass", "failed_items": 0},
+            "watermark_quality_detail": {"q_score_pass": True, "today_q_score": 0.99, "q_score_mean_7d": 0.98, "q_score_vol_7d": 0.01, "trend": []},
+            "watermark_profile_audit_detail": {"recent": []},
+            "watermark_profile_approval_detail": {},
+        }
+
+        def _artifact(name):
+            if name == "stability_evidence_30d.json":
+                return {"period_validation": {"failed_rows": 2}}
+            if name == "peak_release_gate_latest.json":
+                return {"level": "warn", "period_validation_failed_items": 2, "max_period_validation_failed_items": 0}
+            return None
+
+        win._load_artifact_json = _artifact
+        win._render_release_gate_status()
+        assert "PV=PV[🟡 WARN（2>0）]" in win.release_gate_status.text_value
+        assert "R=RAG[🟡 YELLOW]" in win.release_gate_status.text_value
+        assert "#ef6c00" in win.release_gate_status.style_value
+        assert "period_validation_detail_tag=PV_DETAIL[v=1|pv=PV[🟡 WARN（2>0）]|failed=2|max=0|msg=N%2FA|action=N%2FA]" in win.release_gate_status.tip_value
+        assert "gate_detail_tag=GATE_DETAIL[v=1|rag=RAG[🟡 YELLOW]|pv_detail=PV_DETAIL[v=1|pv=PV[🟡 WARN（2>0）]|failed=2|max=0|msg=N%2FA|action=N%2FA]]" in win.release_gate_status.tip_value
+        assert "gate_detail_parse_ok=True" in win.release_gate_status.tip_value
+        assert "gate_detail_parse_error=" in win.release_gate_status.tip_value
+        assert "contract_health=HEALTHY" in win.release_gate_status.tip_value
+        assert "debug_period_validation_failed_norm=2" in win.release_gate_status.tip_value
+        assert "rag_tag=RAG[🟡 YELLOW]" in win.release_gate_status.tip_value
+
+    def test_render_release_gate_status_fallback_period_validation_from_p0_metrics(self, qapp):
+        from gui_app.main_window import MainWindow
+
+        class _Label:
+            def __init__(self):
+                self.text_value = ""
+                self.style_value = ""
+                self.tip_value = ""
+
+            def setText(self, v):
+                self.text_value = v
+
+            def setStyleSheet(self, v):
+                self.style_value = v
+
+            def setToolTip(self, v):
+                self.tip_value = v
+
+        win = MainWindow.__new__(MainWindow)
+        win.release_gate_status = _Label()
+        win._release_gate_status = {
+            "strict_gate_pass": False,
+            "P0_open_count": 1,
+            "active_critical_high": 0,
+            "duckdb_write_probe_detail": {},
+            "intraday_bar_semantic_detail": {"status": "pass", "anomaly_count": 0},
+            "governance_nightly_detail": {"status": "pass", "failed_items": 0},
+            "period_validation_detail": {"status": "pass", "failed_items": 3},
+            "watermark_quality_detail": {"q_score_pass": True, "today_q_score": 0.99, "q_score_mean_7d": 0.98, "q_score_vol_7d": 0.01, "trend": []},
+            "watermark_profile_audit_detail": {"recent": []},
+            "watermark_profile_approval_detail": {},
+        }
+        win._load_artifact_json = lambda _name: None
+        win._render_release_gate_status()
+        assert "period_validation:3/0" in win.release_gate_status.text_value
+        assert "PV=PV[❌ FAIL（3>0）]" in win.release_gate_status.text_value
+        assert "#d32f2f" in win.release_gate_status.style_value
+        assert "period_validation_detail_tag=PV_DETAIL[v=1|pv=PV[❌ FAIL（3>0）]|failed=3|max=0|msg=N%2FA|action=N%2FA]" in win.release_gate_status.tip_value
+        assert "gate_detail_tag=GATE_DETAIL[v=1|rag=RAG[🔴 RED]|pv_detail=PV_DETAIL[v=1|pv=PV[❌ FAIL（3>0）]|failed=3|max=0|msg=N%2FA|action=N%2FA]]" in win.release_gate_status.tip_value
+        assert "gate_detail_parse_ok=True" in win.release_gate_status.tip_value
+        assert "gate_detail_parse_error=" in win.release_gate_status.tip_value
+        assert "contract_health=HEALTHY" in win.release_gate_status.tip_value
+        assert "debug_period_validation_failed_norm=3" in win.release_gate_status.tip_value
+        assert "rag_tag=RAG[🔴 RED]" in win.release_gate_status.tip_value
+
 
 # ─── DataManagerController Section 15: export_data_snapshot ─────────────
 

@@ -1,0 +1,26 @@
+{
+  "approvals": [
+    {
+      "approval_id": "AP-20260318-01",
+      "approver": "risk_committee",
+      "approved_at": "2026-03-18T09:30:00",
+      "expires_at": "2026-03-25T09:30:00",
+      "profile": "aggressive",
+      "reason": "盘中波动放大阶段临时启用 aggressive 模板",
+      "max_uses": 3,
+      "required_signatures": 2,
+      "signatures": [
+        {
+          "signer": "risk_committee_lead",
+          "signature": "hmac_sha256_hex(approval_id|approver|approved_at|expires_at|profile|reason|max_uses|risk_committee_lead)"
+        },
+        {
+          "signer": "ops_owner",
+          "signature": "hmac_sha256_hex(approval_id|approver|approved_at|expires_at|profile|reason|max_uses|ops_owner)"
+        }
+      ],
+      "signature": "hmac_sha256_hex(approval_id|approver|approved_at|expires_at|profile|reason|max_uses)",
+      "revoked": false
+    }
+  ]
+}

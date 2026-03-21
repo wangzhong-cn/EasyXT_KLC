@@ -1,0 +1,33 @@
+{
+  "default_profile": "CN_A",
+  "rules": [
+    {
+      "pattern": "*.DCE",
+      "profile": "FUTURES_COMMODITY"
+    },
+    {
+      "pattern": "*.SHF",
+      "profile": "FUTURES_COMMODITY"
+    },
+    {
+      "pattern": "*.CZC",
+      "profile": "FUTURES_COMMODITY"
+    },
+    {
+      "pattern": "*.CFFEX",
+      "profile": "FUTURES_COMMODITY"
+    },
+    {
+      "pattern": "*.INE",
+      "profile": "FUTURES_COMMODITY"
+    },
+    {
+      "pattern": "*.SH",
+      "profile": "CN_A"
+    },
+    {
+      "pattern": "*.SZ",
+      "profile": "CN_A"
+    }
+  ]
+}

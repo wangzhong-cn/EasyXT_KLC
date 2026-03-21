@@ -9,13 +9,17 @@ import importlib
 import json
 import logging
 import os
+import signal
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
 from datetime import datetime
 from typing import Any, Optional, cast
 from urllib import request
+from urllib.parse import quote
 
 # 强制设置Matplotlib后端为Agg，防止在GUI线程中初始化交互式后端导致死锁
 try:
@@ -47,6 +51,85 @@ project_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_path not in sys.path:
     sys.path.insert(0, project_path)
 
+try:
+    from tools.release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary, period_validation_tag, period_validation_detail_tag, rag_badge, rag_color, rag_tag
+except Exception:
+    def period_validation_summary(stability_evidence, peak_release_gate):
+        gate = peak_release_gate if isinstance(peak_release_gate, dict) else {}
+        evidence = stability_evidence if isinstance(stability_evidence, dict) else {}
+        period = evidence.get("period_validation") if isinstance(evidence.get("period_validation"), dict) else {}
+        failed = int(gate.get("period_validation_failed_items", period.get("failed_rows", 0)) or 0)
+        max_allowed = int(gate.get("max_period_validation_failed_items", 0) or 0)
+        return failed, max_allowed
+
+    def period_validation_tag(failed, max_allowed):
+        if failed <= max_allowed:
+            status = "✅ PASS"
+        elif failed <= max_allowed + 2:
+            status = f"🟡 WARN（{failed}>{max_allowed}）"
+        else:
+            status = f"❌ FAIL（{failed}>{max_allowed}）"
+        return f"PV[{status}]"
+
+    def period_validation_detail_tag(failed, max_allowed, *, message="", action=""):
+        msg = str(message or "").replace("\n", " ").strip() or "N/A"
+        act = str(action or "").replace("\n", " ").strip() or "N/A"
+        msg_escaped = quote(msg, safe="")
+        act_escaped = quote(act, safe="")
+        return (
+            f"PV_DETAIL[v=1|pv={period_validation_tag(failed, max_allowed)}"
+            f"|failed={int(failed)}|max={int(max_allowed)}|msg={msg_escaped}|action={act_escaped}]"
+        )
+
+    def header_rag_status(strict_pass, p0_open, ach, peak_level, period_failed, period_max_allowed):
+        risk_count = 0
+        if not strict_pass:
+            risk_count += 1
+        if p0_open > 0:
+            risk_count += 1
+        if ach > 0:
+            risk_count += 1
+        if str(peak_level).lower() == "fail":
+            risk_count += 1
+        if period_failed > period_max_allowed:
+            risk_count += 1
+        if risk_count == 0:
+            return "🟢 GREEN"
+        if risk_count <= 2:
+            return "🟡 YELLOW"
+        return "🔴 RED"
+
+    def rag_color(rag_status):
+        text = str(rag_status or "").upper()
+        if "GREEN" in text:
+            return "#00aa66"
+        if "YELLOW" in text:
+            return "#ef6c00"
+        if "RED" in text:
+            return "#d32f2f"
+        return "#999999"
+
+    def rag_badge(rag_status):
+        text = str(rag_status or "").upper()
+        if "GREEN" in text:
+            return "🟢 GREEN"
+        if "YELLOW" in text:
+            return "🟡 YELLOW"
+        if "RED" in text:
+            return "🔴 RED"
+        return "⚪ UNKNOWN"
+
+    def rag_tag(rag_status):
+        return f"RAG[{rag_badge(rag_status)}]"
+
+    def gate_detail_tag(rag_status, failed, max_allowed, *, message="", action=""):
+        return f"GATE_DETAIL[v=1|rag={rag_tag(rag_status)}|pv_detail={period_validation_detail_tag(failed, max_allowed, message=message, action=action)}]"
+
+    def parse_gate_detail_tag(tag):
+        text = str(tag or "")
+        ok = text.startswith("GATE_DETAIL[v=1|rag=RAG[") and "|pv_detail=PV_DETAIL[v=1|" in text and text.endswith("]")
+        return {"ok": ok, "error": "" if ok else "invalid_gate_detail_format", "raw": text}
+
 from gui_app.widgets.chart.trading_hours_guard import TradingHoursGuard
 
 
@@ -73,6 +156,116 @@ def _ensure_writable_duckdb_env() -> None:
         fallback = os.path.join(project_path, "data", "stock_data.ddb")
         os.makedirs(os.path.dirname(fallback), exist_ok=True)
         os.environ["EASYXT_DUCKDB_PATH"] = fallback
+
+
+def _is_rw_path(path: str) -> bool:
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".rw_probe")
+        moved = os.path.join(path, ".rw_probe_moved")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        with open(probe, "r", encoding="utf-8") as f:
+            _ = f.read()
+        os.replace(probe, moved)
+        os.remove(moved)
+        return True
+    except Exception:
+        return False
+
+
+def _prepare_qtwebengine_safe_cache_env() -> dict[str, Any]:
+    enabled = os.environ.get("EASYXT_ENABLE_QTWEBENGINE_SAFE_CACHE", "1") in ("1", "true", "True")
+    if not enabled:
+        return {"enabled": False, "status": "disabled"}
+    candidates = []
+    custom_root = str(os.environ.get("EASYXT_QTWEBENGINE_CACHE_ROOT", "") or "").strip()
+    if custom_root:
+        candidates.append(custom_root)
+    candidates.append(os.path.join(project_path, "runtime", "qtwebengine_cache"))
+    candidates.append(os.path.join(tempfile.gettempdir(), "easyxt_qtwebengine_cache"))
+    selected_root = ""
+    for candidate in candidates:
+        if _is_rw_path(candidate):
+            selected_root = candidate
+            break
+    if not selected_root:
+        return {"enabled": True, "status": "no_writable_cache_root"}
+    user_data_dir = os.path.join(selected_root, "user_data")
+    disk_cache_dir = os.path.join(selected_root, "disk_cache")
+    os.makedirs(user_data_dir, exist_ok=True)
+    os.makedirs(disk_cache_dir, exist_ok=True)
+    flags = str(os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "") or "").strip()
+    required_flags = [
+        f'--user-data-dir="{user_data_dir}"',
+        f'--disk-cache-dir="{disk_cache_dir}"',
+        "--disable-gpu-shader-disk-cache",
+    ]
+    if os.environ.get("EASYXT_QTWEBENGINE_DISABLE_GPUCACHE", "1") in ("1", "true", "True"):
+        required_flags.append("--disable-gpu-program-cache")
+    merged = flags
+    for item in required_flags:
+        if item not in merged:
+            merged = f"{merged} {item}".strip()
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = merged
+    os.environ["EASYXT_EFFECTIVE_QTWEBENGINE_CACHE_ROOT"] = selected_root
+    return {
+        "enabled": True,
+        "status": "ok",
+        "cache_root": selected_root,
+        "user_data_dir": user_data_dir,
+        "disk_cache_dir": disk_cache_dir,
+    }
+
+
+def _probe_easyxt_in_subprocess(mode: str) -> bool:
+    timeout_s = float(os.environ.get("EASYXT_PROBE_SUBPROCESS_TIMEOUT_S", "6") or 6.0)
+    cmd = [
+        sys.executable,
+        "-m",
+        "gui_app.xt_probe_worker",
+        "--mode",
+        str(mode or "safe"),
+        "--symbols",
+        os.environ.get("EASYXT_PROBE_SYMBOLS", "000001.SZ,511090.SH"),
+    ]
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=project_path,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env,
+        )
+    except Exception:
+        return False
+    if proc.returncode != 0:
+        return False
+    payload = str(proc.stdout or "").strip()
+    if not payload:
+        return False
+    try:
+        obj = json.loads(payload.splitlines()[-1])
+    except Exception:
+        return False
+    return bool(isinstance(obj, dict) and obj.get("ok") is True)
+
+
+def _is_realtime_failure_reason(reason: str) -> bool:
+    text = str(reason or "").lower()
+    if not text:
+        return False
+    keys = (
+        "no_quote_data",
+        "ws_conn_error",
+        "connect_all",
+        "timeout",
+        "all sources",
+    )
+    return any(k in text for k in keys)
 
 Events = importlib.import_module("core.events").Events
 signal_bus = importlib.import_module("core.signal_bus").signal_bus
@@ -303,6 +496,18 @@ class ConnectionCheckThread(QThread):
 
     def run(self):
         try:
+            if os.environ.get("EASYXT_ENABLE_ACTIVE_PROBE", "0") not in ("1", "true", "True"):
+                probe_mode = "passive"
+            else:
+                probe_mode = os.environ.get("EASYXT_CONNECTION_PROBE_MODE", "passive").strip().lower()
+            if probe_mode not in ("active", "safe"):
+                probe_mode = "passive"
+            if probe_mode == "passive":
+                self.result.emit(True)
+                return
+            if os.environ.get("EASYXT_ENABLE_PROBE_SUBPROCESS_ISOLATION", "1") in ("1", "true", "True"):
+                self.result.emit(_probe_easyxt_in_subprocess(probe_mode))
+                return
             try:
                 import easy_xt
             except Exception:
@@ -314,15 +519,6 @@ class ConnectionCheckThread(QThread):
                 api = easy_xt.get_api()
             except Exception:
                 self.result.emit(False)
-                return
-            if os.environ.get("EASYXT_ENABLE_ACTIVE_PROBE", "0") not in ("1", "true", "True"):
-                probe_mode = "passive"
-            else:
-                probe_mode = os.environ.get("EASYXT_CONNECTION_PROBE_MODE", "passive").strip().lower()
-            if probe_mode not in ("active", "safe"):
-                probe_mode = "passive"
-            if probe_mode == "passive":
-                self.result.emit(True)
                 return
             # 轻量检测：避免每30秒反复 init_data() 导致锁竞争和实时链路抖动
             # 优先走 xtquant_broker 的 full_tick（单次调用、低成本）
@@ -385,7 +581,9 @@ class MainWindow(QMainWindow):
         os.environ.setdefault("EASYXT_ENABLE_XTDATA_QUOTE_PROBE", "1")
         os.environ.setdefault("EASYXT_RT_XTDATA_ONLY", "0")
         os.environ.setdefault("EASYXT_ENABLE_XT_LISTING_DATE", "0")
-        os.environ.setdefault("EASYXT_ENABLE_QMT_ONLINE", "1")
+        os.environ.setdefault("EASYXT_ENABLE_QMT_ONLINE", "0")
+        os.environ.setdefault("EASYXT_ENABLE_AUTO_CHECKPOINT", "0")
+        os.environ.setdefault("EASYXT_CHECKPOINT_ON_PROCESS_EXIT", "0")
         in_session, _session_name = TradingHoursGuard.current_session()
         if in_session:
             os.environ["EASYXT_RT_XTDATA_ONLY"] = "1"
@@ -445,10 +643,17 @@ class MainWindow(QMainWindow):
         }
         self._last_backtest_engine_log: Optional[str] = None
         self._last_realtime_probe_log: Optional[str] = None
+        self._realtime_fail_streak = 0
+        self._realtime_fuse_open_until = 0.0
+        self._realtime_fuse_fail_threshold = int(os.environ.get("EASYXT_RT_FUSE_FAIL_THRESHOLD", "8") or 8)
+        self._realtime_fuse_cooldown_s = float(os.environ.get("EASYXT_RT_FUSE_COOLDOWN_S", "45") or 45.0)
+        self._realtime_fuse_last_log_ts = 0.0
+        self._realtime_fuse_log_interval_s = float(os.environ.get("EASYXT_RT_FUSE_LOG_INTERVAL_S", "10") or 10.0)
         self._watchdog_gap_buffer = deque(maxlen=int(os.environ.get("EASYXT_WATCHDOG_BUFFER_SIZE", "240")))
         self._watchdog_stats_last_emit = time.monotonic()
         self._watchdog_stats_interval_s = float(os.environ.get("EASYXT_WATCHDOG_STATS_INTERVAL_S", "60"))
         self._watchdog_slo_p99_s = float(os.environ.get("EASYXT_WATCHDOG_P99_SLO_S", "1.2"))
+        self._watchdog_consecutive_violations = 0
         self._watchdog_log_path = os.path.join(project_path, "logs", "main_thread_latency.log")
         self._thread_watermark_threshold = int(os.environ.get("EASYXT_THREAD_WATERMARK", "180"))
         self._thread_watermark_log_path = os.path.join(project_path, "logs", "thread_watermark.log")
@@ -766,9 +971,13 @@ class MainWindow(QMainWindow):
 
     def _check_easyxt(self):
         try:
+            if os.environ.get("EASYXT_HEALTH_IMPORT_EASYXT", "0") not in ("1", "true", "True"):
+                if "easy_xt" in sys.modules:
+                    mod = cast(Any, sys.modules.get("easy_xt"))
+                    return {"status": "ok", "version": getattr(mod, "__version__", "unknown"), "mode": "cached"}
+                return {"status": "ok", "code": "lazy_import_disabled", "message": "跳过主动导入 easy_xt（防止触发 xtquant C 扩展）", "mode": "lazy_skip"}
             import easy_xt
-
-            return {"status": "ok", "version": getattr(easy_xt, "__version__", "unknown")}
+            return {"status": "ok", "version": getattr(easy_xt, "__version__", "unknown"), "mode": "imported"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -1154,13 +1363,20 @@ class MainWindow(QMainWindow):
             "p99_slo_s": float(self._watchdog_slo_p99_s),
         }
         status = "OK" if p99 <= self._watchdog_slo_p99_s else "WARN"
+        if status == "WARN":
+            self._watchdog_consecutive_violations += 1
+        else:
+            self._watchdog_consecutive_violations = 0
+        record["slo_violation"] = status == "WARN"
+        record["consecutive_violations"] = self._watchdog_consecutive_violations
         self._logger.info(
-            "[MAIN_THREAD_LATENCY] status=%s samples=%s p50=%.3fs p95=%.3fs p99=%.3fs max=%.3fs slow=%s",
-            status, record['samples'], p50, p95, p99, max_gap, slow_count,
+            "[MAIN_THREAD_LATENCY] status=%s samples=%s p50=%.3fs p95=%.3fs p99=%.3fs max=%.3fs slow=%s consec_viol=%s",
+            status, record['samples'], p50, p95, p99, max_gap, slow_count, self._watchdog_consecutive_violations,
         )
         if status != "OK":
             self._logger.warning(
-                "[WATCHDOG][SLO] p99=%.3fs > target=%.3fs", p99, self._watchdog_slo_p99_s
+                "[WATCHDOG][SLO] p99=%.3fs > target=%.3fs consecutive=%s",
+                p99, self._watchdog_slo_p99_s, self._watchdog_consecutive_violations,
             )
         threading.Thread(
             target=self._append_json_log_line,
@@ -1649,7 +1865,39 @@ class MainWindow(QMainWindow):
 
     def _on_realtime_pipeline_status_updated(self, status: dict | None = None, **kwargs):
         if isinstance(status, dict):
-            self._realtime_pipeline_status = status
+            current = dict(status)
+            connected = current.get("connected")
+            reason = str(current.get("reason") or "")
+            now = time.monotonic()
+            if connected is False and _is_realtime_failure_reason(reason):
+                self._realtime_fail_streak += 1
+            elif connected is True:
+                self._realtime_fail_streak = max(self._realtime_fail_streak - 1, 0)
+            if (
+                self._realtime_fail_streak >= max(1, int(self._realtime_fuse_fail_threshold))
+                and now >= self._realtime_fuse_open_until
+            ):
+                self._realtime_fuse_open_until = now + max(5.0, float(self._realtime_fuse_cooldown_s))
+                self._logger.warning(
+                    "[REALTIME_FUSE] open cooldown=%.1fs streak=%s reason=%s",
+                    float(self._realtime_fuse_cooldown_s),
+                    self._realtime_fail_streak,
+                    reason or "N/A",
+                )
+            if now < self._realtime_fuse_open_until:
+                remain = int(max(0, self._realtime_fuse_open_until - now))
+                current["connected"] = False
+                current["degraded"] = True
+                current["reason"] = f"runtime_fuse_open:{remain}s"
+                current["fuse_fail_streak"] = int(self._realtime_fail_streak)
+                if now - self._realtime_fuse_last_log_ts >= max(1.0, float(self._realtime_fuse_log_interval_s)):
+                    self._realtime_fuse_last_log_ts = now
+                    self._logger.warning(
+                        "[REALTIME_FUSE] suppressing reconnect flapping remain=%ss streak=%s",
+                        remain,
+                        self._realtime_fail_streak,
+                    )
+            self._realtime_pipeline_status = current
         self._log_realtime_pipeline_status()
         self._render_realtime_pipeline_status()
 
@@ -1740,7 +1988,7 @@ class MainWindow(QMainWindow):
     def _refresh_release_gate_status(self):
         metrics_path = os.path.join(project_path, "artifacts", "p0_metrics_latest.json")
         if not os.path.exists(metrics_path):
-            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}, "intraday_bar_semantic_detail": {}, "governance_nightly_detail": {}, "watermark_quality_detail": {}, "watermark_profile_audit_detail": {}, "watermark_profile_approval_detail": {}}
+            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}, "intraday_bar_semantic_detail": {}, "governance_nightly_detail": {}, "period_validation_detail": {}, "watermark_quality_detail": {}, "watermark_profile_audit_detail": {}, "watermark_profile_approval_detail": {}}
             self._render_release_gate_status()
             return
         try:
@@ -1748,8 +1996,19 @@ class MainWindow(QMainWindow):
                 gate = json.load(f)
             self._release_gate_status = gate if isinstance(gate, dict) else {}
         except Exception:
-            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}, "intraday_bar_semantic_detail": {}, "governance_nightly_detail": {}, "watermark_quality_detail": {}, "watermark_profile_audit_detail": {}, "watermark_profile_approval_detail": {}}
+            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}, "intraday_bar_semantic_detail": {}, "governance_nightly_detail": {}, "period_validation_detail": {}, "watermark_quality_detail": {}, "watermark_profile_audit_detail": {}, "watermark_profile_approval_detail": {}}
         self._render_release_gate_status()
+
+    def _load_artifact_json(self, file_name):
+        path = os.path.join(project_path, "artifacts", file_name)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                payload = json.load(f)
+            return payload if isinstance(payload, dict) else None
+        except Exception:
+            return None
 
     def _render_release_gate_status(self):
         if not hasattr(self, "release_gate_status") or self.release_gate_status is None:
@@ -1760,15 +2019,39 @@ class MainWindow(QMainWindow):
         detail = gate.get("duckdb_write_probe_detail") if isinstance(gate.get("duckdb_write_probe_detail"), dict) else {}
         intraday_detail = gate.get("intraday_bar_semantic_detail") if isinstance(gate.get("intraday_bar_semantic_detail"), dict) else {}
         governance_detail = gate.get("governance_nightly_detail") if isinstance(gate.get("governance_nightly_detail"), dict) else {}
+        period_validation_detail = gate.get("period_validation_detail") if isinstance(gate.get("period_validation_detail"), dict) else {}
         watermark_detail = gate.get("watermark_quality_detail") if isinstance(gate.get("watermark_quality_detail"), dict) else {}
         watermark_audit = gate.get("watermark_profile_audit_detail") if isinstance(gate.get("watermark_profile_audit_detail"), dict) else {}
         watermark_approval = gate.get("watermark_profile_approval_detail") if isinstance(gate.get("watermark_profile_approval_detail"), dict) else {}
+        stability_evidence = self._load_artifact_json("stability_evidence_30d.json")
+        peak_release_gate = self._load_artifact_json("peak_release_gate_latest.json")
         wm_profile = str(watermark_detail.get("profile") or "balanced")
         d_status = str(detail.get("status") or "").lower()
         i_status = str(intraday_detail.get("status") or "").lower()
         i_anomaly = int(intraday_detail.get("anomaly_count") or 0)
         g_status = str(governance_detail.get("status") or "").lower()
         g_failed = int(governance_detail.get("failed_items") or 0)
+        pv_status = str(period_validation_detail.get("status") or "").lower()
+        pv_failed = int(period_validation_detail.get("failed_items") or 0)
+        pv_failed_norm, pv_max_allowed = period_validation_summary(stability_evidence, peak_release_gate)
+        if pv_failed_norm == 0 and pv_max_allowed == 0 and pv_failed > 0:
+            pv_failed_norm = pv_failed
+        pv_tag_text = period_validation_tag(pv_failed_norm, pv_max_allowed)
+        pv_detail_tag_text = period_validation_detail_tag(
+            pv_failed_norm,
+            pv_max_allowed,
+            message=str(period_validation_detail.get("message") or ""),
+            action=str(period_validation_detail.get("recommended_action") or ""),
+        )
+        peak_level = str((peak_release_gate or {}).get("level", "") or "").lower()
+        rag_status = header_rag_status(
+            bool(strict_pass),
+            int(p0_open or 0),
+            int(gate.get("active_critical_high") or 0),
+            peak_level,
+            pv_failed_norm,
+            pv_max_allowed,
+        )
         w_pass = bool(watermark_detail.get("q_score_pass", False))
         w_q = float(watermark_detail.get("today_q_score", 0.0) or 0.0)
         q_mean = float(watermark_detail.get("q_score_mean_7d", 0.0) or 0.0)
@@ -1787,28 +2070,48 @@ class MainWindow(QMainWindow):
         appr_required = bool(watermark_approval.get("required", False))
         appr_valid = bool(watermark_approval.get("valid", False))
         appr_risk = str(watermark_approval.get("risk_level") or "").lower()
+        rag_color_value = rag_color(rag_status)
+        rag_badge_value = rag_badge(rag_status)
+        rag_tag_value = rag_tag(rag_status)
+        gate_detail_value = gate_detail_tag(
+            rag_status,
+            pv_failed_norm,
+            pv_max_allowed,
+            message=str(period_validation_detail.get("message") or ""),
+            action=str(period_validation_detail.get("recommended_action") or ""),
+        )
+        gate_detail_parsed = parse_gate_detail_tag(gate_detail_value)
+        gate_detail_parse_ok = bool(gate_detail_parsed.get("ok", False))
+        gate_contract_valid = bool(gate.get("gate_contract_valid", gate_detail_parse_ok))
+        gate_contract_version = int(gate.get("gate_contract_version", gate_detail_parsed.get("version", 0)) or 0)
+        gate_contract_error = str(gate.get("gate_contract_error", gate_detail_parsed.get("error", "")) or "")
+        gate_contract_rag = str(gate.get("gate_contract_rag", gate_detail_parsed.get("rag", rag_tag_value)) or "")
+        contract_health = "HEALTHY" if gate_contract_valid and gate_contract_version > 0 and gate_contract_error == "" else "BROKEN"
+        rag_icon = rag_badge_value.split(" ", 1)[0] if rag_badge_value else "⚪"
         if strict_pass is True:
             if appr_risk == "warn":
-                text = f"🟡 发布门禁: PASS_WITH_WARN P0={p0_open if p0_open is not None else 0} Q={w_q:.3f}/{q_mean:.3f}±{q_vol:.3f} {q_spark} A={audit_text}"
-                color = "#ef6c00"
+                text = f"{rag_icon} 发布门禁: PASS_WITH_WARN P0={p0_open if p0_open is not None else 0} PV={pv_tag_text} R={rag_tag_value} Q={w_q:.3f}/{q_mean:.3f}±{q_vol:.3f} {q_spark} A={audit_text}"
+                color = rag_color_value
             else:
-                text = f"🟢 发布门禁: PASS P0={p0_open if p0_open is not None else 0} Q={w_q:.3f}/{q_mean:.3f}±{q_vol:.3f} {q_spark} A={audit_text}"
-                color = "#00aa66"
+                text = f"{rag_icon} 发布门禁: PASS P0={p0_open if p0_open is not None else 0} PV={pv_tag_text} R={rag_tag_value} Q={w_q:.3f}/{q_mean:.3f}±{q_vol:.3f} {q_spark} A={audit_text}"
+                color = rag_color_value
         elif strict_pass is False:
             probe_err = str(detail.get("error_type") or "gate_fail")
             if i_status == "fail":
                 probe_err = f"intraday:{i_anomaly}"
             elif g_status == "fail":
                 probe_err = f"governance:{g_failed}"
+            elif pv_failed_norm > pv_max_allowed or pv_status == "fail":
+                probe_err = f"period_validation:{pv_failed_norm}/{pv_max_allowed}"
             elif not w_pass:
                 probe_err = f"qscore:{w_q:.3f}"
             elif appr_required and not appr_valid:
                 probe_err = f"approval:{watermark_approval.get('reason') or 'invalid'}"
-            text = f"🔴 发布门禁: FAIL P0={p0_open if p0_open is not None else '?'} {probe_err} Q={w_q:.3f}/{q_mean:.3f}±{q_vol:.3f} A={audit_text}"
-            color = "#d32f2f"
+            text = f"{rag_icon} 发布门禁: FAIL P0={p0_open if p0_open is not None else '?'} {probe_err} PV={pv_tag_text} R={rag_tag_value} Q={w_q:.3f}/{q_mean:.3f}±{q_vol:.3f} A={audit_text}"
+            color = rag_color_value
         elif d_status in ("warn", "skip", "missing"):
-            text = f"🟡 发布门禁: {d_status.upper()} P0={p0_open if p0_open is not None else '?'}"
-            color = "#ef6c00"
+            text = f"{rag_icon} 发布门禁: {d_status.upper()} P0={p0_open if p0_open is not None else '?'} R={rag_tag_value}"
+            color = rag_color_value if rag_color_value != "#999999" else "#ef6c00"
         else:
             text = "⚪ 发布门禁: 待检测"
             color = "#999999"
@@ -1828,6 +2131,21 @@ class MainWindow(QMainWindow):
             f"governance_failed_items={governance_detail.get('failed_items')}\n"
             f"governance_message={governance_detail.get('message')}\n"
             f"governance_action={governance_detail.get('recommended_action')}\n"
+            f"period_validation_status={period_validation_detail.get('status')}\n"
+            f"period_validation_detail_tag={pv_detail_tag_text}\n"
+            f"gate_detail_tag={gate_detail_value}\n"
+            f"gate_detail_parse_ok={gate_detail_parse_ok}\n"
+            f"gate_detail_parse_error={gate_detail_parsed.get('error', '')}\n"
+            f"gate_contract_valid={gate_contract_valid}\n"
+            f"gate_contract_version={gate_contract_version}\n"
+            f"gate_contract_error={gate_contract_error}\n"
+            f"gate_contract_rag={gate_contract_rag}\n"
+            f"contract_health={contract_health}\n"
+            f"debug_period_validation_status_raw={period_validation_detail.get('status')}\n"
+            f"debug_period_validation_failed_items_raw={period_validation_detail.get('failed_items')}\n"
+            f"debug_period_validation_failed_norm={pv_failed_norm}\n"
+            f"debug_period_validation_max_allowed={pv_max_allowed}\n"
+            f"rag_tag={rag_tag_value}\n"
             f"watermark_status={watermark_detail.get('status')}\n"
             f"watermark_today_q_score={watermark_detail.get('today_q_score')}\n"
             f"watermark_q_score_floor={watermark_detail.get('q_score_floor')}\n"
@@ -2142,6 +2460,8 @@ class MainWindow(QMainWindow):
 
     def _warmup_xtquant_broker(self):
         """后台预热 xtquant_broker 单例，使 realtime worker 的 fast-fail 检查通过"""
+        if os.environ.get("EASYXT_ENABLE_BROKER_WARMUP", "0") not in ("1", "true", "True"):
+            return
         try:
             import easy_xt
             easy_xt.get_xtquant_broker()
@@ -2171,6 +2491,35 @@ class MainWindow(QMainWindow):
     def closeEvent(self, a0):
         """关闭事件"""
         self._closing = True
+        def _stop_child_threads():
+            child_threads = []
+            try:
+                child_threads = [t for t in self.findChildren(QThread) if t is not None and t.isRunning()]
+            except Exception:
+                child_threads = []
+            for t in child_threads:
+                try:
+                    t.requestInterruption()
+                except Exception:
+                    pass
+                try:
+                    t.quit()
+                except Exception:
+                    pass
+                try:
+                    if not t.wait(800):
+                        t.terminate()
+                        t.wait(300)
+                except Exception:
+                    pass
+        try:
+            self.signal_bus.unsubscribe(Events.BACKTEST_ENGINE_STATUS_UPDATED, self._on_backtest_engine_status_updated)
+            self.signal_bus.unsubscribe(Events.REALTIME_PIPELINE_STATUS_UPDATED, self._on_realtime_pipeline_status_updated)
+            self.signal_bus.unsubscribe(Events.DATA_QUALITY_ALERT, self._on_data_quality_alert)
+            self.signal_bus.unsubscribe(Events.DATA_REPAIRED, self._on_data_repaired)
+            self.signal_bus.unsubscribe(Events.ENV_CONFIG_SAVED, self._on_env_config_saved)
+        except Exception:
+            pass
 
         # 停止连接检查定时器
         if hasattr(self, "connection_check_timer"):
@@ -2183,6 +2532,17 @@ class MainWindow(QMainWindow):
         # 停止周期性告警汇总定时器，防止窗口关闭后仍触发
         if getattr(self, "_alerts_rollup_timer", None):
             self._alerts_rollup_timer.stop()
+        _stop_child_threads()
+        if self.module_tab_widget is not None:
+            try:
+                self.module_tab_widget.close()
+            except Exception:
+                pass
+        if self.chart_workspace is not None:
+            try:
+                self.chart_workspace.close()
+            except Exception:
+                pass
 
         # 清理连接检查线程
         try:
@@ -2197,6 +2557,9 @@ class MainWindow(QMainWindow):
                 self._logger.warning("closeEvent: ConnectionCheckThread 未在 1.2s 内退出，强制终止")
                 self._check_thread.terminate()
                 self._check_thread.wait(300)
+        self._check_thread = None
+
+        _stop_child_threads()
 
         # 停止后端服务进程
         self.stop_all_services()
@@ -2228,6 +2591,8 @@ def main():
 
     if os.name == "nt":
         os.environ.setdefault("QT_QPA_PLATFORM", "windows")
+    cache_guard = _prepare_qtwebengine_safe_cache_env()
+    logging.getLogger("easyxt.startup").info("qtwebengine_cache_guard=%s", cache_guard)
 
     # Must import WebEngine BEFORE QApplication
     try:
@@ -2266,6 +2631,15 @@ def main():
     theme_manager.apply(app)
     window = MainWindow()
     window.show()
+    try:
+        signal.signal(signal.SIGINT, lambda *_: QTimer.singleShot(0, app.quit))
+        sigint_timer = QTimer()
+        sigint_timer.setInterval(200)
+        sigint_timer.timeout.connect(lambda: None)
+        sigint_timer.start()
+        app._sigint_timer = sigint_timer  # type: ignore[attr-defined]
+    except Exception:
+        pass
     sys.exit(app.exec_())
 
 

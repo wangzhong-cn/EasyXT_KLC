@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-第一个MiniQMT + JQ2QMT集成示例
-演示如何在策略中使用JQ2QMT功能
+第一个MiniQMT + JQ2QMT集成示例（工具脚本）
+
+本模块用于演示外部服务联调流程，不属于 EasyXT BaseStrategy 体系，
+不得通过 strategy_factory 或 strategy_registry 进入生产策略生命周期。
 """
+
+__all__: list[str] = []
 
 from datetime import datetime
 

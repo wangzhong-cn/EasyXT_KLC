@@ -2,7 +2,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from unittest.mock import MagicMock, call
+from unittest.mock import ANY, MagicMock, call
 
 
 def _make_mock_db():
@@ -492,3 +492,231 @@ class TestSaveFromTushare:
     def test_fv_helper_default_zero(self, saver):
         row: dict = {}
         assert saver._fv(row, "x", "y") == 0.0
+
+    def test_fv_helper_skips_non_numeric_and_uses_next_key(self, saver):
+        row = {"a": "not-a-number", "b": "42.5"}
+        assert saver._fv(row, "a", "b") == pytest.approx(42.5)
+
+    def test_ts_date_helper_truncates_non_compact_string(self, saver):
+        assert saver._ts_date("2024-01-31T09:30:00") == "2024-01-31"
+
+    def test_save_from_tushare_converts_start_end_dates(self, saver, monkeypatch):
+        _, mock_pro = self._patch_tushare(
+            monkeypatch,
+            self._make_ts_income_df(),
+            self._make_ts_balance_df(),
+            self._make_ts_cashflow_df(),
+        )
+        saver.save_from_tushare("000001.SZ", start_date="2023-01-01", end_date="2023-12-31")
+        expected_kwargs = {
+            "ts_code": "000001.SZ",
+            "start_date": "20230101",
+            "end_date": "20231231",
+        }
+        assert mock_pro.income.call_args.kwargs == expected_kwargs
+        assert mock_pro.balancesheet.call_args.kwargs == expected_kwargs
+        assert mock_pro.cashflow.call_args.kwargs == expected_kwargs
+
+    def test_partial_tushare_failure_can_still_succeed(self, saver, monkeypatch):
+        _, mock_pro = self._patch_tushare(
+            monkeypatch,
+            self._make_ts_income_df(),
+            self._make_ts_balance_df(),
+            pd.DataFrame(),
+        )
+        mock_pro.income.side_effect = RuntimeError("income boom")
+        result = saver.save_from_tushare("000001.SZ")
+        assert result["success"] is True
+        assert result["income_count"] == 0
+        assert result["balance_count"] == 1
+        assert "income boom" in (result["error"] or "")
+
+
+class TestSaveToTable:
+    @pytest.fixture
+    def saver_and_db(self):
+        saver, mock_db = _make_saver()
+        mock_db.reset_mock()
+        return saver, mock_db
+
+    def test_none_or_empty_dataframe_is_noop(self, saver_and_db):
+        saver, mock_db = saver_and_db
+        saver._save_to_table("financial_income", None)
+        saver._save_to_table("financial_income", pd.DataFrame())
+        mock_db.execute_write_query.assert_not_called()
+        mock_db.insert_dataframe.assert_not_called()
+
+    def test_drops_invalid_rows_and_keeps_latest_duplicate_by_announce_date(self, saver_and_db):
+        saver, mock_db = saver_and_db
+        df = pd.DataFrame([
+            {
+                "stock_code": "000001.SZ",
+                "report_date": "2023-12-31",
+                "announce_date": "2024-01-20",
+                "revenue": 1.0,
+            },
+            {
+                "stock_code": "000001.SZ",
+                "report_date": "2023-12-31",
+                "announce_date": "2024-01-30",
+                "revenue": 2.0,
+            },
+            {
+                "stock_code": "000002.SZ",
+                "report_date": None,
+                "announce_date": "2024-01-15",
+                "revenue": 3.0,
+            },
+        ])
+
+        saver._save_to_table("financial_income", df)
+
+        mock_db.execute_write_query.assert_called_once_with(
+            "DELETE FROM financial_income WHERE stock_code = ? AND report_date = ?",
+            ("000001.SZ", "2023-12-31"),
+        )
+        mock_db.insert_dataframe.assert_called_once()
+        insert_args = mock_db.insert_dataframe.call_args.args
+        assert insert_args[0] == "financial_income"
+        saved_df = insert_args[1]
+        assert len(saved_df) == 1
+        assert saved_df.iloc[0]["announce_date"] == "2024-01-30"
+        assert saved_df.iloc[0]["revenue"] == pytest.approx(2.0)
+
+    def test_deduplicates_without_announce_date_using_last_row(self, saver_and_db):
+        saver, mock_db = saver_and_db
+        df = pd.DataFrame([
+            {"stock_code": "000001.SZ", "report_date": "2023-12-31", "revenue": 1.0},
+            {"stock_code": "000001.SZ", "report_date": "2023-12-31", "revenue": 9.0},
+            {"stock_code": "000002.SZ", "report_date": "2023-12-31", "revenue": 5.0},
+        ])
+
+        saver._save_to_table("financial_income", df)
+
+        saved_df = mock_db.insert_dataframe.call_args.args[1]
+        assert len(saved_df) == 2
+        latest_row = saved_df[saved_df["stock_code"] == "000001.SZ"].iloc[0]
+        assert latest_row["revenue"] == pytest.approx(9.0)
+        assert mock_db.execute_write_query.call_count == 2
+
+
+class TestLoadFinancialData:
+    @pytest.fixture
+    def saver_and_db(self):
+        saver, mock_db = _make_saver()
+        mock_db.reset_mock()
+        return saver, mock_db
+
+    def test_load_financial_data_queries_all_tables_without_date_filters(self, saver_and_db):
+        saver, mock_db = saver_and_db
+        income_df = pd.DataFrame({"a": [1]})
+        balance_df = pd.DataFrame({"b": [2]})
+        cashflow_df = pd.DataFrame({"c": [3]})
+        mock_db.execute_read_query.side_effect = [income_df, balance_df, cashflow_df]
+
+        result = saver.load_financial_data("000001.SZ")
+
+        assert result["income"] is income_df
+        assert result["balance"] is balance_df
+        assert result["cashflow"] is cashflow_df
+        assert mock_db.execute_read_query.call_count == 3
+        for call_item in mock_db.execute_read_query.call_args_list:
+            assert call_item.args[1] == ("000001.SZ",)
+            assert "ORDER BY report_date DESC" in call_item.args[0]
+
+    def test_load_financial_data_applies_start_end_date_filters(self, saver_and_db):
+        saver, mock_db = saver_and_db
+        mock_db.execute_read_query.side_effect = [pd.DataFrame(), pd.DataFrame(), pd.DataFrame()]
+
+        saver.load_financial_data("000001.SZ", start_date="2023-01-01", end_date="2023-12-31")
+
+        assert mock_db.execute_read_query.call_count == 3
+        for call_item in mock_db.execute_read_query.call_args_list:
+            assert "report_date >= ?" in call_item.args[0]
+            assert "report_date <= ?" in call_item.args[0]
+            assert call_item.args[1] == ("000001.SZ", "2023-01-01", "2023-12-31")
+
+    def test_load_financial_data_returns_defaults_on_exception(self, saver_and_db):
+        saver, mock_db = saver_and_db
+        mock_db.execute_read_query.side_effect = RuntimeError("read failed")
+
+        result = saver.load_financial_data("000001.SZ")
+
+        assert result == {
+            "income": None,
+            "balance": None,
+            "cashflow": None,
+        }
+
+
+class TestGetFinancialSummary:
+    @pytest.fixture
+    def saver_and_db(self):
+        saver, mock_db = _make_saver()
+        mock_db.reset_mock()
+        return saver, mock_db
+
+    def test_get_financial_summary_returns_query_result(self, saver_and_db):
+        saver, mock_db = saver_and_db
+        expected = pd.DataFrame({"报告期": ["2023-12-31"]})
+        mock_db.execute_read_query.return_value = expected
+
+        result = saver.get_financial_summary("000001.SZ")
+
+        assert result is expected
+        query, params = mock_db.execute_read_query.call_args.args
+        assert "LEFT JOIN financial_balance" in query
+        assert "净资产收益率" in query
+        assert params == ("000001.SZ",)
+
+    def test_get_financial_summary_returns_empty_dataframe_on_exception(self, saver_and_db):
+        saver, mock_db = saver_and_db
+        mock_db.execute_read_query.side_effect = RuntimeError("summary failed")
+
+        result = saver.get_financial_summary("000001.SZ")
+
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+
+class TestSaveFromQmtExtended:
+    @pytest.fixture
+    def saver_and_db(self):
+        saver, mock_db = _make_saver()
+        mock_db.reset_mock()
+        return saver, mock_db
+
+    def test_save_from_qmt_saves_multiple_tables_and_updates_counts(self, saver_and_db):
+        saver, _ = saver_and_db
+        saver._prepare_income_data = MagicMock(return_value=[{"stock_code": "000001.SZ", "report_date": "2023-12-31"}])
+        saver._prepare_balance_data = MagicMock(return_value=[
+            {"stock_code": "000001.SZ", "report_date": "2023-12-31"},
+            {"stock_code": "000001.SZ", "report_date": "2023-09-30"},
+        ])
+        saver._prepare_cashflow_data = MagicMock(return_value=[])
+        saver._save_to_table = MagicMock()
+
+        result = saver.save_from_qmt(
+            "000001.SZ",
+            pd.DataFrame({"x": [1]}),
+            pd.DataFrame({"y": [1, 2]}),
+            pd.DataFrame({"z": [1]}),
+        )
+
+        assert result["success"] is True
+        assert result["income_count"] == 1
+        assert result["balance_count"] == 2
+        assert result["cashflow_count"] == 0
+        assert saver._save_to_table.call_args_list == [
+            call("financial_income", ANY),
+            call("financial_balance", ANY),
+        ]
+
+    def test_save_from_qmt_sets_error_when_prepare_step_raises(self, saver_and_db):
+        saver, _ = saver_and_db
+        saver._prepare_income_data = MagicMock(side_effect=RuntimeError("prepare failed"))
+
+        result = saver.save_from_qmt("000001.SZ", pd.DataFrame({"x": [1]}))
+
+        assert result["success"] is False
+        assert result["error"] == "prepare failed"

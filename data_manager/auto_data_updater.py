@@ -443,6 +443,10 @@ class AutoDataUpdater:
         success_stocks = 0
         failed_stocks = 0
         total_records = 0
+
+        # 批量入库时禁用远程数据源熔断（QMT 是本地调用，不应被限流）
+        prev_cb_disabled = getattr(self.interface, '_cb_disabled', False)
+        self.interface._cb_disabled = True
         total = len(stock_codes)
 
         for idx, code in enumerate(stock_codes):
@@ -486,6 +490,19 @@ class AutoDataUpdater:
             "bulk_download 完成: 成功=%d 失败=%d 总记录=%d",
             success_stocks, failed_stocks, total_records,
         )
+
+        # ── T1.2: 下载完成后预计算常用自定义周期 K 线并写入 custom_period_bars ──
+        if success_stocks > 0 and self.interface is not None:
+            self._precompute_custom_period_bars(
+                stock_codes=stock_codes,
+                start_date=start_date or "20100101",
+                end_date=end_date or datetime.now(tz=_SH).date().strftime("%Y%m%d"),
+                stop_event=stop_event,
+            )
+
+        # 恢复熔断状态
+        self.interface._cb_disabled = prev_cb_disabled
+
         return {
             'total_stocks': total,
             'success_stocks': success_stocks,
@@ -495,6 +512,45 @@ class AutoDataUpdater:
         }
 
     # ── 断点续传辅助方法 ──────────────────────────────────────────────────────
+
+    # ── T1.2: 常用自定义周期预计算 ──────────────────────────────────────────
+    # 高频使用周期：15m/30m/60m（日内策略）、5d/10d（多日策略）
+    _PRECOMPUTE_PERIODS: list[str] = ["15m", "30m", "60m", "5d", "10d"]
+
+    def _precompute_custom_period_bars(
+        self,
+        stock_codes: list[str],
+        start_date: str,
+        end_date: str,
+        stop_event: Optional[threading.Event] = None,
+    ) -> None:
+        """批量预计算常用自定义周期 K 线并持久化到 custom_period_bars。
+
+        在 bulk_download 完成后调用。仅做 best-effort，单只股票失败不阻断。
+        """
+        if self.interface is None:
+            return
+        total = len(stock_codes) * len(self._PRECOMPUTE_PERIODS)
+        done = 0
+        logger.info("custom_period_bars 预计算开始: %d 只 × %d 周期", len(stock_codes), len(self._PRECOMPUTE_PERIODS))
+        for code in stock_codes:
+            if stop_event is not None and stop_event.is_set():
+                logger.info("custom_period_bars 预计算收到停止信号，已完成 %d/%d", done, total)
+                return
+            for period in self._PRECOMPUTE_PERIODS:
+                try:
+                    # _read_from_duckdb 内部：缓存未命中 → 构建 → 自动写入 custom_period_bars
+                    self.interface._read_from_duckdb(
+                        stock_code=code,
+                        start_date=start_date,
+                        end_date=end_date,
+                        period=period,
+                        adjust="none",
+                    )
+                except Exception as exc:
+                    logger.debug("预计算 %s %s 失败: %s", code, period, exc)
+                done += 1
+        logger.info("custom_period_bars 预计算完成: %d/%d", done, total)
 
     def _save_checkpoint(
         self,

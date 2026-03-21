@@ -1,11 +1,11 @@
 {
   "account": {
-    "account_id": "__REPLACE_ACCOUNT_ID__"
+    "account_id": "1678070127"
   },
   "settings": {
     "account": {
-      "account_id": "__REPLACE_ACCOUNT_ID__",
-      "password": "__REPLACE_PASSWORD__",
+      "account_id": "1678070127",
+      "password": "test1234！",
       "account_type": "STOCK",
       "qmt_path": "D:\\申万宏源策略量化交易终端\\bin.x64\\XtItClient.exe",
       "qmt_userdata_path": "D:\\申万宏源策略量化交易终端\\userdata_mini"

@@ -49,3 +49,32 @@ class TestRealtimePipelineManagerEventTime:
         mgr.enqueue_quote({"price": 111.12, "volume": 1010.0, "time": "2026-03-17 18:05:00"})
         result = mgr.flush(force=True)
         assert result is None
+
+    def test_event_ts_ms_priority_over_time_field(self):
+        mgr = RealtimePipelineManager()
+        mgr.configure(
+            symbol="000988.SZ",
+            period="1m",
+            last_data=pd.DataFrame(
+                [
+                    {
+                        "time": "2026-03-17 14:59:00",
+                        "open": 111.2,
+                        "high": 111.3,
+                        "low": 111.1,
+                        "close": 111.25,
+                        "volume": 3000.0,
+                    }
+                ]
+            ),
+        )
+        quote = {
+            "price": 111.18,
+            "volume": 1100.0,
+            "time": "2026-03-17 18:05:00",
+            "event_ts_ms": int(pd.Timestamp("2026-03-17 14:59:31").timestamp() * 1000),
+        }
+        mgr.enqueue_quote(quote)
+        result = mgr.flush(force=True)
+        assert result is not None
+        assert str(result["bar"]["time"]).endswith("14:59:00")

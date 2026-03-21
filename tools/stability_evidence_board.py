@@ -4,12 +4,13 @@ import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HISTORY_PATH = PROJECT_ROOT / "artifacts" / "p0_trend_history.json"
 OUT_MD = PROJECT_ROOT / "artifacts" / "stability_evidence_30d.md"
 OUT_JSON = PROJECT_ROOT / "artifacts" / "stability_evidence_30d.json"
+PERIOD_VALIDATION_PATH = PROJECT_ROOT / "artifacts" / "period_validation_report.jsonl"
 
 
 def _load_history(path: Path) -> list[dict[str, Any]]:
@@ -59,13 +60,47 @@ def _consecutive_compliant_days(
     return cnt
 
 
+def _summarize_period_validation(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"report_exists": False, "rows": 0, "failed_rows": 0, "last_failed_period": ""}
+    rows = 0
+    failed_rows = 0
+    last_failed_period = ""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return {"report_exists": True, "rows": 0, "failed_rows": 0, "last_failed_period": ""}
+    for raw in lines[-1000:]:
+        s = raw.strip()
+        if not s:
+            continue
+        try:
+            obj = json.loads(s)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        rows += 1
+        if bool(obj.get("is_valid", True)) is False:
+            failed_rows += 1
+            last_failed_period = str(obj.get("period") or last_failed_period)
+    return {
+        "report_exists": True,
+        "rows": rows,
+        "failed_rows": failed_rows,
+        "last_failed_period": last_failed_period,
+    }
+
+
 def build_payload(
     rows: list[dict[str, Any]],
     *,
     window_days: int,
     step6_hard_fail_rate_max: float,
     require_strategy_impact: bool,
+    period_validation_summary: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
+    pv = period_validation_summary or {"report_exists": False, "rows": 0, "failed_rows": 0, "last_failed_period": ""}
     tail = rows[-window_days:] if window_days > 0 else rows
     if not tail:
         return {
@@ -78,6 +113,7 @@ def build_payload(
             "require_strategy_impact": require_strategy_impact,
             "peak_ready": False,
             "peak_ready_rule": "consecutive_compliant_days>=14 and compliance_ratio_pct>=95",
+            "period_validation": pv,
             "daily": [],
         }
     compliant = [
@@ -105,6 +141,7 @@ def build_payload(
         "require_strategy_impact": require_strategy_impact,
         "peak_ready": peak_ready,
         "peak_ready_rule": "consecutive_compliant_days>=14 and compliance_ratio_pct>=95",
+        "period_validation": pv,
         "daily": [
             {
                 "date": str(r.get("ts", ""))[:10],
@@ -112,6 +149,7 @@ def build_payload(
                 "step6_hard_fail_rate": float(r.get("step6_hard_fail_rate", 0.0) or 0.0),
                 "strategy_impact_available": bool(r.get("strategy_impact_available", False)),
                 "strategy_impact_gate_pass": bool(r.get("strategy_impact_gate_pass", False)),
+                "period_validation_failed_items": int(r.get("period_validation_failed_items", 0) or 0),
                 "compliant": _is_compliant(
                     r,
                     step6_hard_fail_rate_max=step6_hard_fail_rate_max,
@@ -136,18 +174,19 @@ def render_md(payload: dict[str, Any]) -> str:
         f"| consecutive_compliant_days | {payload.get('consecutive_compliant_days', 0)} |",
         f"| peak_ready | {'✅ YES' if payload.get('peak_ready', False) else '❌ NO'} |",
         f"| peak_ready_rule | {payload.get('peak_ready_rule', '')} |",
+        f"| period_validation_failed_rows | {int((payload.get('period_validation') or {}).get('failed_rows', 0) if isinstance(payload.get('period_validation'), dict) else 0)} |",
         "",
         "## Daily",
         "",
-        "| date | gate | step6_hard_fail_rate | strategy_impact | compliant |",
-        "|---|---|---:|---|---|",
+        "| date | gate | step6_hard_fail_rate | pv_failed | strategy_impact | compliant |",
+        "|---|---|---:|---:|---|---|",
     ]
     for d in payload.get("daily", []):
         gate = "✅" if d.get("strict_gate_pass") else "❌"
         impact = "✅" if (d.get("strategy_impact_available") and d.get("strategy_impact_gate_pass")) else "❌"
         comp = "✅" if d.get("compliant") else "❌"
         lines.append(
-            f"| {d.get('date', '?')} | {gate} | {float(d.get('step6_hard_fail_rate', 0.0)):.4f} | {impact} | {comp} |"
+            f"| {d.get('date', '?')} | {gate} | {float(d.get('step6_hard_fail_rate', 0.0)):.4f} | {int(d.get('period_validation_failed_items', 0) or 0)} | {impact} | {comp} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -158,6 +197,7 @@ def main() -> int:
     parser.add_argument("--window-days", type=int, default=30)
     parser.add_argument("--step6-hard-fail-rate-max", type=float, default=0.05)
     parser.add_argument("--no-require-strategy-impact", action="store_true")
+    parser.add_argument("--period-validation-report", type=Path, default=PERIOD_VALIDATION_PATH)
     parser.add_argument("--out-md", type=Path, default=OUT_MD)
     parser.add_argument("--out-json", type=Path, default=OUT_JSON)
     args = parser.parse_args()
@@ -168,6 +208,7 @@ def main() -> int:
         window_days=args.window_days,
         step6_hard_fail_rate_max=args.step6_hard_fail_rate_max,
         require_strategy_impact=not args.no_require_strategy_impact,
+        period_validation_summary=_summarize_period_validation(args.period_validation_report),
     )
     args.out_md.parent.mkdir(parents=True, exist_ok=True)
     args.out_json.parent.mkdir(parents=True, exist_ok=True)

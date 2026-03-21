@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 import warnings
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Optional
 
@@ -190,6 +191,7 @@ class UnifiedDataInterface:
             "max_s": float(max_s),
             "fail_threshold": int(fail_threshold),
         }
+        self._cb_disabled = False  # 批量入库时可临时禁用熔断
         self._cache_stale_quarantine_enabled = (
             str(os.environ.get("EASYXT_CACHE_STALE_QUARANTINE_ENABLED", "1")).lower()
             in ("1", "true", "yes", "on")
@@ -455,6 +457,8 @@ class UnifiedDataInterface:
             print(msg)
 
     def _cb_allow(self) -> bool:
+        if self._cb_disabled:
+            return True
         if not self._cb_state["open"]:
             return True
         elapsed = time.perf_counter() - self._cb_state["opened_at"]
@@ -656,7 +660,9 @@ class UnifiedDataInterface:
 
             self._db_manager = get_db_manager(self.duckdb_path)
             prefer_rw = os.environ.get("EASYXT_DUCKDB_PREFER_RW", "1") in ("1", "true", "True")
-            effective_read_only = bool(read_only and (not prefer_rw))
+            # :memory: 数据库不支持只读模式，始终使用读写连接
+            is_memory_db = (self.duckdb_path == ":memory:")
+            effective_read_only = bool(read_only and (not prefer_rw) and (not is_memory_db))
             # 通过连接池创建连接，享受重试与路径归一化
             try:
                 self.con = duckdb.connect(self._db_manager.duckdb_path, read_only=effective_read_only)
@@ -730,7 +736,7 @@ class UnifiedDataInterface:
                     low DECIMAL(18, 6),
                     close DECIMAL(18, 6),
                     volume BIGINT,
-                    amount DECIMAL(18, 6),
+                    amount DECIMAL(24, 6),
                     adjust_type VARCHAR DEFAULT 'none',
                     factor DECIMAL(18, 6) DEFAULT 1.0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -751,7 +757,7 @@ class UnifiedDataInterface:
                     low DECIMAL(18, 6),
                     close DECIMAL(18, 6),
                     volume BIGINT,
-                    amount DECIMAL(18, 6),
+                    amount DECIMAL(24, 6),
                     adjust_type VARCHAR DEFAULT 'none',
                     factor DECIMAL(18, 6) DEFAULT 1.0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -772,7 +778,7 @@ class UnifiedDataInterface:
                     low DECIMAL(18, 6),
                     close DECIMAL(18, 6),
                     volume BIGINT,
-                    amount DECIMAL(18, 6),
+                    amount DECIMAL(24, 6),
                     adjust_type VARCHAR DEFAULT 'none',
                     factor DECIMAL(18, 6) DEFAULT 1.0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -793,7 +799,7 @@ class UnifiedDataInterface:
                     low DECIMAL(18, 6),
                     close DECIMAL(18, 6),
                     volume BIGINT,
-                    amount DECIMAL(18, 6),
+                    amount DECIMAL(24, 6),
                     adjust_type VARCHAR DEFAULT 'none',
                     factor DECIMAL(18, 6) DEFAULT 1.0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -810,7 +816,7 @@ class UnifiedDataInterface:
                     period VARCHAR NOT NULL,
                     price DECIMAL(18, 6),
                     volume BIGINT,
-                    amount DECIMAL(18, 6),
+                    amount DECIMAL(24, 6),
                     side VARCHAR,
                     bs_flag VARCHAR,
                     trade_id BIGINT DEFAULT 0,
@@ -958,11 +964,32 @@ class UnifiedDataInterface:
                 )
                 """)
 
+                # ── custom_period_bars：自定义周期 K 线预计算缓存 ──
+                self.con.execute("""
+                CREATE TABLE IF NOT EXISTS custom_period_bars (
+                    stock_code   VARCHAR   NOT NULL,
+                    period       VARCHAR   NOT NULL,
+                    datetime     TIMESTAMP NOT NULL,
+                    open         DECIMAL(18, 6),
+                    high         DECIMAL(18, 6),
+                    low          DECIMAL(18, 6),
+                    close        DECIMAL(18, 6),
+                    volume       BIGINT,
+                    amount       DECIMAL(18, 6),
+                    adjust_type  VARCHAR   DEFAULT 'none',
+                    adj_factor_hash VARCHAR DEFAULT '',
+                    is_partial   BOOLEAN   DEFAULT FALSE,
+                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (stock_code, period, datetime, adjust_type)
+                )
+                """)
+
                 self._migrate_stock_daily_schema()
                 self._migrate_stock_tick_schema()
                 self._migrate_ingestion_status_schema()
                 self._migrate_quarantine_schema()
                 self._migrate_sla_daily_schema()
+                self._migrate_custom_period_bars_schema()
 
                 # 因子值存储表
                 self.con.execute("""
@@ -1009,6 +1036,10 @@ class UnifiedDataInterface:
                     self.con.execute(
                         "CREATE INDEX IF NOT EXISTS idx_incident_lookup "
                         "ON data_quality_incident (incident_type, severity, created_at)"
+                    )
+                    self.con.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_custom_period_bars_lookup "
+                        "ON custom_period_bars (stock_code, period, adjust_type, datetime)"
                     )
                 except Exception:
                     pass  # 索引可能已存在
@@ -1191,6 +1222,18 @@ class UnifiedDataInterface:
                 self.con.execute(f"ALTER TABLE data_quality_sla_daily ADD COLUMN {col_name} {col_type}")
             except Exception as _mig_err:
                 self._logger.debug("data_quality_sla_daily 迁移列 %s 跳过: %s", col_name, _mig_err)
+
+    def _migrate_custom_period_bars_schema(self) -> None:
+        columns = self._get_table_columns("custom_period_bars")
+        if not columns:
+            return
+        if "adj_factor_hash" in set(columns):
+            return
+        try:
+            self.con.execute("ALTER TABLE custom_period_bars ADD COLUMN adj_factor_hash VARCHAR DEFAULT ''")
+            self._logger.debug("custom_period_bars 迁移: 添加列 adj_factor_hash")
+        except Exception as _mig_err:
+            self._logger.debug("custom_period_bars 迁移列 adj_factor_hash 跳过: %s", _mig_err)
 
     def get_stock_data(
         self,
@@ -1634,8 +1677,7 @@ class UnifiedDataInterface:
             if src_1m is None or src_1m.empty:
                 return pd.DataFrame()
             daily_ref = self.get_stock_data_local(stock_code, start_date, end_date, period="1d", adjust=adjust)
-            from data_manager.period_bar_builder import PeriodBarBuilder
-            result = PeriodBarBuilder().build_intraday_bars(
+            result = self._make_period_bar_builder(stock_code=stock_code).build_intraday_bars(
                 data_1m=src_1m, period_minutes=period_minutes, daily_ref=daily_ref
             )
             return result if result is not None and not result.empty else pd.DataFrame()
@@ -1646,8 +1688,7 @@ class UnifiedDataInterface:
             src_1d = self.get_stock_data_local(stock_code, start_date, end_date, period="1d", adjust=adjust)
             if src_1d is None or src_1d.empty:
                 return pd.DataFrame()
-            from data_manager.period_bar_builder import PeriodBarBuilder
-            result = PeriodBarBuilder().build_multiday_bars(
+            result = self._make_period_bar_builder(stock_code=stock_code).build_multiday_bars(
                 data_1d=src_1d, trading_days_per_period=trading_days
             )
             return result if result is not None and not result.empty else pd.DataFrame()
@@ -1827,6 +1868,9 @@ class UnifiedDataInterface:
         ingest_run_id = str(uuid.uuid4())
         schema_version = CURRENT_SCHEMA_VERSION
 
+        _ts_start = self._normalize_date_str(start_date)
+        _ts_end = self._normalize_date_str(end_date)
+
         def _write_once():
             self.con.execute(
                 """
@@ -1854,8 +1898,8 @@ class UnifiedDataInterface:
                 [
                     stock_code,
                     period,
-                    start_date,
-                    end_date,
+                    _ts_start,
+                    _ts_end,
                     source,
                     status,
                     int(record_count),
@@ -2275,9 +2319,7 @@ class UnifiedDataInterface:
         data_1m = _ensure_time_column(data_1m)
         data_1d = _ensure_time_column(data_1d)
 
-        from data_manager.period_bar_builder import PeriodBarBuilder
-
-        builder = PeriodBarBuilder()
+        builder = self._make_period_bar_builder(stock_code=symbol)
         details: list[dict[str, Any]] = []
         rebuilt_map: dict[str, pd.DataFrame] = {}
         succeeded = 0
@@ -2300,15 +2342,31 @@ class UnifiedDataInterface:
                         period_minutes=int(self._INTRADAY_CUSTOM_PERIODS[p]),
                         daily_ref=data_1d.copy() if data_1d is not None else None,
                     )
+                    # 构建完成后执行跨周期校验，写入 period_validation_report.jsonl
+                    if rebuilt is not None and not rebuilt.empty:
+                        try:
+                            builder.cross_validate(p, rebuilt, daily_ref=data_1d.copy() if data_1d is not None else None)
+                        except Exception:
+                            pass
                 elif p in self._MULTIDAY_CUSTOM_PERIODS:
                     rebuilt = builder.build_multiday_bars(
                         data_1d=data_1d.copy(),
                         trading_days_per_period=int(self._MULTIDAY_CUSTOM_PERIODS[p]),
                         listing_date=self.get_listing_date(symbol),
                     )
+                    if rebuilt is not None and not rebuilt.empty:
+                        try:
+                            builder.cross_validate(p, rebuilt, daily_ref=data_1d.copy() if data_1d is not None else None)
+                        except Exception:
+                            pass
                 elif p in self._PERIOD_AGGREGATION:
                     _src, rule = self._PERIOD_AGGREGATION[p]
                     rebuilt = builder.build_natural_calendar_bars(data_1d=data_1d.copy(), freq=rule)
+                    if rebuilt is not None and not rebuilt.empty:
+                        try:
+                            builder.cross_validate(p, rebuilt, daily_ref=data_1d.copy() if data_1d is not None else None)
+                        except Exception:
+                            pass
                 if rebuilt is None or rebuilt.empty:
                     failed += 1
                     details.append({"period": p, "status": "failed", "rows": 0, "reason": "rebuilt_empty"})
@@ -2796,6 +2854,50 @@ class UnifiedDataInterface:
         "2M": 42, "3M": 63, "5M": 105,
     }
 
+    def _resolve_session_profile_for_symbol(self, stock_code: Optional[str]) -> str:
+        explicit_profile = str(os.environ.get("EASYXT_SESSION_PROFILE", "CN_A")).strip()
+        if explicit_profile and explicit_profile.upper() != "AUTO":
+            return explicit_profile
+        rules_file = str(os.environ.get("EASYXT_SESSION_PROFILE_RULES_FILE", "config/session_profile_rules.json")).strip()
+        path = Path(rules_file)
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        if not path.exists() or not stock_code:
+            return "CN_A"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return "CN_A"
+        if not isinstance(payload, dict):
+            return "CN_A"
+        rules = payload.get("rules")
+        if not isinstance(rules, list):
+            return str(payload.get("default_profile") or "CN_A")
+        symbol = str(stock_code).strip().upper()
+        for item in rules:
+            if not isinstance(item, dict):
+                continue
+            pattern = str(item.get("pattern") or "").strip().upper()
+            profile = str(item.get("profile") or "").strip()
+            if not pattern or not profile:
+                continue
+            if fnmatchcase(symbol, pattern):
+                return profile
+        return str(payload.get("default_profile") or "CN_A")
+
+    def _make_period_bar_builder(self, stock_code: Optional[str] = None):
+        from data_manager.period_bar_builder import PeriodBarBuilder
+
+        return PeriodBarBuilder(
+            session_profile=self._resolve_session_profile_for_symbol(stock_code),
+            session_profile_file=str(os.environ.get("EASYXT_SESSION_PROFILE_FILE", "config/session_profiles.json")),
+            alignment=str(os.environ.get("EASYXT_PERIOD_ALIGNMENT", "left")),
+            anchor=str(os.environ.get("EASYXT_PERIOD_ANCHOR", "daily_close")),
+            validation_report_file=str(
+                os.environ.get("EASYXT_PERIOD_VALIDATION_REPORT_PATH", "artifacts/period_validation_report.jsonl")
+            ),
+        )
+
     @staticmethod
     def _parse_qmt_time_series(series: pd.Series) -> pd.Series:
         def _one(v):
@@ -2831,6 +2933,177 @@ class UnifiedDataInterface:
         stored_period = period
         return table_period, stored_period
 
+    # ------------------------------------------------------------------
+    # custom_period_bars 缓存读写
+    # ------------------------------------------------------------------
+
+    def _compute_adj_factor_hash(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+        adjust: str = "none",
+        source_period: str = "1d",
+    ) -> str:
+        source = str(source_period or "1d")
+        adj = str(adjust or "none")
+        if source != "1d" or adj == "none":
+            return f"na:{source}:{adj}"
+        if not self.con:
+            return ""
+        try:
+            df = self.con.execute(
+                "SELECT date, factor "
+                "FROM stock_daily "
+                "WHERE stock_code = ? AND period = '1d' "
+                "AND date >= ? AND date <= ? "
+                "ORDER BY date",
+                [stock_code, start_date, end_date],
+            ).df()
+            if df is None or df.empty:
+                return "empty:1d_factor"
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df[df["date"].notna()]
+            if df.empty:
+                return "empty:1d_factor"
+            payload = (
+                df["date"].dt.strftime("%Y-%m-%d").astype(str)
+                + "|"
+                + df["factor"].fillna(1.0).astype(float).round(6).astype(str)
+            )
+            return hashlib.sha256("\n".join(payload.tolist()).encode("utf-8")).hexdigest()[:24]
+        except Exception:
+            return ""
+
+    def _read_cached_custom_bars(
+        self,
+        stock_code: str,
+        period: str,
+        start_date: str,
+        end_date: str,
+        adjust: str = "none",
+        expected_adj_factor_hash: str = "",
+    ) -> Optional[pd.DataFrame]:
+        """从 custom_period_bars 表读取预计算缓存，命中返回 DataFrame，未命中返回 None。"""
+        try:
+            if not self.con:
+                return None
+            table_exists = (
+                self.con.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'custom_period_bars'"
+                ).fetchone()[0] > 0
+            )
+            if not table_exists:
+                return None
+            has_hash_col = "adj_factor_hash" in set(self._get_table_columns("custom_period_bars"))
+            hash_expr = "COALESCE(adj_factor_hash, '') AS adj_factor_hash" if has_hash_col else "'' AS adj_factor_hash"
+            df = self.con.execute(
+                "SELECT stock_code, datetime, open, high, low, close, volume, amount, is_partial, "
+                + hash_expr + " "
+                "FROM custom_period_bars "
+                "WHERE stock_code = ? AND period = ? AND adjust_type = ? "
+                "AND datetime >= ? AND datetime <= ? "
+                "ORDER BY datetime",
+                [stock_code, period, adjust, start_date, end_date],
+            ).df()
+            if df is None or df.empty:
+                return None
+            if expected_adj_factor_hash and has_hash_col:
+                hashes = {str(v or "") for v in df["adj_factor_hash"].tolist()}
+                is_legacy_empty = hashes == {""}
+                expected_is_non_adj = str(expected_adj_factor_hash).startswith("na:")
+                if hashes != {expected_adj_factor_hash} and not (is_legacy_empty and expected_is_non_adj):
+                    self._logger.debug(
+                        "custom_period_bars 缓存失效（adj_factor_hash mismatch）: %s %s expected=%s got=%s",
+                        stock_code,
+                        period,
+                        expected_adj_factor_hash,
+                        sorted(hashes),
+                    )
+                    return None
+            df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+            df = df[df["datetime"].notna()]
+            if "adj_factor_hash" in df.columns:
+                df = df.drop(columns=["adj_factor_hash"])
+            df.set_index("datetime", inplace=True)
+            self._logger.debug(
+                "custom_period_bars 缓存命中: %s %s %d 行", stock_code, period, len(df)
+            )
+            return df
+        except Exception as exc:
+            self._logger.debug("custom_period_bars 缓存读取失败: %s", exc)
+            return None
+
+    def _save_custom_period_bars(
+        self,
+        df: pd.DataFrame,
+        stock_code: str,
+        period: str,
+        adjust: str = "none",
+        adj_factor_hash: str = "",
+    ) -> None:
+        """将构建好的自定义周期 K 线写入 custom_period_bars 缓存表。
+
+        采用 DELETE-INSERT 策略：删除该品种+周期+复权类型的旧数据后批量写入。
+        """
+        if df is None or df.empty:
+            return
+        write_lock = getattr(self, "_db_manager", None)
+        write_lock = getattr(write_lock, "_write_lock", None) if write_lock else None
+        if write_lock is not None:
+            write_lock.acquire()
+        try:
+            if not self.con:
+                return
+            self._ensure_tables_exist()
+            # 准备写入数据：把 DatetimeIndex 转为列
+            if isinstance(df.index, pd.DatetimeIndex):
+                df_save = df.reset_index()
+                # reset_index 后列名可能是原 index.name 或 'index'
+                idx_col = df.index.name or "index"
+                if idx_col != "datetime" and idx_col in df_save.columns:
+                    df_save = df_save.rename(columns={idx_col: "datetime"})
+            else:
+                df_save = df.copy()
+            # 统一列名
+            if "time" in df_save.columns and "datetime" not in df_save.columns:
+                df_save = df_save.rename(columns={"time": "datetime"})
+            if "datetime" not in df_save.columns:
+                self._logger.warning("custom_period_bars 写入跳过: 无 datetime 列")
+                return
+            df_save["stock_code"] = stock_code
+            df_save["period"] = period
+            df_save["adjust_type"] = adjust
+            df_save["adj_factor_hash"] = str(adj_factor_hash or "")
+            if "is_partial" not in df_save.columns:
+                df_save["is_partial"] = False
+            # 只保留需要的列（与 DDL 列顺序一致，不含 created_at）
+            target_cols = ["stock_code", "period", "datetime", "open", "high", "low",
+                           "close", "volume", "amount", "adjust_type", "adj_factor_hash", "is_partial"]
+            # amount 列可能不存在，补 0
+            if "amount" not in df_save.columns:
+                df_save["amount"] = 0
+            df_save = df_save[[c for c in target_cols if c in df_save.columns]]
+            # DELETE 旧数据
+            self.con.execute(
+                "DELETE FROM custom_period_bars "
+                "WHERE stock_code = ? AND period = ? AND adjust_type = ?",
+                [stock_code, period, adjust],
+            )
+            # INSERT（显式列名，跳过 created_at DEFAULT）
+            col_list = ", ".join(target_cols)
+            self.con.execute(
+                f"INSERT INTO custom_period_bars ({col_list}) SELECT {col_list} FROM df_save"
+            )
+            self._logger.debug(
+                "custom_period_bars 写入: %s %s %d 行", stock_code, period, len(df_save)
+            )
+        except Exception as exc:
+            self._logger.warning("custom_period_bars 写入失败: %s", exc)
+        finally:
+            if write_lock is not None:
+                write_lock.release()
+
     @staticmethod
     def _resample_ohlcv(df: pd.DataFrame, rule: str) -> Optional[pd.DataFrame]:
         """将细粒度 OHLCV DataFrame resample 到更粗的周期"""
@@ -2849,6 +3122,15 @@ class UnifiedDataInterface:
             resampled["stock_code"] = df["stock_code"].iloc[0]
         return resampled
 
+    @staticmethod
+    def _normalize_date_str(d: str) -> str:
+        """将 'YYYYMMDD' 格式标准化为 'YYYY-MM-DD'（DuckDB DATE/TIMESTAMP 兼容）。"""
+        if d and isinstance(d, str):
+            stripped = d.replace("-", "")
+            if len(stripped) >= 8 and stripped[:8].isdigit() and "-" not in d[:10]:
+                return f"{stripped[:4]}-{stripped[4:6]}-{stripped[6:8]}"
+        return d
+
     def _read_from_duckdb(
         self,
         stock_code: str,
@@ -2860,9 +3142,29 @@ class UnifiedDataInterface:
     ) -> Optional[pd.DataFrame]:
         """从DuckDB读取数据 - 修复版（添加表存在性检查 + 派生周期聚合）"""
         try:
+            start_date = self._normalize_date_str(start_date)
+            end_date = self._normalize_date_str(end_date)
             # --- 派生周期聚合策略 ---
             # ── 日内自定义周期：A股时段对齐，严格收敛于1D黄金标准 ──
             if _allow_aggregate and period in self._INTRADAY_CUSTOM_PERIODS:
+                expected_hash = self._compute_adj_factor_hash(
+                    stock_code=stock_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust=adjust,
+                    source_period="1m",
+                )
+                # 优先读缓存
+                cached = self._read_cached_custom_bars(
+                    stock_code,
+                    period,
+                    start_date,
+                    end_date,
+                    adjust,
+                    expected_adj_factor_hash=expected_hash,
+                )
+                if cached is not None and not cached.empty:
+                    return cached
                 period_minutes = self._INTRADAY_CUSTOM_PERIODS[period]
                 src_1m = self._read_from_duckdb(
                     stock_code, start_date, end_date, "1m", adjust, _allow_aggregate=False
@@ -2875,30 +3177,62 @@ class UnifiedDataInterface:
                     )
                 except Exception:
                     daily_ref = None
-                from data_manager.period_bar_builder import PeriodBarBuilder
-                result = PeriodBarBuilder().build_intraday_bars(
+                result = self._make_period_bar_builder(stock_code=stock_code).build_intraday_bars(
                     data_1m=src_1m, period_minutes=period_minutes, daily_ref=daily_ref
                 )
+                if result is not None and not result.empty:
+                    self._save_custom_period_bars(
+                        result,
+                        stock_code,
+                        period,
+                        adjust,
+                        adj_factor_hash=expected_hash,
+                    )
                 return result if result is not None and not result.empty else None
 
             # ── 多日自定义周期：上市首日左对齐，N交易日≠自然周/月 ──
             if _allow_aggregate and period in self._MULTIDAY_CUSTOM_PERIODS:
-                trading_days = self._MULTIDAY_CUSTOM_PERIODS[period]
                 listing_date = self.get_listing_date(stock_code)
+                expected_hash = self._compute_adj_factor_hash(
+                    stock_code=stock_code,
+                    start_date=listing_date,
+                    end_date=end_date,
+                    adjust=adjust,
+                    source_period="1d",
+                )
+                # 优先读缓存
+                cached = self._read_cached_custom_bars(
+                    stock_code,
+                    period,
+                    start_date,
+                    end_date,
+                    adjust,
+                    expected_adj_factor_hash=expected_hash,
+                )
+                if cached is not None and not cached.empty:
+                    return cached
+                trading_days = self._MULTIDAY_CUSTOM_PERIODS[period]
                 # 刚性约束：必须从上市首日开始拉全历史 1D，才能保证左对齐计数正确
                 src_1d = self._read_from_duckdb(
                     stock_code, listing_date, end_date, "1d", adjust, _allow_aggregate=False
                 )
                 if src_1d is None or src_1d.empty:
                     return src_1d
-                from data_manager.period_bar_builder import PeriodBarBuilder
-                result = PeriodBarBuilder().build_multiday_bars(
+                result = self._make_period_bar_builder(stock_code=stock_code).build_multiday_bars(
                     data_1d=src_1d,
                     trading_days_per_period=trading_days,
                     listing_date=listing_date,
                 )
                 if result is None or result.empty:
                     return None
+                # 写缓存（全量，裁剪前）
+                self._save_custom_period_bars(
+                    result,
+                    stock_code,
+                    period,
+                    adjust,
+                    adj_factor_hash=expected_hash,
+                )
                 # 按用户请求的视图范围裁剪输出（不影响从上市首日起的计数对齐）
                 if start_date:
                     result = result[result["time"] >= pd.Timestamp(start_date)]
@@ -3017,6 +3351,8 @@ class UnifiedDataInterface:
         优先级：XTQuant → DuckDB stock_daily 最早记录 → '1990-01-01'。
         结果内存缓存，频繁画面滚动时无开销。
         """
+        if not hasattr(self, "_listing_date_cache") or not isinstance(self._listing_date_cache, dict):
+            self._listing_date_cache = {}
         cached = self._listing_date_cache.get(stock_code)
         if cached:
             return cached
@@ -3038,7 +3374,7 @@ class UnifiedDataInterface:
                 pass
 
         # 2. DuckDB stock_daily 最早记录
-        if self.duckdb_available and self.con is not None:
+        if bool(getattr(self, "duckdb_available", True)) and self.con is not None:
             try:
                 row = self.con.execute(
                     "SELECT MIN(date) AS d FROM stock_daily WHERE stock_code = ? AND period = '1d'",
@@ -3260,6 +3596,7 @@ class UnifiedDataInterface:
             df = df[["datetime", "lastPrice", "volume", "amount"]].copy()
             df = df.sort_values("datetime")
             df = df.set_index("datetime")
+            df.index.name = None
             return df
         except Exception:
             return None
@@ -3324,14 +3661,19 @@ class UnifiedDataInterface:
             df = self._read_tick_from_qmt(xtdata, stock_code, start_date, end_date)
             if df is None or df.empty:
                 return None, True
+            dt_series = pd.to_datetime(
+                df["datetime"] if "datetime" in df.columns else df.index,
+                errors="coerce",
+            )
             out = pd.DataFrame(
                 {
-                    "datetime": df.index,
-                    "price": df["lastPrice"],
-                    "volume": df["volume"],
-                    "amount": df["amount"],
+                    "datetime": dt_series.to_numpy(),
+                    "price": (df["lastPrice"] if "lastPrice" in df.columns else 0),
+                    "volume": (df["volume"] if "volume" in df.columns else 0),
+                    "amount": (df["amount"] if "amount" in df.columns else 0),
                 }
             )
+            out = out[out["datetime"].notna()]
             out = out.sort_values("datetime")
             out = out.set_index("datetime")
             return out, True
@@ -4144,6 +4486,8 @@ class UnifiedDataInterface:
                 else:
                     if "index" in df_to_save.columns and "datetime" not in df_to_save.columns:
                         df_to_save = df_to_save.rename(columns={"index": "datetime"})
+                    if "time" in df_to_save.columns and "datetime" not in df_to_save.columns:
+                        df_to_save = df_to_save.rename(columns={"time": "datetime"})
             # 最终保险：若仍有重复列名，保留第一个
             if df_to_save.columns.duplicated().any():
                 df_to_save = df_to_save.loc[:, ~df_to_save.columns.duplicated()]
@@ -4182,6 +4526,25 @@ class UnifiedDataInterface:
                 if date_col == "date":
                     df_to_save[date_col] = df_to_save[date_col].dt.date  # type: ignore[union-attr]
                 df_to_save = df_to_save[df_to_save[date_col].notna()]
+            else:
+                # date_col 既不在列中也无法通过重命名获得 — 尝试从 "date"/"datetime"/"time" 兜底
+                fallback_cols = (["date", "time"] if date_col == "datetime" else ["datetime", "time"])
+                found = False
+                for fb in fallback_cols:
+                    if fb in df_to_save.columns:
+                        df_to_save = df_to_save.rename(columns={fb: date_col})
+                        df_to_save[date_col] = pd.to_datetime(df_to_save[date_col], errors="coerce")
+                        if date_col == "date":
+                            df_to_save[date_col] = df_to_save[date_col].dt.date  # type: ignore[union-attr]
+                        df_to_save = df_to_save[df_to_save[date_col].notna()]
+                        found = True
+                        break
+                if not found:
+                    self._logger.error(
+                        "保存跳过: DataFrame 缺少日期列 %r，stock=%s period=%s columns=%s",
+                        date_col, stock_code, period, list(df_to_save.columns),
+                    )
+                    return
             if df_to_save.empty:
                 return
 
@@ -4376,6 +4739,8 @@ class UnifiedDataInterface:
                     _i_rh, _i_set = self._compute_data_lineage(df_ordered)
                 except Exception:
                     _i_rh, _i_set = None, None
+                _ts_start = self._normalize_date_str(_ingest_start) if _ingest_start else _ingest_start
+                _ts_end = self._normalize_date_str(_ingest_end) if _ingest_end else _ingest_end
                 self.con.execute(
                     """
                     INSERT OR REPLACE INTO data_ingestion_status (
@@ -4391,7 +4756,7 @@ class UnifiedDataInterface:
                     """,
                     [
                         stock_code, storage_period,
-                        _ingest_start, _ingest_end,
+                        _ts_start, _ts_end,
                         _ingest_source, "success", len(df_ordered), None,
                         CURRENT_SCHEMA_VERSION, str(uuid.uuid4()), _i_rh, _i_set,
                     ],
@@ -4519,7 +4884,8 @@ class UnifiedDataInterface:
 
     # 已知合法表名的硬编码白名单，防止 f-string SQL 拼接被外部输入利用
     _SAFE_TABLE_NAMES: frozenset[str] = frozenset(
-        {"stock_daily", "stock_1m", "stock_5m", "stock_tick", "stock_transaction", "market_data"}
+        {"stock_daily", "stock_1m", "stock_5m", "stock_tick", "stock_transaction",
+         "market_data", "custom_period_bars"}
     )
 
     def _write_shadow_copy(

@@ -19,6 +19,7 @@ powershell -ExecutionPolicy Bypass -File tools/run_stability_regression.ps1 -Run
 - fallback_recovery_chain：回退与恢复链路
 - convergence_contract_chain：收敛契约链路
 - thread_lifecycle_chain：线程生命周期与图表防崩链路
+- timestamp_contract_chain：事件时间字段契约链路
 
 ## 产物
 

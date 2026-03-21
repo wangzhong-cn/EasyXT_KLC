@@ -23,12 +23,17 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, List, Optional
 
 from strategies.base_strategy import BaseStrategy
 from easyxt_backtest.engine import BacktestConfig, BacktestEngine, BacktestResult
 
 log = logging.getLogger(__name__)
+
+# ── Gate 1: 数据质量门禁 ─────────────────────────────────────────────────────
+# 环境变量 EASYXT_DATA_QUALITY_GATE=0 可关闭（默认开启）
+_DATA_QUALITY_GATE = os.environ.get("EASYXT_DATA_QUALITY_GATE", "1") != "0"
 
 
 class StrategyRunner:
@@ -106,8 +111,59 @@ class StrategyRunner:
             log.warning("AuditTrail 初始化失败，回测将跳过审计链写入")
             return None
 
+    def _check_data_quality_gate(self) -> None:
+        """Gate 1: 自定义周期使用时验证数据质量，不通过则阻断策略执行。
+
+        验证内容:
+        - 多日自定义周期（2d/3d/5d/...）的 listing_date 间隙
+        - 若构建器检测到间隙 > 10 天，视为数据不完整，阻断执行
+        """
+        try:
+            from data_manager.unified_data_interface import UnifiedDataInterface
+            # 只对非基础周期做检查
+            udi = UnifiedDataInterface(duckdb_path=self.duckdb_path)
+            _CUSTOM_MULTIDAY_PERIODS = getattr(udi, "_MULTIDAY_CUSTOM_PERIODS", {})
+            if self.period not in _CUSTOM_MULTIDAY_PERIODS:
+                return
+            # 懒导入避免循环引用
+            from data_manager.period_bar_builder import PeriodBarBuilder
+            trading_days = _CUSTOM_MULTIDAY_PERIODS[self.period]
+            fail_count = 0
+            for code in self.codes[:10]:  # 抽样前 10 只
+                listing_date = udi.get_listing_date(code)
+                src_1d = udi._read_from_duckdb(code, listing_date, self.end_date, "1d", self.adjust, _allow_aggregate=False)
+                if src_1d is None or src_1d.empty:
+                    fail_count += 1
+                    continue
+                builder = PeriodBarBuilder()
+                builder.build_multiday_bars(src_1d, trading_days, listing_date=listing_date)
+                gap = getattr(builder, "_listing_date_gap_days", 0)
+                if gap > 10:
+                    fail_count += 1
+                    log.warning(
+                        "Gate 1: %s listing_date 间隙=%d天，数据不完整",
+                        code, gap,
+                    )
+            _threshold = max(1, len(self.codes[:10]) // 2)
+            if fail_count >= _threshold:
+                raise RuntimeError(
+                    f"Gate 1 数据质量门禁: {fail_count}/{len(self.codes[:10])} 只标的 "
+                    f"listing_date 间隙过大，周期 {self.period} 的左对齐不可靠。"
+                    f"请先运行 bulk_download 补全数据，或设置 EASYXT_DATA_QUALITY_GATE=0 跳过。"
+                )
+        except ImportError:
+            log.debug("Gate 1: 无法导入数据模块，跳过检查")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            log.debug("Gate 1 检查异常: %s", exc)
+
     def run(self) -> BacktestResult:
         """执行回测，返回 :class:`~easyxt_backtest.engine.BacktestResult`。"""
+        # ── Gate 1: 数据质量门禁 ──
+        if _DATA_QUALITY_GATE:
+            self._check_data_quality_gate()
+
         risk_engine = self._build_risk_engine()
         audit_trail = self._build_audit_trail()
 

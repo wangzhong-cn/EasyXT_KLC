@@ -43,6 +43,10 @@ _STRATEGY_TYPE_MAP: Dict[str, tuple[str, str]] = {
         "strategies.trend_following.momentum_factor_strategy",
         "MomentumFactorStrategy",
     ),
+    "hedge": (
+        "strategies.xueqiu_follow_adapter",
+        "XueqiuFollowStrategyAdapter",
+    ),
 }
 
 
@@ -79,4 +83,10 @@ def create_strategy_from_config(config: Any) -> BaseStrategy:
     cls = getattr(mod, class_name)
 
     strategy_id = getattr(config, "strategy_id", strategy_type)
+    if strategy_type == "hedge":
+        params = getattr(config, "parameters", {}) or {}
+        if isinstance(params, dict):
+            config_file = str(params.get("config_file", "config/default.json"))
+            lazy_engine = bool(params.get("lazy_engine", True))
+            return cls(strategy_id=strategy_id, config_file=config_file, lazy_engine=lazy_engine)
     return cls(strategy_id=strategy_id)

@@ -340,7 +340,7 @@ class 自适应网格策略(BaseStrategy):
                     stock_data = price_df[price_df['code'] == stock_code]
                     if not stock_data.empty:
                         return stock_data.iloc[0]['pre_close']
-            except:
+            except Exception:
                 pass
             return None
 
@@ -355,7 +355,7 @@ class 自适应网格策略(BaseStrategy):
                     stock_data = price_df[price_df['code'] == stock_code]
                     if not stock_data.empty:
                         return stock_data.iloc[0]['pre_close']
-            except:
+            except Exception:
                 pass
             return None
 
@@ -691,7 +691,7 @@ class 自适应网格策略(BaseStrategy):
                         if stock_data.empty:
                             continue
                         current_price = stock_data.iloc[0]['price']
-                    except:
+                    except Exception:
                         continue
 
                     # 根据信号执行交易

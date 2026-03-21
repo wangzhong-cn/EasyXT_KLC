@@ -131,6 +131,7 @@ class DataCoverageWidget(QWidget):
         self._coverage_df: Optional[pd.DataFrame] = None
         self._load_thread: Optional[_CoverageLoadThread] = None
         self._download_thread: Optional[_BulkDownloadThread] = None
+        self._closed = False
         self._init_ui()
         self._connect_events()
 
@@ -197,6 +198,19 @@ class DataCoverageWidget(QWidget):
             signal_bus.subscribe(Events.DATA_INGESTION_COMPLETE, self._on_ingestion_complete)
         except Exception:
             pass
+
+    def closeEvent(self, event) -> None:
+        """关闭时：取消事件订阅 + 停止后台线程，避免僵尸对象继续持有 DuckDB 连接。"""
+        self._closed = True
+        try:
+            signal_bus.unsubscribe(Events.DATA_INGESTION_COMPLETE, self._on_ingestion_complete)
+        except Exception:
+            pass
+        for t in (self._load_thread, self._download_thread):
+            if t is not None and t.isRunning():
+                t.quit()
+                t.wait(2000)
+        super().closeEvent(event)
 
     # ─── 公共接口 ─────────────────────────────────────────────────────────────
 
@@ -428,4 +442,6 @@ class DataCoverageWidget(QWidget):
 
     def _on_ingestion_complete(self, **kwargs) -> None:
         """收到 DATA_INGESTION_COMPLETE 事件后自动刷新矩阵。"""
+        if self._closed:
+            return
         self.refresh()

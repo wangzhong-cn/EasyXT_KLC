@@ -52,6 +52,28 @@ def test_stability_evidence_board_peak_ready_logic():
     assert payload["compliance_ratio_pct"] == 100.0
 
 
+def test_stability_evidence_board_includes_period_validation_summary():
+    rows = [
+        {
+            "ts": "2026-03-01T00:00:00Z",
+            "strict_gate_pass": True,
+            "step6_hard_fail_rate": 0.01,
+            "strategy_impact_available": True,
+            "strategy_impact_gate_pass": True,
+        }
+    ]
+    payload = evidence.build_payload(
+        rows,
+        window_days=30,
+        step6_hard_fail_rate_max=0.05,
+        require_strategy_impact=True,
+        period_validation_summary={"report_exists": True, "rows": 12, "failed_rows": 2, "last_failed_period": "25m"},
+    )
+    assert payload["period_validation"]["failed_rows"] == 2
+    md = evidence.render_md(payload)
+    assert "period_validation_failed_rows" in md
+
+
 def test_baseline_manager_updates_file_and_ledger(tmp_path, monkeypatch):
     baseline_path = tmp_path / "baseline.json"
     results_dir = tmp_path / "results"

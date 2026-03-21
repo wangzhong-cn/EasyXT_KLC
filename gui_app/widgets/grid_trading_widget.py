@@ -6,6 +6,7 @@
 
 import importlib.util
 import json
+import logging
 import os
 import sys
 import time
@@ -92,6 +93,9 @@ class StrategyThread(QThread):
         # 请求退出，不在主线程阻塞等待
         self.requestInterruption()
         self.quit()
+
+
+log = logging.getLogger(__name__)
 
 
 class GridTradingWidget(QWidget):
@@ -793,15 +797,18 @@ class GridTradingWidget(QWidget):
         self.stop_btn.setEnabled(False)
 
     def closeEvent(self, event):
-        """关闭时清理策略线程"""
+        """关闭时清理策略线程和定时器"""
         try:
+            if hasattr(self, 'update_timer'):
+                self.update_timer.stop()
             if self.strategy_thread and self.strategy_thread.isRunning():
                 self.strategy_thread.stop()  # stop() 内部已 requestInterruption+quit
                 t0 = time.monotonic()
                 finished = self.strategy_thread.wait(500)
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
                 status = "已退出" if finished else "超时未退出"
-                print(f"[closeEvent] GridTradingWidget - {self.strategy_thread.__class__.__name__}: {status} ({elapsed_ms}ms)")
+                log.debug("[closeEvent] GridTradingWidget - %s: %s (%dms)",
+                          self.strategy_thread.__class__.__name__, status, elapsed_ms)
         finally:
             super().closeEvent(event)
 

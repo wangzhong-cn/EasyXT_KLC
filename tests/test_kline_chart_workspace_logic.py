@@ -928,6 +928,23 @@ class TestThreadSafetyHelpers:
         assert KLineChartWorkspace._is_thread_running(stub, t_false) is False
         assert KLineChartWorkspace._is_thread_running(stub, None) is False
 
+    def test_drain_owned_threads_stops_running_threads(self):
+        t_running = MagicMock()
+        t_running.isRunning.return_value = True
+        t_running.wait.return_value = False
+        t_stopped = MagicMock()
+        t_stopped.isRunning.return_value = False
+        stub = _make_stub(findChildren=lambda cls: [t_running, t_stopped])
+        KLineChartWorkspace._drain_owned_threads(stub)
+        assert t_running.requestInterruption.called
+        assert t_running.quit.called
+        assert t_running.terminate.called
+        assert not t_stopped.requestInterruption.called
+
+    def test_drain_owned_threads_handles_findchildren_failure(self):
+        stub = _make_stub(findChildren=MagicMock(side_effect=RuntimeError("qt object deleted")))
+        KLineChartWorkspace._drain_owned_threads(stub)
+
 
 class TestNormalizeRealtimeQuote:
     def test_normalize_supports_nested_data_and_last_price(self):
@@ -948,6 +965,14 @@ class TestNormalizeRealtimeQuote:
         assert normalized["bid1"] == 11.29
         assert normalized["ask1_vol"] == 1200
         assert normalized["bid1_vol"] == 800
+
+    def test_normalize_maps_event_timestamp_fields(self):
+        stub = _make_stub()
+        quote = {"price": 11.30, "event_ts_ms": 1773000000123, "source_event_ts_ms": 1772999999123}
+        normalized = KLineChartWorkspace._normalize_realtime_quote(stub, quote)
+        assert normalized["timestamp"] == 1772999999123
+        assert normalized["event_ts_ms"] == 1773000000123
+        assert normalized["source_event_ts_ms"] == 1772999999123
 
 
 class TestRealtimeBarConstruction:
@@ -1085,6 +1110,20 @@ class TestRealtimeBarConstruction:
         KLineChartWorkspace._apply_realtime_quote(stub, quote, "000988.SZ")
         assert len(stub.last_data) == len(before)
         assert stub.last_data.iloc[-1]["time"] == before.iloc[-1]["time"]
+
+    def test_resolve_timestamp_prefers_source_event_ts_ms(self):
+        stub = _make_stub()
+        import types as _types
+        stub._coerce_timestamp = _types.MethodType(KLineChartWorkspace._coerce_timestamp, stub)
+        ts = KLineChartWorkspace._resolve_quote_timestamp(
+            stub,
+            {
+                "time": "2026-03-17 18:05:00",
+                "event_ts_ms": int(pd.Timestamp("2026-03-17 14:59:32").timestamp() * 1000),
+                "source_event_ts_ms": int(pd.Timestamp("2026-03-17 14:59:31").timestamp() * 1000),
+            },
+        )
+        assert str(ts).startswith("2026-03-17 14:59:31")
 
 
 class TestFallbackBarConstruction:

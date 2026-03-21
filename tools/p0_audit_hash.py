@@ -66,6 +66,8 @@ def record() -> None:
                 "P0_open_count": g.get("P0_open_count"),
                 "active_critical_high": g.get("active_critical_high"),
                 "gate_version": g.get("gate_version"),
+                "gate_contract_valid": g.get("gate_contract_valid"),
+                "gate_contract_version": g.get("gate_contract_version"),
             }
         except (json.JSONDecodeError, KeyError):
             pass

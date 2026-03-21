@@ -659,7 +659,7 @@ class TestDatFileFresh:
 
     def test_qmt_base_none(self):
         udi = self._make_udi()
-        with patch.object(type(udi), "_load_qmt_base_from_config", return_value=None, create=True):
+        with patch("data_manager.dat_binary_reader._load_qmt_base_from_config", return_value=None):
             result = udi._dat_file_is_fresh("600519.SH", "1d")
         assert result is False
 
@@ -807,15 +807,12 @@ class TestConnectionPoolCheckpoint:
 
     def test_checkpoint_success(self):
         mgr = self._make_mgr()
-        mock_con = MagicMock()
-        mgr.get_write_connection = MagicMock(return_value=MagicMock(
-            __enter__=MagicMock(return_value=mock_con),
-            __exit__=MagicMock(return_value=False),
-        ))
+        # :memory: 路径会短路返回 True，无需 mock
         assert mgr.checkpoint() is True
 
     def test_checkpoint_failure(self):
         mgr = self._make_mgr()
+        mgr.duckdb_path = "/tmp/test.duckdb"  # 非 :memory: 路径才会走完整逻辑
         mgr.get_write_connection = MagicMock(side_effect=Exception("locked"))
         assert mgr.checkpoint() is False
 

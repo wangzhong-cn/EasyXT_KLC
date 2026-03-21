@@ -1040,7 +1040,7 @@ def test_verify_data_thread_normal_path_emits_logs_and_result(qapp):
         def __init__(self):
             self.closed = False
 
-        def execute(self, sql):
+        def execute(self, sql, params=None):
             if "FROM stock_1m" in sql:
                 return DummyCursor((10000, "2024-01-01", "2024-12-31"))
             if "FROM stock_daily" in sql:
@@ -1263,6 +1263,7 @@ class TestKLineWorkspaceExitStability:
 
         signal_bus.subscribe(Events.THREAD_FORCED_TERMINATE, _handler)
         ws = KLineChartWorkspace()
+        stuck = None
         try:
             class _StuckThread(QThread):
                 def run(self):
@@ -1277,6 +1278,10 @@ class TestKLineWorkspaceExitStability:
             ws.close()
         finally:
             signal_bus.unsubscribe(Events.THREAD_FORCED_TERMINATE, _handler)
-
+            # 使用类方法调用（绕过 monkeypatch 的实例属性覆盖），确保 stuck 线程
+            # 真正结束，避免 GC 时 QThread 析构报 "Destroyed while thread running"
+            if stuck is not None:
+                stuck.terminate()
+                QThread.wait(stuck, 2000)  # 类方法调用，绕过实例级 wait 覆盖
         assert events_received, "强杀后应发出 THREAD_FORCED_TERMINATE 事件"
         assert events_received[0]["thread_name"] == "_RealtimeConnectThread"

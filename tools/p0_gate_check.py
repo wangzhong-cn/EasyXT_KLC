@@ -13,6 +13,7 @@ P0 门禁检查脚本 v2 — EasyXT 数据基础设施放行铁门槛
   python tools/p0_gate_check.py --check sql          # 仅检查 SQL 注入（AST 级）
   python tools/p0_gate_check.py --check xtdata       # 仅检查 xtdata 裸导入
   python tools/p0_gate_check.py --check sla          # 仅检查最新 SLA 日报门禁
+  python tools/p0_gate_check.py --check fake_ohlcv   # 仅检查测试中伪造 OHLCV（红线扫描，warn 级）
   python tools/p0_gate_check.py --save-baseline      # 保存当前违规为 baseline（首次运行或批量接受技术债）
   python tools/p0_gate_check.py --json               # JSON 输出（CI 解析用）
 
@@ -53,6 +54,24 @@ BASELINE_FILE = PROJECT_ROOT / ".p0_baseline.json"
 
 # 脚本版本号：与 baseline 签名绑定，跨版本使用旧 baseline 时会发出警告
 SCRIPT_VERSION = "2.4.0"
+
+try:
+    from tools.release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary
+except Exception:
+    try:
+        from release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary
+    except Exception:
+        gate_detail_tag = None
+        header_rag_status = None
+        parse_gate_detail_tag = None
+        period_validation_summary = None
+try:
+    from tools.duckdb_crash_signature_gate import scan_duckdb_crash_signatures
+except Exception:
+    try:
+        from duckdb_crash_signature_gate import scan_duckdb_crash_signatures
+    except Exception:
+        scan_duckdb_crash_signatures = None
 
 
 def _get_git_commit() -> str:
@@ -1020,6 +1039,49 @@ def check_duckdb_write_probe() -> CheckResult:
     return CheckResult("duckdb_write_probe", "pass", f"DuckDB 写入探针通过: {db_file}")
 
 
+def check_duckdb_crash_signature_gate() -> CheckResult:
+    if not callable(scan_duckdb_crash_signatures):
+        return CheckResult("duckdb_crash_signature_gate", "skip", "duckdb_crash_signature_gate 不可用")
+    extra = os.environ.get("EASYXT_DUCKDB_CRASH_SCAN_EXTRA_PATHS", "")
+    extra_paths = [p.strip() for p in str(extra).split(";") if p.strip()]
+    max_age_raw = os.environ.get("EASYXT_DUCKDB_CRASH_SCAN_MAX_AGE_HOURS", "24")
+    try:
+        max_age_hours: float | None = float(max_age_raw) if str(max_age_raw).strip() else None
+    except Exception:
+        max_age_hours = 24.0
+    baseline_path = os.environ.get("EASYXT_DUCKDB_CRASH_BASELINE", "artifacts/duckdb_crash_baseline.json")
+    report = scan_duckdb_crash_signatures(
+        extra_paths=extra_paths,
+        max_age_hours=max_age_hours,
+        baseline_path=baseline_path,
+    )
+    hit_count = int(report.get("hit_count", 0) or 0)
+    if hit_count <= 0:
+        return CheckResult(
+            "duckdb_crash_signature_gate",
+            "pass",
+            f"DuckDB 崩溃签名扫描通过（files={int(report.get('files_scanned', 0) or 0)}）",
+        )
+    violations: list[Violation] = []
+    for row in list(report.get("hits", []) or [])[:20]:
+        if not isinstance(row, dict):
+            continue
+        violations.append(
+            Violation(
+                location=f"{row.get('file', '')}:{row.get('line', '')}",
+                message=f"DuckDB 崩溃签名命中: {row.get('message', '')}",
+                severity="high",
+                fix_hint="检查 checkpoint 线程、并发写入与退出阶段连接回收；复现后更新 DuckDB 专项策略",
+            )
+        )
+    return CheckResult(
+        "duckdb_crash_signature_gate",
+        "fail",
+        f"DuckDB 崩溃签名命中 {hit_count} 条",
+        violations,
+    )
+
+
 def check_realtime_quote_contract() -> CheckResult:
     violations: list[Violation] = []
 
@@ -1405,6 +1467,297 @@ def check_governance_nightly_jobs() -> CheckResult:
     return CheckResult("governance_nightly_jobs_check", status, detail, violations)
 
 
+def check_period_validation_report() -> CheckResult:
+    report_file = pathlib.Path(
+        os.environ.get(
+            "EASYXT_PERIOD_VALIDATION_REPORT_PATH",
+            str(PROJECT_ROOT / "artifacts" / "period_validation_report.jsonl"),
+        )
+    )
+    if not report_file.is_absolute():
+        report_file = (PROJECT_ROOT / report_file).resolve()
+    block_fail = os.environ.get("EASYXT_PERIOD_VALIDATION_FAIL_BLOCK", "1") in ("1", "true", "True")
+    if not report_file.exists():
+        if block_fail:
+            return CheckResult(
+                "period_validation_report_check",
+                "fail",
+                "缺少周期校验报告 period_validation_report.jsonl",
+                [
+                    Violation(
+                        location=str(report_file),
+                        message="周期校验报告缺失",
+                        severity="high",
+                        fix_hint="执行派生周期构建与 cross_validate，生成周期校验报告",
+                    )
+                ],
+            )
+        return CheckResult("period_validation_report_check", "skip", "未发现周期校验报告（阻断开关关闭）")
+    try:
+        lines = report_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception as e:
+        return CheckResult(
+            "period_validation_report_check",
+            "fail",
+            f"周期校验报告读取失败: {e}",
+            [
+                Violation(
+                    location=str(report_file),
+                    message=f"读取失败: {e}",
+                    severity="high",
+                    fix_hint="检查报告文件编码与权限",
+                )
+            ],
+        )
+    failures: list[dict] = []
+    malformed = 0
+    schema_invalid = 0
+    for raw in lines[-500:]:
+        s = raw.strip()
+        if not s:
+            continue
+        try:
+            obj = json.loads(s)
+        except Exception:
+            malformed += 1
+            continue
+        if not isinstance(obj, dict):
+            malformed += 1
+            continue
+        details = obj.get("details", [])
+        if details is None:
+            details = []
+        if not isinstance(details, list):
+            schema_invalid += 1
+            continue
+        required_detail_keys = {"metric", "actual", "expected", "delta"}
+        for item in details:
+            if not isinstance(item, dict):
+                schema_invalid += 1
+                break
+            if not required_detail_keys.issubset(set(item.keys())):
+                schema_invalid += 1
+                break
+        if bool(obj.get("is_valid", True)) is False:
+            failures.append(obj)
+    violations: list[Violation] = []
+    if malformed > 0:
+        violations.append(
+            Violation(
+                location=str(report_file),
+                message=f"周期校验报告存在 {malformed} 行非法JSON",
+                severity="medium",
+                fix_hint="修复报告生成器，保证每行均为合法 JSON 对象",
+            )
+        )
+    if schema_invalid > 0:
+        violations.append(
+            Violation(
+                location=str(report_file),
+                message=f"周期校验报告存在 {schema_invalid} 行 details schema 非法",
+                severity="high" if block_fail else "medium",
+                fix_hint="确保 details 为列表，且每个条目包含 metric/actual/expected/delta",
+            )
+        )
+    if failures:
+        for item in failures[-5:]:
+            period = str(item.get("period") or "unknown")
+            detail = ""
+            if isinstance(item.get("errors"), list) and item.get("errors"):
+                detail = str(item["errors"][0])
+            elif isinstance(item.get("warnings"), list) and item.get("warnings"):
+                detail = str(item["warnings"][0])
+            violations.append(
+                Violation(
+                    location=f"{report_file}:period={period}",
+                    message=f"周期校验失败 period={period} detail={detail[:160]}",
+                    severity="high" if block_fail else "medium",
+                    fix_hint="修复对应周期构建规则并重新执行 cross_validate",
+                )
+            )
+    if failures and block_fail:
+        return CheckResult(
+            "period_validation_report_check",
+            "fail",
+            f"周期校验报告失败 {len(failures)} 条",
+            violations,
+        )
+    if schema_invalid > 0 and block_fail:
+        return CheckResult(
+            "period_validation_report_check",
+            "fail",
+            f"周期校验报告 details schema 非法 {schema_invalid} 条",
+            violations,
+        )
+    if failures:
+        return CheckResult(
+            "period_validation_report_check",
+            "warn",
+            f"周期校验报告失败 {len(failures)} 条（阻断开关关闭）",
+            violations,
+        )
+    status: Status = "warn" if (malformed > 0 or schema_invalid > 0) else "pass"
+    if malformed == 0 and schema_invalid == 0:
+        detail = "周期校验报告通过"
+    elif malformed > 0 and schema_invalid == 0:
+        detail = "周期校验报告通过，但存在非法JSON行"
+    elif malformed == 0:
+        detail = "周期校验报告通过，但存在 details schema 非法行"
+    else:
+        detail = "周期校验报告通过，但存在非法JSON与details schema非法行"
+    return CheckResult("period_validation_report_check", status, detail, violations)
+
+
+def check_watchdog_slo_gate() -> CheckResult:
+    """读取主线程延迟日志，连续 SLO 违规次数达阈值则阻断。"""
+    threshold = int(os.environ.get("EASYXT_WATCHDOG_SLO_CONSECUTIVE_FAIL_THRESHOLD", "3") or 3)
+    log_path = pathlib.Path(
+        os.environ.get("EASYXT_WATCHDOG_LOG_PATH", "") or str(PROJECT_ROOT / "logs" / "main_thread_latency.log")
+    )
+    if not log_path.is_absolute():
+        log_path = (PROJECT_ROOT / log_path).resolve()
+    if not log_path.exists():
+        return CheckResult("watchdog_slo_gate", "skip", "主线程延迟日志不存在，跳过 SLO 门禁")
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception as exc:
+        return CheckResult(
+            "watchdog_slo_gate",
+            "fail",
+            f"主线程延迟日志读取失败: {exc}",
+            [Violation(location=str(log_path), message=str(exc), severity="high", fix_hint="检查日志文件权限")],
+        )
+    # 从末尾统计连续 slo_violation=true 条目
+    # 优先使用最新条目的 consecutive_violations 字段（watchdog 守护线程内准确追踪）；
+    # 回退方案：反向扫描，但若相邻条目时间戳间隔 > 5 分钟则视为独立违规簇并中止计数。
+    consecutive = 0
+    last_ts: datetime.datetime | None = None
+    _max_gap_s = 300  # 相邻窗口最大允许间隔（秒）；60s 窗口间隔，留 5× 缓冲
+    last_valid_obj: dict | None = None
+    for raw in reversed(lines[-200:]):
+        s = raw.strip()
+        if not s:
+            continue
+        try:
+            obj = json.loads(s)
+        except Exception:
+            break
+        if not isinstance(obj, dict):
+            break
+        # 解析时间戳以检测跨会话间隙
+        curr_ts: datetime.datetime | None = None
+        try:
+            curr_ts = datetime.datetime.fromisoformat(obj.get("ts", ""))
+        except Exception:
+            pass
+        if last_ts is not None and curr_ts is not None:
+            gap = abs((last_ts - curr_ts).total_seconds())
+            if gap > _max_gap_s:
+                break  # 跨越独立会话，不应合并计数
+        if obj.get("slo_violation") is True:
+            # 若有可信的会话级计数字段，直接从最新条目读取
+            if last_valid_obj is None:
+                last_valid_obj = obj
+                if isinstance(obj.get("consecutive_violations"), int):
+                    consecutive = obj["consecutive_violations"]
+                    break
+            consecutive += 1
+        else:
+            break
+        last_ts = curr_ts
+    if consecutive >= threshold:
+        return CheckResult(
+            "watchdog_slo_gate",
+            "fail",
+            f"主线程 p99 延迟 SLO 连续违规 {consecutive} 次（阈值={threshold}）",
+            [
+                Violation(
+                    location=str(log_path),
+                    message=f"连续 {consecutive} 个 60s 窗口 p99 > SLO",
+                    severity="high",
+                    fix_hint="排查主线程阻塞（DB 查询/UI 渲染/网络 IO），降低 GIL 争用",
+                )
+            ],
+        )
+    return CheckResult(
+        "watchdog_slo_gate",
+        "pass",
+        f"主线程延迟 SLO 正常（当前连续违规={consecutive}，阈值={threshold}）",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 红线扫描：测试中伪造 OHLCV 检测
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 常见伪造行情模式——匹配 tests/ 下 Python 文件中硬编码的 OHLCV 字段赋值
+_FAKE_OHLCV_PATTERNS = [
+    # 'open': [数字, ...] / 'close': [数字, ...] / 'high' / 'low' / 'volume'
+    re.compile(
+        r"""['"](?:open|high|low|close|volume)['"]\s*:\s*\[\s*\d+""",
+        re.IGNORECASE,
+    ),
+    # DataFrame({'close': [10, 15]})
+    re.compile(
+        r"""DataFrame\s*\(\s*\{[^}]*['"](?:open|high|low|close|volume)['"]\s*:\s*\[""",
+        re.IGNORECASE,
+    ),
+]
+
+# 白名单路径后缀——这些文件/目录中的匹配不视为违规
+_FAKE_OHLCV_EXEMPTIONS = {
+    "tests/fixtures/real_market_data.py",     # 真实数据 fixture
+    "tests/fixtures/",                        # fixture 目录
+    "tests/conftest.py",                      # 共享 fixture
+}
+
+
+def check_fake_ohlcv_in_tests() -> CheckResult:
+    """
+    红线巡检：扫描 tests/ 中硬编码的伪造 OHLCV 行情数据。
+    当前为 warn 级（不阻断），用于早期预警。
+
+    依据：development_rules.md 铁律 0 补充——红线 vs 白线
+    """
+    tests_root = PROJECT_ROOT / "tests"
+    if not tests_root.exists():
+        return CheckResult("fake_ohlcv_scan", "skip", "tests/ 目录不存在")
+
+    raw_violations: list[Violation] = []
+
+    for py_file in tests_root.rglob("*.py"):
+        rel = py_file.relative_to(PROJECT_ROOT).as_posix()
+        # 跳过豁免路径
+        if any(rel.startswith(ex) or rel == ex for ex in _FAKE_OHLCV_EXEMPTIONS):
+            continue
+        try:
+            src = py_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for i, line in enumerate(src.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            for pat in _FAKE_OHLCV_PATTERNS:
+                if pat.search(stripped):
+                    raw_violations.append(Violation(
+                        location=f"{rel}:{i}",
+                        message=f"疑似伪造 OHLCV: {stripped[:80]}",
+                        severity="medium",
+                        fix_hint="改用 tests/fixtures/real_market_data.py 中的真实数据，或确认此处属于白线（基础设施桩）",
+                    ))
+                    break  # 同一行不重复报
+
+    # 当前为 warn 级，不阻断
+    if raw_violations:
+        status: Status = "warn"
+        detail = f"发现 {len(raw_violations)} 处疑似伪造 OHLCV（warn 级，暂不阻断）"
+    else:
+        status = "pass"
+        detail = "测试代码红线扫描通过：未发现伪造 OHLCV"
+    return CheckResult("fake_ohlcv_scan", status, detail, raw_violations)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 注册表
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1417,14 +1770,18 @@ ALL_CHECKS: dict[str, object] = {
     "publish":     check_atomic_publish,
     "sla":         check_sla_gate,
     "duckdb_write": check_duckdb_write_probe,
+    "duckdb_crash": check_duckdb_crash_signature_gate,
     "realtime":    check_realtime_quote_contract,
     "intraday_bar": check_intraday_bar_semantic_guard,
     "governance_nightly": check_governance_nightly_jobs,
+    "period_validation": check_period_validation_report,
     "schema":      check_schema_version,
     "allowlist":   check_allowlist_governance,
+    "watchdog_slo": check_watchdog_slo_gate,
+    "fake_ohlcv": check_fake_ohlcv_in_tests,
 }
 
-P0_CHECKS = {"credential", "sql", "timestamp", "xtdata", "publish", "sla", "duckdb_write", "realtime", "intraday_bar", "governance_nightly", "allowlist"}
+P0_CHECKS = {"credential", "sql", "timestamp", "xtdata", "publish", "sla", "duckdb_write", "duckdb_crash", "realtime", "intraday_bar", "governance_nightly", "period_validation", "allowlist", "watchdog_slo"}
 P0_RESULT_NAMES = {
     "credential_scan",
     "sql_injection_scan",
@@ -1433,10 +1790,13 @@ P0_RESULT_NAMES = {
     "snapshot_publish_atomic",
     "sla_daily_gate",
     "duckdb_write_probe",
+    "duckdb_crash_signature_gate",
     "realtime_quote_contract_check",
     "intraday_bar_semantic_guard",
     "governance_nightly_jobs_check",
+    "period_validation_report_check",
     "allowlist_governance",
+    "watchdog_slo_gate",
 }
 
 
@@ -1667,6 +2027,80 @@ def _extract_watermark_profile_approval_detail() -> dict[str, object]:
     }
 
 
+def _extract_period_validation_detail(results: list[CheckResult]) -> dict[str, object]:
+    target = next((r for r in results if r.name == "period_validation_report_check"), None)
+    if target is None:
+        return {
+            "status": "missing",
+            "failed_items": 0,
+            "recommended_action": "运行完整门禁: python tools/p0_gate_check.py --strict --json",
+            "message": "period_validation_report_check 未执行",
+        }
+    return {
+        "status": target.status,
+        "failed_items": len(target.violations),
+        "recommended_action": (target.violations[0].fix_hint if target.violations else ""),
+        "message": target.detail,
+    }
+
+
+def _load_artifact_json(name: str) -> dict[str, object]:
+    path = PROJECT_ROOT / "artifacts" / name
+    if not path.exists():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _build_gate_contract_summary(
+    *,
+    strict_gate_pass: bool,
+    p0_open_count: int,
+    active_critical_high: int,
+    period_validation_detail: dict[str, object],
+) -> dict[str, object]:
+    if not callable(gate_detail_tag) or not callable(header_rag_status) or not callable(parse_gate_detail_tag) or not callable(period_validation_summary):
+        return {
+            "gate_detail_tag": "",
+            "gate_contract_valid": False,
+            "gate_contract_version": 0,
+            "gate_contract_error": "release_rag_policy_unavailable",
+            "gate_contract_rag": "",
+        }
+    stability_evidence = _load_artifact_json("stability_evidence_30d.json")
+    peak_release_gate = _load_artifact_json("peak_release_gate_latest.json")
+    pv_failed, pv_max = period_validation_summary(stability_evidence, peak_release_gate)
+    if pv_failed == 0 and pv_max == 0:
+        pv_failed = int(period_validation_detail.get("failed_items", 0) or 0)
+    peak_level = str(peak_release_gate.get("level", "") or "").lower()
+    rag_status = header_rag_status(
+        bool(strict_gate_pass),
+        int(p0_open_count or 0),
+        int(active_critical_high or 0),
+        peak_level,
+        int(pv_failed),
+        int(pv_max),
+    )
+    gate_tag = gate_detail_tag(
+        rag_status,
+        int(pv_failed),
+        int(pv_max),
+        message=str(period_validation_detail.get("message") or ""),
+        action=str(period_validation_detail.get("recommended_action") or ""),
+    )
+    parsed = parse_gate_detail_tag(gate_tag)
+    return {
+        "gate_detail_tag": gate_tag,
+        "gate_contract_valid": bool(parsed.get("ok", False)),
+        "gate_contract_version": int(parsed.get("version", 0) or 0),
+        "gate_contract_error": str(parsed.get("error", "") or ""),
+        "gate_contract_rag": str(parsed.get("rag", "") or ""),
+    }
+
+
 def _build_json_output(results: list[CheckResult], *, new_only: bool) -> dict[str, object]:
     p0_names = _p0_names()
     sev_counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
@@ -1694,12 +2128,14 @@ def _build_json_output(results: list[CheckResult], *, new_only: bool) -> dict[st
                     al_due_90d += 1
             except (ValueError, AttributeError):
                 pass
+    period_validation_detail = _extract_period_validation_detail(results)
+    strict_gate_pass = p0_fail_count == 0 and active_ch == 0
     output = {
         "script_version": SCRIPT_VERSION,
         "mode": "new_only" if new_only else "full",
         "P0_open_count": p0_fail_count,
         "active_critical_high": active_ch,
-        "strict_gate_pass": p0_fail_count == 0 and active_ch == 0,
+        "strict_gate_pass": strict_gate_pass,
         "strict_pass": all(
             r.status in ("pass", "warn", "skip")
             for r in results if r.name in p0_names
@@ -1714,8 +2150,19 @@ def _build_json_output(results: list[CheckResult], *, new_only: bool) -> dict[st
         "watermark_quality_detail": _extract_watermark_quality_detail(),
         "watermark_profile_audit_detail": _extract_watermark_profile_audit_detail(),
         "watermark_profile_approval_detail": _extract_watermark_profile_approval_detail(),
+        "period_validation_detail": period_validation_detail,
         "checks": [r.to_dict() for r in results],
     }
+    contract_summary = _build_gate_contract_summary(
+        strict_gate_pass=strict_gate_pass,
+        p0_open_count=p0_fail_count,
+        active_critical_high=active_ch,
+        period_validation_detail=period_validation_detail,
+    )
+    output.update(contract_summary)
+    gate_contract_valid = bool(output.get("gate_contract_valid", False))
+    output["contract_health"] = "HEALTHY" if gate_contract_valid else "BROKEN"
+    output["strict_gate_pass"] = bool(strict_gate_pass and gate_contract_valid)
     return output
 
 

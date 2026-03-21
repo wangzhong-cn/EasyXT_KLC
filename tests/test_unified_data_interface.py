@@ -8,6 +8,7 @@ UnifiedDataInterface 集成级测试
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
@@ -1075,9 +1076,10 @@ class TestReadFromQmtEndDateFix:
         mock_xtdata.get_market_data_ex.side_effect = _gmde
         fake_xtquant = types.ModuleType("xtquant")
         fake_xtquant.xtdata = mock_xtdata  # type: ignore[attr-defined]
-        with patch.dict("sys.modules", {"xtquant": fake_xtquant, "xtquant.xtdata": mock_xtdata}):
-            udi = self._make_udi()
-            _ = udi._read_from_qmt("000988.SZ", "2099-01-01", "2099-01-02", "1d")
+        with patch.dict(os.environ, {"EASYXT_ENABLE_QMT_ONLINE": "1"}):
+            with patch.dict("sys.modules", {"xtquant": fake_xtquant, "xtquant.xtdata": mock_xtdata}):
+                udi = self._make_udi()
+                _ = udi._read_from_qmt("000988.SZ", "2099-01-01", "2099-01-02", "1d")
 
         today = pd.Timestamp.today().normalize()
         expected_end = today.strftime("%Y%m%d")
@@ -1102,6 +1104,22 @@ class TestReadFromQmtEndDateFix:
 
 
 class TestReadFromQmtEdgeCases:
+    def test_qmt_disabled_by_env_returns_none_without_import(self):
+        import builtins
+
+        _orig_import = builtins.__import__
+
+        def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name.startswith("xtquant"):
+                raise AssertionError("xtquant should not be imported when QMT is disabled")
+            return _orig_import(name, globals, locals, fromlist, level)
+
+        udi = _make_udi()
+        with patch.dict(os.environ, {"EASYXT_ENABLE_QMT_ONLINE": "0"}):
+            with patch("builtins.__import__", side_effect=_guarded_import):
+                result = udi._read_from_qmt("000001.SZ", "2024-01-01", "2024-01-31", "1d")
+        assert result is None
+
     def test_qmt_dict_without_target_symbol_returns_none(self):
         import types
 
@@ -1134,8 +1152,9 @@ class TestReadFromQmtEdgeCases:
         mock_xtdata.get_market_data_ex.return_value = {"000001.SZ": fake_df}
         fake_xtquant = types.ModuleType("xtquant")
         fake_xtquant.xtdata = mock_xtdata  # type: ignore[attr-defined]
-        with patch.dict("sys.modules", {"xtquant": fake_xtquant, "xtquant.xtdata": mock_xtdata}):
-            result = udi._read_from_qmt("000001.SZ", "2024-01-01", "2024-01-31", "1d")
+        with patch.dict(os.environ, {"EASYXT_ENABLE_QMT_ONLINE": "1"}):
+            with patch.dict("sys.modules", {"xtquant": fake_xtquant, "xtquant.xtdata": mock_xtdata}):
+                result = udi._read_from_qmt("000001.SZ", "2024-01-01", "2024-01-31", "1d")
         assert isinstance(result, pd.DataFrame)
         assert "volume" in result.columns and "amount" in result.columns
         assert (result["volume"] == 0).all()

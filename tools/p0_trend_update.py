@@ -36,6 +36,16 @@ DEFAULT_GOV_JSON = ARTIFACTS_DIR / "governance_metrics_latest.json"
 DEFAULT_KEEP_DAYS = 60
 
 
+def _contract_health(valid: bool, version: int, error: str) -> str:
+    if not bool(valid):
+        return "BROKEN"
+    if int(version or 0) <= 0:
+        return "BROKEN"
+    if str(error or "").strip():
+        return "BROKEN"
+    return "HEALTHY"
+
+
 def _load_gate(gate_json: pathlib.Path) -> dict:
     if not gate_json.exists():
         print(f"[FAIL] 门禁结果文件不存在: {gate_json}", file=sys.stderr)
@@ -64,6 +74,14 @@ def _save_history(history: list, keep_days: int) -> list:
 
 
 def _make_row(gate: dict, ts: str) -> dict:
+    period_validation_detail = (
+        gate.get("period_validation_detail")
+        if isinstance(gate.get("period_validation_detail"), dict)
+        else {}
+    )
+    gate_contract_valid = bool(gate.get("gate_contract_valid", False))
+    gate_contract_version = int(gate.get("gate_contract_version", 0) or 0)
+    gate_contract_error = str(gate.get("gate_contract_error", "") or "")
     row: dict = {
         "ts": ts,
         "strict_gate_pass": gate.get("strict_gate_pass", False),
@@ -72,6 +90,14 @@ def _make_row(gate: dict, ts: str) -> dict:
         "allowlist_total": gate.get("allowlist_total", 0),
         "allowlist_expired": gate.get("allowlist_expired", 0),
         "allowlist_due_90d": gate.get("allowlist_due_90d", 0),
+        "period_validation_status": str(period_validation_detail.get("status") or ""),
+        "period_validation_failed_items": int(period_validation_detail.get("failed_items", 0) or 0),
+        "gate_contract_valid": gate_contract_valid,
+        "gate_contract_version": gate_contract_version,
+        "gate_contract_error": gate_contract_error,
+        "gate_contract_rag": str(gate.get("gate_contract_rag", "") or ""),
+        "gate_detail_tag": str(gate.get("gate_detail_tag", "") or ""),
+        "contract_health": _contract_health(gate_contract_valid, gate_contract_version, gate_contract_error),
         "checks": {},
     }
     for c in gate.get("checks", []):
@@ -109,6 +135,13 @@ def _render_dashboard(history: list) -> str:
     sgp = latest.get("strict_gate_pass", False)
     ach = latest.get("ach", -1)
     po = latest.get("P0_open", -1)
+    pv_failed = int(latest.get("period_validation_failed_items", 0) or 0)
+    gate_contract_valid = bool(latest.get("gate_contract_valid", False))
+    gate_contract_version = int(latest.get("gate_contract_version", 0) or 0)
+    gate_contract_error = str(latest.get("gate_contract_error", "") or "")
+    gate_contract_rag = str(latest.get("gate_contract_rag", "") or "")
+    gate_detail_tag = str(latest.get("gate_detail_tag", "") or "")
+    contract_health = str(latest.get("contract_health") or _contract_health(gate_contract_valid, gate_contract_version, gate_contract_error))
 
     # 趋势列表（最近 14 条）
     recent = history[-14:]
@@ -116,7 +149,12 @@ def _render_dashboard(history: list) -> str:
     for r in recent:
         date = r["ts"][:10]
         gate_ok = "✅" if r.get("strict_gate_pass") else "❌"
-        trend_rows += f"| {date} | {gate_ok} | {r.get('P0_open', '?')} | {r.get('ach', '?')} |\n"
+        contract_ok = "✅" if bool(r.get("gate_contract_valid", False)) else "❌"
+        contract_health_item = str(r.get("contract_health") or _contract_health(bool(r.get("gate_contract_valid", False)), int(r.get("gate_contract_version", 0) or 0), str(r.get("gate_contract_error", "") or "")))
+        trend_rows += (
+            f"| {date} | {gate_ok} | {r.get('P0_open', '?')} | {r.get('ach', '?')} "
+            f"| {r.get('period_validation_failed_items', 0)} | {contract_ok} | {contract_health_item} |\n"
+        )
 
     # 各检查项状态（取最新一条）
     check_rows = ""
@@ -138,12 +176,19 @@ def _render_dashboard(history: list) -> str:
 | strict_gate_pass | **{overall_sym}** |
 | P0_open_count | {po} |
 | active_critical_high | {ach} |
+| period_validation_failed_items | {pv_failed} |
+| gate_contract_valid | {'✅ True' if gate_contract_valid else '❌ False'} |
+| gate_contract_version | {gate_contract_version} |
+| gate_contract_rag | {gate_contract_rag or 'N/A'} |
+| gate_contract_error | {gate_contract_error or 'N/A'} |
+| gate_detail_tag | {gate_detail_tag or 'N/A'} |
+| contract_health | **{contract_health}** |
 | 历史记录条数 | {len(history)} |
 
 ## 最近 14 次巡检
 
-| 日期 | 门禁 | P0_open | active_crit_high |
-|---|---|---|---|
+| 日期 | 门禁 | P0_open | active_crit_high | period_validation_failed | gate_contract_ok | contract_health |
+|---|---|---|---|---|---|---|
 {trend_rows}
 ## 最新各检查项状态
 
@@ -218,6 +263,7 @@ def main() -> None:
     sgp = gate.get("strict_gate_pass", False)
     print("[OK] 趋势看板已更新: artifacts/p0_trend_latest.md")
     print(f"     本次: strict_gate_pass={sgp}  P0_open={gate.get('P0_open_count')}  ach={gate.get('active_critical_high')}")
+    print(f"     合约健康: {row.get('contract_health', 'BROKEN')}  gate_contract_valid={row.get('gate_contract_valid', False)}  gate_contract_version={row.get('gate_contract_version', 0)}")
     print(f"     历史记录: {len(history)} 条（保留最近 {args.keep_days} 天）")
 
 

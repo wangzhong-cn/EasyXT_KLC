@@ -74,12 +74,19 @@ class WsBridge:
 
     def stop(self) -> None:
         """优雅关闭服务端，释放端口和线程。"""
-        if self._loop and not self._loop.is_closed():
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
             if self._stop_event is not None:
                 # 通知事件循环退出 _serve_forever；async-with 会等 Server._close() 完成
-                self._loop.call_soon_threadsafe(self._stop_event.set)
+                try:
+                    loop.call_soon_threadsafe(self._stop_event.set)
+                except RuntimeError:
+                    pass  # loop already closed between check and call
             else:
-                self._loop.call_soon_threadsafe(self._loop.stop)
+                try:
+                    loop.call_soon_threadsafe(loop.stop)
+                except RuntimeError:
+                    pass
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         self._client_connected.clear()
@@ -152,6 +159,17 @@ class WsBridge:
             self._loop.run_until_complete(self._serve_forever())
         except Exception:
             log.exception("WsBridge: server thread exited with error")
+        finally:
+            # 清理所有未完成的 pending futures
+            for _mid, fut in list(self._pending.items()):
+                if not fut.done():
+                    fut.cancel()
+            self._pending.clear()
+            try:
+                self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            self._loop.close()
 
     async def _serve_forever(self) -> None:
         self._stop_event = asyncio.Event()

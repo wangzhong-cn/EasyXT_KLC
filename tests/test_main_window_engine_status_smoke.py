@@ -5,6 +5,7 @@ import gc
 import pytest
 from PyQt5.QtCore import QThread
 from PyQt5.QtTest import QTest
+from unittest.mock import MagicMock
 
 pytestmark = pytest.mark.gui
 
@@ -71,6 +72,39 @@ def test_main_window_emits_backtest_engine_log_integration(qapp, capsys):
     finally:
         if hasattr(window, "connection_check_timer"):
             window.connection_check_timer.stop()
+        _drain_qthreads()
+        window.close()
+        _drain_qthreads()
+
+
+def test_close_event_stops_running_child_threads(qapp, monkeypatch):
+    monkeypatch.setattr(MainWindow, "init_ui", lambda self: None)
+    monkeypatch.setattr(MainWindow, "_schedule_health_recheck", lambda self: None)
+    window = MainWindow()
+    try:
+        check_thread = MagicMock()
+        check_thread.isRunning.return_value = True
+        check_thread.wait.return_value = False
+        window._check_thread = check_thread
+        child_running = MagicMock()
+        child_running.isRunning.return_value = True
+        child_running.wait.return_value = False
+        child_stopped = MagicMock()
+        child_stopped.isRunning.return_value = False
+        monkeypatch.setattr(window, "findChildren", lambda cls: [child_running, child_stopped])
+        stop_spy = MagicMock()
+        monkeypatch.setattr(window, "stop_all_services", stop_spy)
+        evt = MagicMock()
+        window.closeEvent(evt)
+        assert check_thread.requestInterruption.called
+        assert check_thread.quit.called
+        assert check_thread.terminate.called
+        assert child_running.requestInterruption.called
+        assert child_running.quit.called
+        assert child_running.terminate.called
+        assert stop_spy.called
+        assert evt.accept.called
+    finally:
         _drain_qthreads()
         window.close()
         _drain_qthreads()

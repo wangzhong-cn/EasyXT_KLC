@@ -117,6 +117,20 @@ class TestBroadcastMetrics:
         assert "event_ts_ms" in msg
         assert abs(msg["event_ts_ms"] - int(time.time() * 1000)) < 5000
 
+    def test_event_ts_ms_preserved_when_payload_contains_source_time(self):
+        b = _fresh()
+        _, q = _ws_with_queue(b, "SYM")
+        _run(
+            b.broadcast(
+                "SYM",
+                {"price": 5.0, "event_ts_ms": 1773000000123},
+            )
+        )
+        msg = json.loads(q.get_nowait())
+        assert msg["event_ts_ms"] == 1773000000123
+        assert msg["source_event_ts_ms"] == 1773000000123
+        assert "gateway_event_ts_ms" in msg
+
     def test_max_latency_none_before_any_broadcast(self):
         assert _fresh().max_publish_latency_ms is None
 

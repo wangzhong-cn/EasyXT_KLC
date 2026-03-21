@@ -820,6 +820,11 @@ class TradingInterface(QMainWindow):
 
     def closeEvent(self, event):
         """关闭事件"""
+        # 停止定时器
+        if hasattr(self, 'time_timer'):
+            self.time_timer.stop()
+        if hasattr(self, 'data_timer'):
+            self.data_timer.stop()
         if self.is_connected:
             self.disconnect_from_trading()
         event.accept()

@@ -15,12 +15,18 @@ def evaluate_peak_release_gate(
     *,
     warn_consecutive_days: int,
     fail_consecutive_days: int,
+    max_period_validation_failed_items: int,
     release_env: str = "",
 ) -> dict[str, Any]:
     peak_ready = bool(evidence.get("peak_ready", False))
     consec = int(evidence.get("consecutive_compliant_days", 0) or 0)
     compliance_ratio = float(evidence.get("compliance_ratio_pct", 0.0) or 0.0)
-    if peak_ready and consec >= fail_consecutive_days:
+    period_validation = evidence.get("period_validation") if isinstance(evidence.get("period_validation"), dict) else {}
+    period_failed_items = int(period_validation.get("failed_rows", 0) or 0)
+    period_validation_pass = period_failed_items <= int(max_period_validation_failed_items)
+    if not period_validation_pass:
+        level = "fail"
+    elif peak_ready and consec >= fail_consecutive_days:
         level = "pass"
     elif consec >= warn_consecutive_days:
         level = "warn"
@@ -35,6 +41,9 @@ def evaluate_peak_release_gate(
         "warn_consecutive_days": int(warn_consecutive_days),
         "fail_consecutive_days": int(fail_consecutive_days),
         "gap_to_fail_days": max(0, int(fail_consecutive_days) - consec),
+        "period_validation_failed_items": period_failed_items,
+        "max_period_validation_failed_items": int(max_period_validation_failed_items),
+        "period_validation_gate_pass": period_validation_pass,
     }
 
 
@@ -43,6 +52,7 @@ def main() -> int:
     parser.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
     parser.add_argument("--warn-consecutive-days", type=int, default=7)
     parser.add_argument("--fail-consecutive-days", type=int, default=14)
+    parser.add_argument("--max-period-validation-failed-items", type=int, default=0)
     parser.add_argument("--release-env", type=str, default="")
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--out-json", type=Path, default=DEFAULT_OUT)
@@ -60,6 +70,7 @@ def main() -> int:
                 evidence if isinstance(evidence, dict) else {},
                 warn_consecutive_days=max(1, args.warn_consecutive_days),
                 fail_consecutive_days=max(1, args.fail_consecutive_days),
+                max_period_validation_failed_items=max(0, args.max_period_validation_failed_items),
                 release_env=str(args.release_env or ""),
             )
     args.out_json.parent.mkdir(parents=True, exist_ok=True)

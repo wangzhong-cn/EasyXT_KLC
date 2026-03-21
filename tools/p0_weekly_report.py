@@ -26,6 +26,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+try:
+    from .release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary, rag_tag
+except Exception:
+    from release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary, rag_tag
+
 HISTORY_PATH = pathlib.Path("artifacts/p0_trend_history.json")
 REPORT_DIR   = pathlib.Path("artifacts")
 TOUCH_EVENTS_PATH = pathlib.Path("artifacts/p0_allowlist_touch_events.json")
@@ -243,6 +248,17 @@ def _build_report(
         recon_rate = float(latest_recon.get("pass_rate", 0.0) or 0.0) * 100.0
         qmt_ok = latest_recon.get("qmt_available", None)
         ak_ok = latest_recon.get("akshare_available", None)
+        period_failed_items, period_max_allowed = period_validation_summary(
+            stability_evidence_latest,
+            peak_release_gate_latest,
+        )
+        period_payload = (
+            stability_evidence_latest.get("period_validation", {})
+            if isinstance(stability_evidence_latest, dict) and isinstance(stability_evidence_latest.get("period_validation"), dict)
+            else {}
+        )
+        period_msg = str(period_payload.get("message") or "")
+        period_action = str(period_payload.get("recommended_action") or "")
         lines += [
             f"| P0_open_count（最新） | {_p0_of(latest)} |",
             f"| active_critical_high（最新） | {_ach_of(latest)} |",
@@ -287,7 +303,30 @@ def _build_report(
                 level_text = f"❌ FAIL（gap {gap}d）"
             else:
                 level_text = "N/A"
+            header_rag = header_rag_status(
+                bool(latest.get('strict_gate_pass', False)),
+                _p0_of(latest),
+                _ach_of(latest),
+                level,
+                period_failed_items,
+                period_max_allowed,
+            )
             lines.append(f"| 峰值发布门禁(SSOT) | {level_text} |")
+            lines.append(
+                f"| 主表头RAG评分 | "
+                f"{rag_tag(header_rag)} |"
+            )
+            gate_detail = gate_detail_tag(
+                header_rag,
+                period_failed_items,
+                period_max_allowed,
+                message=period_msg,
+                action=period_action,
+            )
+            lines.append(f"| 主表头门禁契约 | {gate_detail} |")
+            parsed_gate_detail = parse_gate_detail_tag(gate_detail)
+            contract_health = "HEALTHY" if bool(parsed_gate_detail.get("ok", False)) else "BROKEN"
+            lines.append(f"| 主表头契约健康 | {contract_health} |")
     else:
         lines += ["| （本周无数据） | — |"]
 

@@ -77,6 +77,9 @@ def build_note(peak_gate: dict[str, Any], evidence: dict[str, Any], summary: dic
     consec = int(peak_gate.get("consecutive_compliant_days", evidence.get("consecutive_compliant_days", 0)) or 0)
     ratio = float(peak_gate.get("compliance_ratio_pct", evidence.get("compliance_ratio_pct", 0.0)) or 0.0)
     peak_ready = bool(peak_gate.get("peak_ready", evidence.get("peak_ready", False)))
+    period_validation_failed_items = int(peak_gate.get("period_validation_failed_items", 0) or 0)
+    max_period_validation_failed_items = int(peak_gate.get("max_period_validation_failed_items", 0) or 0)
+    period_validation_gate_pass = bool(peak_gate.get("period_validation_gate_pass", True))
     if level == "pass":
         action = "允许推进发布，保持每日证据巡检。"
     elif level == "warn":
@@ -95,6 +98,9 @@ def build_note(peak_gate: dict[str, Any], evidence: dict[str, Any], summary: dic
         "warn_consecutive_days": warn_days,
         "fail_consecutive_days": fail_days,
         "gap_to_fail_days": gap,
+        "period_validation_failed_items": period_validation_failed_items,
+        "max_period_validation_failed_items": max_period_validation_failed_items,
+        "period_validation_gate_pass": period_validation_gate_pass,
         "recent_summary": summary or {},
         "action": action,
     }
@@ -117,6 +123,9 @@ def render_md(note: dict[str, Any]) -> str:
             f"| warn_consecutive_days | {note.get('warn_consecutive_days', 0)} |",
             f"| fail_consecutive_days | {note.get('fail_consecutive_days', 0)} |",
             f"| gap_to_fail_days | {note.get('gap_to_fail_days', 0)} |",
+            f"| period_validation_failed_items | {note.get('period_validation_failed_items', 0)} |",
+            f"| max_period_validation_failed_items | {note.get('max_period_validation_failed_items', 0)} |",
+            f"| period_validation_gate_pass | {'true' if bool(note.get('period_validation_gate_pass', True)) else 'false'} |",
             "",
             "## 最近证据摘要",
             "",

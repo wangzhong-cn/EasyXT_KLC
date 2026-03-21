@@ -703,6 +703,29 @@ class KLineChartWorkspace(QWidget):
         except Exception:
             return False
 
+    def _drain_owned_threads(self) -> None:
+        try:
+            owned_threads = [t for t in self.findChildren(QThread) if t is not None]
+        except Exception:
+            owned_threads = []
+        for t in owned_threads:
+            if not self._is_thread_running(t):
+                continue
+            try:
+                t.requestInterruption()
+            except Exception:
+                pass
+            try:
+                t.quit()
+            except Exception:
+                pass
+            try:
+                if not t.wait(800):
+                    t.terminate()
+                    t.wait(300)
+            except Exception:
+                pass
+
     def _on_auto_sync_done(self) -> None:
         """后台同步完成后，恢复复权选择器并刷新数据范围标签。"""
         if hasattr(self, "adjust_combo"):
@@ -2310,6 +2333,9 @@ class KLineChartWorkspace(QWidget):
 
     def _resolve_quote_timestamp(self, quote: dict[str, Any]) -> pd.Timestamp:
         fields = (
+            "source_event_ts_ms",
+            "event_ts_ms",
+            "tick_ts_ms",
             "trade_time",
             "tradeTime",
             "quote_time",
@@ -2393,6 +2419,22 @@ class KLineChartWorkspace(QWidget):
         normalized["low"] = float(raw.get("low") or raw.get("lowPrice") or normalized["price"] or 0)
         normalized["volume"] = float(raw.get("volume") or raw.get("vol") or 0)
         normalized["amount"] = float(raw.get("amount") or raw.get("turnover") or 0)
+        ts_val = (
+            raw.get("source_event_ts_ms")
+            or raw.get("event_ts_ms")
+            or raw.get("tick_ts_ms")
+            or raw.get("timestamp")
+            or raw.get("trade_time")
+            or raw.get("time")
+        )
+        if ts_val not in (None, ""):
+            normalized["timestamp"] = ts_val
+        if raw.get("event_ts_ms") not in (None, ""):
+            normalized["event_ts_ms"] = raw.get("event_ts_ms")
+        if raw.get("source_event_ts_ms") not in (None, ""):
+            normalized["source_event_ts_ms"] = raw.get("source_event_ts_ms")
+        if raw.get("tick_ts_ms") not in (None, ""):
+            normalized["tick_ts_ms"] = raw.get("tick_ts_ms")
 
         ask_prices = raw.get("askPrice") or raw.get("ask_price") or []
         bid_prices = raw.get("bidPrice") or raw.get("bid_price") or []
@@ -3825,6 +3867,7 @@ class KLineChartWorkspace(QWidget):
 
     def closeEvent(self, event):
         try:
+            self._drain_owned_threads()
             self._backfill_retry_timer.stop()
             self._stop_ws_quote_worker()  # WS worker 需先 stop() 再 wait
             if self.update_timer and self.update_timer.isActive():
@@ -3879,6 +3922,7 @@ class KLineChartWorkspace(QWidget):
                     self._logger.warning("closeEvent: 线程未及时退出，强制终止: %s", type(t).__name__)
                     t.terminate()
                     t.wait(300)
+            self._drain_owned_threads()
         finally:
             # native 路径：关闭时保存当前标的的画线
             if self.toolbox_panel is not None:
@@ -3932,19 +3976,17 @@ class _ChartDataLoadThread(QThread):
             ingestion_status = ""
             fetch_timeout_s = float(os.environ.get("EASYXT_CHART_FETCH_TIMEOUT_S", "12"))
             try:
-                from concurrent.futures import ThreadPoolExecutor, TimeoutError
-
-                with ThreadPoolExecutor(max_workers=1) as pool:
-                    fut = pool.submit(
-                        iface.get_stock_data,
-                        stock_code=self.symbol,
-                        start_date=self.start_date,
-                        end_date=self.end_date,
-                        period=self.period,
-                        adjust=self.adjust,
-                        auto_save=True,
-                    )
-                    data = fut.result(timeout=fetch_timeout_s)
+                # 直接在当前 QThread 中同步调用。
+                # xtquant C 扩展不支持从 ThreadPoolExecutor 工作线程调用，
+                # 会导致 access violation 崩溃，因此不使用 concurrent.futures。
+                data = iface.get_stock_data(
+                    stock_code=self.symbol,
+                    start_date=self.start_date,
+                    end_date=self.end_date,
+                    period=self.period,
+                    adjust=self.adjust,
+                    auto_save=True,
+                )
             except TimeoutError:
                 data = None
                 empty_reason = f"在线数据请求超时({fetch_timeout_s:.0f}s)"

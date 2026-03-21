@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -46,6 +47,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
+
+# 环境变量控制：设为 "0" 可关闭类型门禁（仅用于遗留迁移过渡期）
+_ENFORCE_TYPE_GATE = os.environ.get("EASYXT_STRATEGY_TYPE_GATE", "1") != "0"
 
 # DuckDB 建表 DDL（幂等）
 _SNAPSHOT_DDL = """
@@ -125,7 +129,20 @@ class StrategyRegistry:
 
         Returns:
             注册后的 StrategyInfo 对象。
+
+        Raises:
+            TypeError: 当 strategy_obj 不为 None 且不是 BaseStrategy 子类时触发
+                       （可通过环境变量 EASYXT_STRATEGY_TYPE_GATE=0 关闭）。
         """
+        # ── Gate 2：策略注册类型门禁 ──
+        if _ENFORCE_TYPE_GATE and strategy_obj is not None:
+            from strategies.base_strategy import BaseStrategy
+            if not isinstance(strategy_obj, BaseStrategy):
+                raise TypeError(
+                    f"策略注册门禁: {strategy_id!r} 必须继承 BaseStrategy 或使用 "
+                    f"LegacyStrategyAdapter 桥接，当前类型: {type(strategy_obj).__name__}"
+                )
+
         info = StrategyInfo(
             strategy_id=strategy_id,
             strategy_obj=strategy_obj,
@@ -162,7 +179,16 @@ class StrategyRegistry:
             if strategy_id not in self._registry:
                 log.warning("策略注册中心: 注销失败，未找到策略 %s", strategy_id)
                 return False
-            self._registry[strategy_id].status = status
+            info = self._registry[strategy_id]
+            # 状态机约束：确保转换合法
+            allowed = _STATUS_TRANSITIONS.get(info.status)
+            if allowed is not None and status not in allowed:
+                log.warning(
+                    "策略注册中心: 注销 %s 状态转换非法 %s -> %s",
+                    strategy_id, info.status, status,
+                )
+                return False
+            info.status = status
 
         log.info("策略注册中心: 策略 %s 已注销 status=%s", strategy_id, status)
         return True
@@ -196,6 +222,9 @@ class StrategyRegistry:
                     "has_instance": info.strategy_obj is not None,
                 })
         return result
+
+    def list(self) -> List[Dict[str, Any]]:
+        return self.list_all()
 
     def list_running(self) -> List[StrategyInfo]:
         """仅返回状态为 running 的策略。"""

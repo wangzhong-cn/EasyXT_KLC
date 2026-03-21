@@ -111,7 +111,8 @@ class TaskScheduler:
 
         # 控制标志
         self.is_running = False
-        self.shutdown_event = asyncio.Event()
+        self._shutdown_flag = threading.Event()
+        self._scheduler_thread: Optional[threading.Thread] = None
 
         # 统计信息
         self.statistics = {
@@ -129,40 +130,38 @@ class TaskScheduler:
         logger.info(f"任务调度器初始化完成，最大工作线程: {max_workers}，最大并发任务: {max_concurrent_tasks}")
 
     def start(self):
-        """启动任务调度器"""
+        """启动任务调度器（在后台线程中运行事件循环）"""
         if self.is_running:
             logger.warning("任务调度器已经在运行")
             return
 
         self.is_running = True
-        self.shutdown_event.clear()
+        self._shutdown_flag.clear()
 
-        # 获取或创建事件循环
-        try:
-            self.loop = asyncio.get_event_loop()
-        except RuntimeError:
+        def _run_loop():
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
+            try:
+                self.loop.run_until_complete(self._scheduler_loop())
+            finally:
+                self.loop.close()
 
-        # 启动调度器主循环
-        if self.loop.is_running():
-            # 如果循环已经在运行，创建任务
-            asyncio.create_task(self._scheduler_loop())
-        else:
-            # 如果循环未运行，运行直到完成
-            self.loop.run_until_complete(self._scheduler_loop())
+        self._scheduler_thread = threading.Thread(
+            target=_run_loop, daemon=True, name="TaskScheduler"
+        )
+        self._scheduler_thread.start()
 
         logger.info("任务调度器已启动")
 
     async def start_async(self):
-        """异步启动任务调度器"""
+        """异步启动任务调度器（在已有事件循环中使用）"""
         if self.is_running:
             logger.warning("任务调度器已经在运行")
             return
 
         self.is_running = True
-        self.shutdown_event.clear()
-        self.loop = asyncio.get_event_loop()
+        self._shutdown_flag.clear()
+        self.loop = asyncio.get_running_loop()
 
         # 启动调度器主循环
         asyncio.create_task(self._scheduler_loop())
@@ -174,13 +173,18 @@ class TaskScheduler:
             return
 
         self.is_running = False
-        self.shutdown_event.set()
+        self._shutdown_flag.set()
 
         # 取消所有运行中的任务
-        for task_id, task in self.running_tasks.items():
+        for task_id, task in list(self.running_tasks.items()):
             if not task.done():
                 task.cancel()
                 logger.info(f"取消任务: {task_id}")
+
+        # 等待调度线程退出
+        if self._scheduler_thread is not None and self._scheduler_thread.is_alive():
+            self._scheduler_thread.join(timeout=5.0)
+            self._scheduler_thread = None
 
         # 关闭线程池
         self.thread_pool.shutdown(wait=True)

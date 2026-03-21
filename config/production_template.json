@@ -3,8 +3,8 @@
     "account": {
       "qmt_path": "D:/申万宏源策略量化交易终端/bin.x64/XtItClient.exe",
       "qmt_userdata_path": "D:/申万宏源策略量化交易终端/userdata_mini",
-      "account_id": "__REPLACE_ACCOUNT_ID__",
-      "password": "__REPLACE_PASSWORD__"
+      "account_id": "1678070127",
+      "password": "test1234！"
     },
     "risk": {
       "max_position_ratio": 0.08,
