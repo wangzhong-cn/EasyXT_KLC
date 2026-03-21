@@ -3,7 +3,6 @@
 
 用法: python tools/ingest_index.py
 """
-import json
 import logging
 import os
 import sys
@@ -29,8 +28,8 @@ log = logging.getLogger("ingest-index")
 def main():
     from xtquant import xtdata
     xtdata.enable_hello = False
-    from data_manager.duckdb_connection_pool import get_db_manager, resolve_duckdb_path
     from data_manager.auto_data_updater import AutoDataUpdater
+    from data_manager.duckdb_connection_pool import get_db_manager, resolve_duckdb_path
 
     db_path = resolve_duckdb_path()
     mgr = get_db_manager(db_path)
@@ -88,11 +87,27 @@ def main():
         log.error("初始化失败")
         return
 
+    ingest_lock = Path(str(db_path) + ".ingest.lock")
+
+    def _rotate_interface_connection() -> None:
+        if updater.interface is None:
+            return
+        ingest_lock.unlink(missing_ok=True)  # 释放：删哨兵
+        try:
+            updater.interface._close_duckdb_connection()
+        except Exception:
+            pass
+        time.sleep(5.0)
+        if not updater.interface.connect(read_only=False):
+            raise RuntimeError("批次连接重建失败")
+        ingest_lock.touch()  # 重新持有：建哨兵
+
     t0 = time.time()
     total_success = 0
     total_failed = 0
     total_records = 0
 
+    ingest_lock.touch()  # 入库开始
     for batch_idx in range(total_batches):
         batch = have_data[batch_idx * BATCH : (batch_idx + 1) * BATCH]
         log.info("=== 批次 %d/%d: %d 只 [%s ... %s] ===",
@@ -115,6 +130,9 @@ def main():
             result["success_stocks"], result["failed_stocks"], result["total_records"],
             total_success, total_failed, remaining / 60,
         )
+        if batch_idx < total_batches - 1:
+            _rotate_interface_connection()
+    ingest_lock.unlink(missing_ok=True)  # 入库完成清理
 
     log.info("=== 指数入库全部完成 ===")
     log.info("累计: 成功=%d 失败=%d 记录=%d 耗时=%.1fs",

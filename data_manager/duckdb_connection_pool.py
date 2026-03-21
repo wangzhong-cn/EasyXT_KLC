@@ -192,7 +192,7 @@ class DuckDBConnectionManager:
         """
         con = None
         max_retries = 30
-        retry_delay = 1.0
+        retry_delay = 0.25  # 短间隔：5s 窗口内可命中 ~20 次而非 5 次
 
         for attempt in range(max_retries):
             try:
@@ -207,11 +207,16 @@ class DuckDBConnectionManager:
                     self._lock_metrics["attempts"] += 1
                     if attempt < max_retries - 1:
                         sleep_s = retry_delay
-                        log.warning("[读取] 数据库被占用，重试 %d/%d (%.1fs)...", attempt + 1, max_retries, sleep_s)
+                        # 第一次重试用 WARNING，后续降为 DEBUG 避免日志爆炸
+                        if attempt == 0:
+                            log.warning("[读取] 数据库被占用，开始重试 (最多 %.0fs)...", max_retries * retry_delay)
+                        else:
+                            log.debug("[读取] 数据库被占用，重试 %d/%d...", attempt + 1, max_retries)
                         t0 = time.monotonic()
                         time.sleep(sleep_s)
                         self._lock_metrics["wait_times_ms"].append((time.monotonic() - t0) * 1000.0)
                         continue
+                    log.warning("[读取] 重试 %d 次仍被占用，放弃", max_retries)
                     self._lock_metrics["failures"] += 1
                 raise
             finally:
