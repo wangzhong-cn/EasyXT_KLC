@@ -5,7 +5,7 @@
   "settings": {
     "account": {
       "account_id": "1678070127",
-      "password": "test1234！",
+      "password": "",
       "account_type": "STOCK",
       "qmt_path": "D:\\申万宏源策略量化交易终端\\bin.x64\\XtItClient.exe",
       "qmt_userdata_path": "D:\\申万宏源策略量化交易终端\\userdata_mini"
