@@ -28,7 +28,7 @@ import pickle
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -49,7 +49,7 @@ class LRUCache:
         self._max_size = max_size
         self._logger = logging.getLogger(__name__)
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         """获取缓存"""
         if key in self._cache:
             # 移到末尾（最近使用）
@@ -132,7 +132,7 @@ class CacheManager:
         # 添加 schema hash（可选）
         if "schema" in kwargs:
             schema_str = json.dumps(kwargs["schema"], sort_keys=True)
-            schema_hash = hashlib.md5(schema_str.encode()).hexdigest()[:8]
+            schema_hash = hashlib.md5(schema_str.encode(), usedforsecurity=False).hexdigest()[:8]
             key_str += f":{schema_hash}"
 
         return key_str
@@ -142,7 +142,7 @@ class CacheManager:
         namespace: str,
         key: str,
         level: str = CacheLevel.MEMORY,
-    ) -> Optional[Any]:
+    ) -> Any | None:
         """获取缓存"""
 
         # 内存缓存
@@ -175,7 +175,7 @@ class CacheManager:
         namespace: str,
         key: str,
         value: Any,
-        ttl: Optional[int] = None,
+        ttl: int | None = None,
         level: str = CacheLevel.MEMORY,
     ):
         """设置缓存"""
@@ -197,7 +197,7 @@ class CacheManager:
             self._save_to_disk(namespace, key, value)
             self._logger.debug(f"Disk cache set: {namespace}:{key}")
 
-    def invalidate(self, namespace: str, key: Optional[str] = None):
+    def invalidate(self, namespace: str, key: str | None = None):
         """清除缓存"""
         cache_key = f"{namespace}:{key}" if key else None
 
@@ -235,8 +235,13 @@ class CacheManager:
     def _get_disk_cache_path(self, namespace: str, key: str) -> Path:
         """获取磁盘缓存路径"""
         # 使用 key 的 hash 作为文件名
-        key_hash = hashlib.md5(key.encode()).hexdigest()
+        key_hash = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
         return self._disk_cache_dir / namespace / f"{key_hash}.parquet"
+
+    def _get_disk_json_cache_path(self, namespace: str, key: str) -> Path:
+        """获取 JSON 磁盘缓存路径"""
+        key_hash = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()
+        return self._disk_cache_dir / namespace / f"{key_hash}.json"
 
     def _save_to_disk(self, namespace: str, key: str, value: Any):
         """保存到磁盘"""
@@ -247,24 +252,34 @@ class CacheManager:
             if isinstance(value, pd.DataFrame):
                 value.to_parquet(path, index=False)
             else:
-                # 其他对象用 pickle
-                with open(path, "wb") as f:
-                    pickle.dump(value, f)
+                json_path = self._get_disk_json_cache_path(namespace, key)
+                payload = {"_meta": {"fmt": "json", "version": 1}, "data": value}
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False)
         except Exception as e:
             self._logger.warning(f"Failed to save to disk cache: {e}")
 
-    def _load_from_disk(self, namespace: str, key: str) -> Optional[Any]:
+    def _load_from_disk(self, namespace: str, key: str) -> Any | None:
         """从磁盘加载"""
         try:
             path = self._get_disk_cache_path(namespace, key)
-            if not path.exists():
-                return None
-
-            if path.suffix == ".parquet":
-                return pd.read_parquet(path)
-            else:
-                with open(path, "rb") as f:
-                    return pickle.load(f)
+            json_path = self._get_disk_json_cache_path(namespace, key)
+            if path.exists():
+                try:
+                    return pd.read_parquet(path)
+                except Exception as e:
+                    self._logger.warning("Invalid parquet cache, evicting: %s", e)
+                    try:
+                        path.unlink()
+                    except Exception:
+                        pass
+            if json_path.exists():
+                with open(json_path, encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, dict) and "data" in payload:
+                    return payload["data"]
+                return payload
+            return None
         except Exception as e:
             self._logger.warning("Failed to load from disk cache: %s", e)
             return None
@@ -273,8 +288,11 @@ class CacheManager:
         """从磁盘删除"""
         try:
             path = self._get_disk_cache_path(namespace, key)
+            json_path = self._get_disk_json_cache_path(namespace, key)
             if path.exists():
                 path.unlink()
+            if json_path.exists():
+                json_path.unlink()
         except Exception as e:
             self._logger.warning("Failed to delete from disk cache: %s", e)
 

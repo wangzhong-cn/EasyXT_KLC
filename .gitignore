@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# Python
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -137,6 +137,15 @@ config/user_config.py
 config/account_config.py
 config/unified_config.json
 config/secrets.json
+config/xueqiu_config.json
+config/real_trading.json
+config/monitor_config.json
+**/xueqiu_config.json
+**/real_trading.json
+**/monitor_config.json
+**/secrets.json
+**/.env
+**/.env.*
 .env
 *.credentials
 **/userdata_mini/
@@ -286,6 +295,8 @@ tests/
 !/tests/test_positions_panel.py
 !/tests/test_orders_panel.py
 !/tests/test_intraday_panel.py
+!/tests/test_thread_manager.py
+!/tests/test_event_engine.py
 demo*/
 deploy/
 demo_config_new/

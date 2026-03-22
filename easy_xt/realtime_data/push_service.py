@@ -18,14 +18,15 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 _SH = ZoneInfo('Asia/Shanghai')
-from typing import Any, Callable, Optional, cast
+from collections.abc import Callable
+from typing import Any, Optional, cast
 
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 from websockets.legacy.server import WebSocketServerProtocol
 
-from .config.settings import RealtimeDataConfig
 from .aggregator.minute_bar_aggregator import MinuteBarAggregator
+from .config.settings import RealtimeDataConfig
 from .monitor.metrics_collector import MetricPoint, MetricsCollector
 from .persistence.duckdb_sink import RealtimeDuckDBSink
 from .recovery_manager import ClientRecoveryManager
@@ -71,7 +72,7 @@ class PushMessage:
     message_type: str
     data: Any
     timestamp: float
-    client_ids: Optional[list[str]] = None  # None表示广播给所有客户端
+    client_ids: list[str] | None = None  # None表示广播给所有客户端
 
 
 class RealtimeDataPushService:
@@ -80,7 +81,7 @@ class RealtimeDataPushService:
     提供WebSocket服务，支持客户端订阅和实时数据推送。
     """
 
-    def __init__(self, config: Optional[RealtimeDataConfig] = None):
+    def __init__(self, config: RealtimeDataConfig | None = None):
         """初始化推送服务
 
         Args:
@@ -133,8 +134,8 @@ class RealtimeDataPushService:
         self._last_purge_ts = 0.0
         self._purge_interval_s = int(float(os.environ.get("EASYXT_RT_PURGE_INTERVAL_S", "3600")))
         self._purge_retention_days = int(float(os.environ.get("EASYXT_RT_PURGE_RETENTION_DAYS", "7")))
-        self.rt_sink: Optional[RealtimeDuckDBSink] = None
-        self.rt_aggregator: Optional[MinuteBarAggregator] = None
+        self.rt_sink: RealtimeDuckDBSink | None = None
+        self.rt_aggregator: MinuteBarAggregator | None = None
         if self.rt_persist_enabled:
             try:
                 self.rt_sink = RealtimeDuckDBSink()
@@ -156,8 +157,10 @@ class RealtimeDataPushService:
         self.update_task = None
         self.heartbeat_task = None
 
-        # 消息队列
-        self.message_queue: asyncio.Queue = asyncio.Queue()
+        # 消息队列（有界，防止生产者过快时内存膨胀）
+        self.message_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=self.config.message_queue_size
+        )
         self._consecutive_failures = 0
 
         # 统计信息
@@ -244,7 +247,7 @@ class RealtimeDataPushService:
 
         self.logger.info("实时数据推送服务已停止")
 
-    async def handle_client(self, websocket: WebSocketServerProtocol, path: Optional[str] = None):
+    async def handle_client(self, websocket: WebSocketServerProtocol, path: str | None = None):
         """处理客户端连接
 
         Args:
@@ -553,8 +556,8 @@ class RealtimeDataPushService:
         self,
         client_id: str,
         message: dict[str, Any],
-        payload: Optional[object] = None,
-        event_ts: Optional[float] = None
+        payload: object | None = None,
+        event_ts: float | None = None
     ):
         """发送消息给指定客户端
 
@@ -587,8 +590,8 @@ class RealtimeDataPushService:
     async def broadcast_message(
         self,
         message: dict[str, Any],
-        client_ids: Optional[list[str]] = None,
-        event_ts: Optional[float] = None
+        client_ids: list[str] | None = None,
+        event_ts: float | None = None
     ):
         """广播消息
 
@@ -734,7 +737,7 @@ class RealtimeDataPushService:
                 # 处理消息
                 await self.broadcast_message(message.data, message.client_ids)
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
@@ -818,7 +821,7 @@ class RealtimeDataPushService:
             client_info.compress_threshold = max(1, options['compress_threshold'])
         self._update_recovery_snapshot(client_id)
 
-    async def _resume_client(self, client_id: str, session_id: Optional[str]) -> None:
+    async def _resume_client(self, client_id: str, session_id: str | None) -> None:
         if not session_id:
             await self.send_to_client(client_id, {
                 'type': 'resume_failed',
@@ -1048,7 +1051,7 @@ class RealtimeDataPushService:
         raw_ts = quote.get("event_ts", quote.get("timestamp"))
         if raw_ts is None:
             return 0.0
-        event_ts: Optional[datetime] = None
+        event_ts: datetime | None = None
         try:
             if isinstance(raw_ts, datetime):
                 event_ts = raw_ts
@@ -1066,7 +1069,7 @@ class RealtimeDataPushService:
             return 0.0
         return max((ingest_ts - event_ts).total_seconds() * 1000.0, 0.0)
 
-    def _emit_metric(self, name: str, value: float, tags: Optional[dict[str, str]] = None) -> None:
+    def _emit_metric(self, name: str, value: float, tags: dict[str, str] | None = None) -> None:
         try:
             self.metrics_collector._add_metric_point(
                 MetricPoint(

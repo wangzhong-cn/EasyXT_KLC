@@ -19,7 +19,7 @@ import uuid
 import warnings
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -71,7 +71,7 @@ class UnifiedDataInterface:
     _RESULT_CACHE_MAX_ENTRIES: int = 80   # LRU 淘汰上限
 
     @classmethod
-    def _cache_get(cls, key: tuple) -> "Optional[pd.DataFrame]":
+    def _cache_get(cls, key: tuple) -> "pd.DataFrame | None":
         with cls._result_cache_lock:
             entry = cls._result_cache.get(key)
             if entry is None:
@@ -115,12 +115,12 @@ class UnifiedDataInterface:
 
     def __init__(
         self,
-        duckdb_path: Optional[str] = None,
+        duckdb_path: str | None = None,
         eager_init: bool = False,
         silent_init: bool = True,
-        cb_fail_threshold: Optional[int] = None,
-        backoff_base_s: Optional[float] = None,
-        backoff_max_s: Optional[float] = None,
+        cb_fail_threshold: int | None = None,
+        backoff_base_s: float | None = None,
+        backoff_max_s: float | None = None,
     ):
         """
         初始化统一数据接口
@@ -227,9 +227,9 @@ class UnifiedDataInterface:
         self._backfill_max_queue = int(os.environ.get("EASYXT_BACKFILL_MAX_QUEUE", "512"))
         self._logger = logging.getLogger(__name__)
         # 最近一次 get_stock_data() 的合约验证结论（供调用方读取）
-        self._last_contract_validation: Optional[object] = None
+        self._last_contract_validation: object | None = None
         # 因子引擎懒初始化（connect() 后首次调用因子 API 时激活）
-        self._factor_storage: Optional[Any] = None
+        self._factor_storage: Any | None = None
         # 上市首日缓存：{stock_code: 'YYYY-MM-DD'}（多日周期左对齐必需）
         self._listing_date_cache: dict[str, str] = {}
         if eager_init:
@@ -351,7 +351,7 @@ class UnifiedDataInterface:
         if not stock_code or not start_date or not end_date:
             return False
 
-        def _emit_backfill_event(status: str, record_count: int = 0, error_message: Optional[str] = None):
+        def _emit_backfill_event(status: str, record_count: int = 0, error_message: str | None = None):
             try:
                 from core.events import Events
                 from core.signal_bus import signal_bus
@@ -582,12 +582,12 @@ class UnifiedDataInterface:
         self._qmt_checked = False
         self._check_qmt()
 
-    def _ensure_qmt_paths(self) -> Optional[str]:
+    def _ensure_qmt_paths(self) -> str | None:
         candidates = []
         env_path = os.environ.get("XTQUANT_PATH") or os.environ.get("QMT_PATH")
         if env_path:
             candidates.append(env_path)
-        config_obj: Optional[Any] = None
+        config_obj: Any | None = None
         try:
             from easy_xt.config import config as config_obj
         except Exception:
@@ -629,7 +629,7 @@ class UnifiedDataInterface:
             sys.path.insert(0, found_root)
         return found_xtquant_dir
 
-    def _find_qmt_python_root(self, root: str) -> Optional[str]:
+    def _find_qmt_python_root(self, root: str) -> str | None:
         if not root or not os.path.isdir(root):
             return None
         if os.path.basename(root).lower() == "xtquant":
@@ -1061,9 +1061,12 @@ class UnifiedDataInterface:
             self._logger.warning("创建表失败: %s", e)
 
     def _get_table_columns(self, table_name: str) -> list[str]:
+        if not self._is_safe_identifier(table_name):
+            self._logger.warning("_get_table_columns: 非法表名 %r", table_name)
+            return []
         try:
             rows = self.con.execute(
-                "SELECT column_name FROM pragma_table_info('" + table_name + "')"
+                f'SELECT column_name FROM pragma_table_info("{table_name}")'  # noqa: S608
             ).fetchall()
             if rows:
                 return [row[0] for row in rows]
@@ -1072,7 +1075,7 @@ class UnifiedDataInterface:
 
         try:
             rows = self.con.execute(
-                "SELECT name FROM pragma_table_info('" + table_name + "')"
+                f'SELECT name FROM pragma_table_info("{table_name}")'  # noqa: S608
             ).fetchall()
             return [row[0] for row in rows]
         except Exception as _tbl_err2:
@@ -1418,7 +1421,7 @@ class UnifiedDataInterface:
                         error_message=None,
                     )
                 return data if data is not None else pd.DataFrame()
-            qmt_data: Optional[pd.DataFrame] = None
+            qmt_data: pd.DataFrame | None = None
             if not self.qmt_available:
                 self._refresh_qmt_status()
             if self.qmt_available:
@@ -1742,7 +1745,7 @@ class UnifiedDataInterface:
 
     # ─────────── 数据库修复工具：清理历史遗留的脏数据 ────────────
 
-    def repair_daily_adjustments(self, stock_codes: Optional[list[str]] = None) -> dict[str, str]:
+    def repair_daily_adjustments(self, stock_codes: list[str] | None = None) -> dict[str, str]:
         """批量修复 stock_daily 中复权列全 NULL 的历史遗留问题。
 
         扫描 stock_daily 表，找出 open_front 全为 NULL 的股票代码，
@@ -1830,7 +1833,7 @@ class UnifiedDataInterface:
 
     def _compute_data_lineage(
         self, data: pd.DataFrame
-    ) -> tuple[str, Optional[Any]]:
+    ) -> tuple[str, Any | None]:
         """计算数据血缘字段：(raw_hash, source_event_time)
 
         口径规范见 docs/lineage_spec.md §三：
@@ -1869,10 +1872,10 @@ class UnifiedDataInterface:
         source: str,
         status: str,
         record_count: int,
-        error_message: Optional[str],
+        error_message: str | None,
         *,
-        raw_hash: Optional[str] = None,
-        source_event_time: Optional[Any] = None,
+        raw_hash: str | None = None,
+        source_event_time: Any | None = None,
     ) -> None:
         if not self.con:
             return
@@ -1939,7 +1942,7 @@ class UnifiedDataInterface:
                     pass
             self._logger.warning("写入data_ingestion_status失败: %s", exc)
 
-    def _get_existing_date_bounds(self, stock_code: str, period: str) -> Optional[tuple[Any, Any]]:
+    def _get_existing_date_bounds(self, stock_code: str, period: str) -> tuple[Any, Any] | None:
         if not self.con:
             return None
         table_map = {"1d": "stock_daily", "1m": "stock_1m", "5m": "stock_5m", "tick": "stock_tick"}
@@ -1948,7 +1951,7 @@ class UnifiedDataInterface:
         date_col = "date" if table_name == "stock_daily" else "datetime"
         try:
             row = self.con.execute(
-                "SELECT MIN(" + date_col + "), MAX(" + date_col + ") FROM " + table_name
+                "SELECT MIN(" + date_col + "), MAX(" + date_col + ") FROM " + table_name  # noqa: S608
                 + " WHERE stock_code = ? AND period = ?",
                 [stock_code, stored_period],
             ).fetchone()
@@ -2010,7 +2013,7 @@ class UnifiedDataInterface:
         return plan
 
     def get_ingestion_status(
-        self, stock_code: Optional[str] = None, period: Optional[str] = None
+        self, stock_code: str | None = None, period: str | None = None
     ) -> pd.DataFrame:
         if self.con is None:
             if not self.connect(read_only=True):
@@ -2037,8 +2040,8 @@ class UnifiedDataInterface:
 
     def get_data_coverage(
         self,
-        stock_codes: Optional[list[str]] = None,
-        periods: Optional[list[str]] = None,
+        stock_codes: list[str] | None = None,
+        periods: list[str] | None = None,
     ) -> pd.DataFrame:
         """查询数据覆盖率矩阵。
 
@@ -2086,7 +2089,7 @@ class UnifiedDataInterface:
                        MIN({date_col}) AS min_dt,
                        MAX({date_col}) AS max_dt,
                        COUNT(*) AS cnt
-                FROM {table}
+                FROM {table}  /* noqa: S608 -- values from hardcoded _PERIOD_TABLE */
                 WHERE period = ?{where_codes}
                 GROUP BY stock_code
                 ORDER BY stock_code
@@ -2131,7 +2134,7 @@ class UnifiedDataInterface:
         limit: int = 50,
         max_retries: int = 3,
         *,
-        reason_regex: Optional[str] = None,
+        reason_regex: str | None = None,
     ) -> dict[str, int]:
         if self.con is None:
             if not self.connect(read_only=False):
@@ -2284,7 +2287,7 @@ class UnifiedDataInterface:
         stock_code: str,
         start_date: str,
         end_date: str,
-        periods: Optional[list[str]] = None,
+        periods: list[str] | None = None,
     ) -> dict[str, Any]:
         if self.con is None:
             if not self.connect(read_only=False):
@@ -2685,7 +2688,7 @@ class UnifiedDataInterface:
         bucket = int(h[:8], 16) / float(0xFFFFFFFF)
         return bucket <= r
 
-    def generate_daily_sla_report(self, report_date: Optional[str] = None) -> dict[str, Any]:
+    def generate_daily_sla_report(self, report_date: str | None = None) -> dict[str, Any]:
         if self.con is None:
             if not self.connect(read_only=False):
                 return {}
@@ -2695,7 +2698,7 @@ class UnifiedDataInterface:
         write_stats = (0, 0)
         conflict_count = 0
         reject_count = 0
-        lag_p95_ms: Optional[float] = None
+        lag_p95_ms: float | None = None
         try:
             write_row = self.con.execute(
                 """
@@ -2865,7 +2868,7 @@ class UnifiedDataInterface:
         "2M": 42, "3M": 63, "5M": 105,
     }
 
-    def _resolve_session_profile_for_symbol(self, stock_code: Optional[str]) -> str:
+    def _resolve_session_profile_for_symbol(self, stock_code: str | None) -> str:
         explicit_profile = str(os.environ.get("EASYXT_SESSION_PROFILE", "CN_A")).strip()
         if explicit_profile and explicit_profile.upper() != "AUTO":
             return explicit_profile
@@ -2896,7 +2899,7 @@ class UnifiedDataInterface:
                 return profile
         return str(payload.get("default_profile") or "CN_A")
 
-    def _make_period_bar_builder(self, stock_code: Optional[str] = None):
+    def _make_period_bar_builder(self, stock_code: str | None = None):
         from data_manager.period_bar_builder import PeriodBarBuilder
 
         return PeriodBarBuilder(
@@ -2994,7 +2997,7 @@ class UnifiedDataInterface:
         end_date: str,
         adjust: str = "none",
         expected_adj_factor_hash: str = "",
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         """从 custom_period_bars 表读取预计算缓存，命中返回 DataFrame，未命中返回 None。"""
         try:
             if not self.con:
@@ -3102,10 +3105,15 @@ class UnifiedDataInterface:
                 [stock_code, period, adjust],
             )
             # INSERT（显式列名，跳过 created_at DEFAULT）
-            col_list = ", ".join(target_cols)
+            df_insert = df_save[target_cols].copy()
+            self.con.register("df_custom_period_insert_temp", df_insert)
             self.con.execute(
-                f"INSERT INTO custom_period_bars ({col_list}) SELECT {col_list} FROM df_save"
+                "INSERT INTO custom_period_bars "
+                "(stock_code, period, datetime, open, high, low, close, volume, amount, adjust_type, adj_factor_hash, is_partial) "
+                "SELECT stock_code, period, datetime, open, high, low, close, volume, amount, adjust_type, adj_factor_hash, is_partial "
+                "FROM df_custom_period_insert_temp"
             )
+            self.con.unregister("df_custom_period_insert_temp")
             self._logger.debug(
                 "custom_period_bars 写入: %s %s %d 行", stock_code, period, len(df_save)
             )
@@ -3116,7 +3124,7 @@ class UnifiedDataInterface:
                 write_lock.release()
 
     @staticmethod
-    def _resample_ohlcv(df: pd.DataFrame, rule: str) -> Optional[pd.DataFrame]:
+    def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame | None:
         """将细粒度 OHLCV DataFrame resample 到更粗的周期"""
         if df is None or df.empty:
             return df
@@ -3150,8 +3158,8 @@ class UnifiedDataInterface:
         period: str,
         adjust: str,
         _allow_aggregate: bool = True,
-        listing_date: Optional[str] = None,
-    ) -> Optional[pd.DataFrame]:
+        listing_date: str | None = None,
+    ) -> pd.DataFrame | None:
         """从DuckDB读取数据 - 修复版（添加表存在性检查 + 派生周期聚合）"""
         try:
             start_date = self._normalize_date_str(start_date)
@@ -3402,7 +3410,7 @@ class UnifiedDataInterface:
         # 3. 兜底：中国证券市场最早开业日
         return "1990-01-01"
 
-    def get_stock_date_range(self, stock_code: str, period: str) -> Optional[tuple[str, str]]:
+    def get_stock_date_range(self, stock_code: str, period: str) -> tuple[str, str] | None:
         if not self.duckdb_available or not self.con:
             return None
         table_map = {
@@ -3453,7 +3461,7 @@ class UnifiedDataInterface:
 
     def _read_from_qmt(
         self, stock_code: str, start_date: str, end_date: str, period: str
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         if os.environ.get("EASYXT_ENABLE_QMT_ONLINE", "1") not in ("1", "true", "True"):
             return None
         try:
@@ -3576,7 +3584,7 @@ class UnifiedDataInterface:
 
     def _read_tick_from_qmt(
         self, xtdata, stock_code: str, start_date: str, end_date: str
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         try:
             start_str = pd.to_datetime(start_date).strftime("%Y%m%d")
             end_str = pd.to_datetime(end_date).strftime("%Y%m%d")
@@ -3615,7 +3623,7 @@ class UnifiedDataInterface:
 
     def _read_transaction_from_qmt(
         self, xtdata, stock_code: str, start_date: str, end_date: str
-    ) -> tuple[Optional[pd.DataFrame], bool]:
+    ) -> tuple[pd.DataFrame | None, bool]:
         try:
             start_str = pd.to_datetime(start_date).strftime("%Y%m%d")
             end_str = pd.to_datetime(end_date).strftime("%Y%m%d")
@@ -3737,7 +3745,7 @@ class UnifiedDataInterface:
 
     def _read_from_akshare(
         self, stock_code: str, start_date: str, end_date: str, period: str
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         """AKShare 数据拉取：支持股票/指数接口自动路由 + 零配置重试。"""
         try:
             import akshare as ak
@@ -3756,7 +3764,7 @@ class UnifiedDataInterface:
         end_str = end_date.replace("-", "")
         is_index = self._is_index_code(stock_code)
 
-        def _fetch_once() -> Optional[pd.DataFrame]:
+        def _fetch_once() -> pd.DataFrame | None:
             """  单次拉取，返回原始 df 或 None。"""
             if period == "1d":
                 if is_index:
@@ -3787,8 +3795,8 @@ class UnifiedDataInterface:
                 )
             return None  # 不支持的周期
 
-        df: Optional[pd.DataFrame] = None
-        last_err: Optional[Exception] = None
+        df: pd.DataFrame | None = None
+        last_err: Exception | None = None
         t0 = time.perf_counter()
         for attempt in range(max_retries + 1):
             try:
@@ -3857,7 +3865,7 @@ class UnifiedDataInterface:
 
     def _read_from_tushare(
         self, stock_code: str, start_date: str, end_date: str, period: str
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         if period != "1d":
             return None
         if not self._tushare_token:
@@ -3899,7 +3907,7 @@ class UnifiedDataInterface:
 
     def _get_dividends_from_qmt(
         self, stock_code: str, start_date, end_date
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         """
         从QMT获取分红数据，用于计算复权价格
 
@@ -4278,7 +4286,7 @@ class UnifiedDataInterface:
         pre_gate_pass: bool,
         contract_pass: bool,
         post_verify_pass: bool,
-        error_message: Optional[str] = None,
+        error_message: str | None = None,
     ) -> str:
         """写入 write_audit_log 记录每次写操作的审计信息。"""
         if not self.con or self._read_only_connection:
@@ -4306,7 +4314,7 @@ class UnifiedDataInterface:
             self._logger.warning("写入write_audit_log失败: %s", e)
             return ""
 
-    def _build_quarantine_sample_json(self, df: Optional[pd.DataFrame], limit: int = 20) -> str:
+    def _build_quarantine_sample_json(self, df: pd.DataFrame | None, limit: int = 20) -> str:
         if df is None or df.empty:
             return ""
         try:
@@ -4328,11 +4336,11 @@ class UnifiedDataInterface:
         date_max: str,
         sample_json: str,
         *,
-        sequence_id: Optional[str] = None,
-        source_event_time: Optional[Any] = None,
-        ingest_time: Optional[Any] = None,
-        watermark_ms: Optional[int] = None,
-        lateness_ms: Optional[int] = None,
+        sequence_id: str | None = None,
+        source_event_time: Any | None = None,
+        ingest_time: Any | None = None,
+        watermark_ms: int | None = None,
+        lateness_ms: int | None = None,
         watermark_late: bool = False,
     ) -> None:
         if not self.con or self._read_only_connection:
@@ -4375,7 +4383,7 @@ class UnifiedDataInterface:
         period: str,
         level: str,
         reason: str,
-        details: Optional[dict[str, Any]] = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         if (
             threading.current_thread() is not threading.main_thread()
@@ -4404,7 +4412,7 @@ class UnifiedDataInterface:
         stock_code: str,
         period: str,
         quarantine_id: str,
-        payload: Optional[dict[str, Any]] = None,
+        payload: dict[str, Any] | None = None,
     ) -> None:
         if not self.con or self._read_only_connection:
             return
@@ -4438,9 +4446,9 @@ class UnifiedDataInterface:
         period: str,
         _retry_after_reconnect: bool = False,
         *,
-        _ingest_source: Optional[str] = None,
-        _ingest_start: Optional[str] = None,
-        _ingest_end: Optional[str] = None,
+        _ingest_source: str | None = None,
+        _ingest_start: str | None = None,
+        _ingest_end: str | None = None,
     ):
         """保存数据到DuckDB - 修复版（确保表存在）
 
@@ -4900,6 +4908,18 @@ class UnifiedDataInterface:
          "market_data", "custom_period_bars"}
     )
 
+    _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    @classmethod
+    def _is_safe_identifier(cls, value: str) -> bool:
+        return bool(cls._IDENTIFIER_RE.fullmatch(str(value or "")))
+
+    @classmethod
+    def _quote_identifier(cls, value: str) -> str:
+        if not cls._is_safe_identifier(value):
+            raise ValueError(f"非法标识符: {value!r}")
+        return f'"{value}"'
+
     def _write_shadow_copy(
         self,
         table_name: str,
@@ -4911,25 +4931,30 @@ class UnifiedDataInterface:
         if table_name not in self._SAFE_TABLE_NAMES:
             raise ValueError(f"不允许的表名: {table_name!r}（仅接受内部已知表名）")
         shadow_table = f"{table_name}_shadow"
+        if not self._is_safe_identifier(date_col):
+            raise ValueError(f"非法日期列名: {date_col!r}")
+        table_q = self._quote_identifier(table_name)
+        shadow_q = self._quote_identifier(shadow_table)
+        date_col_q = self._quote_identifier(date_col)
         self.con.execute(
-            f"CREATE TABLE IF NOT EXISTS {shadow_table} AS SELECT * FROM {table_name} WHERE 1=0"
+            f"CREATE TABLE IF NOT EXISTS {shadow_q} AS SELECT * FROM {table_q} WHERE 1=0"
         )
         date_min = str(df_to_save[date_col].min())
         date_max = str(df_to_save[date_col].max())
         self.con.execute(
-            "DELETE FROM " + shadow_table +
+            "DELETE FROM " + shadow_q +
             " WHERE stock_code = ? AND period = ?"
-            " AND " + date_col + " >= ? AND " + date_col + " <= ?",
+            " AND " + date_col_q + " >= ? AND " + date_col_q + " <= ?",
             [stock_code, storage_period, date_min, date_max],
         )
         shadow_columns = (
-            self.con.execute(f"DESCRIBE {shadow_table}").fetchdf()["column_name"].tolist()
+            self.con.execute(f"DESCRIBE {shadow_q}").fetchdf()["column_name"].tolist()
         )
         df_shadow = pd.DataFrame()
         for col in shadow_columns:
             df_shadow[col] = df_to_save[col] if col in df_to_save.columns else None
         self.con.register("df_shadow_temp", df_shadow)
-        self.con.execute(f"INSERT INTO {shadow_table} SELECT * FROM df_shadow_temp")
+        self.con.execute(f"INSERT INTO {shadow_q} SELECT * FROM df_shadow_temp")
         self.con.unregister("df_shadow_temp")
 
     def _save_ticks_to_duckdb(self, data: pd.DataFrame, stock_code: str) -> None:
@@ -5437,8 +5462,8 @@ class UnifiedDataInterface:
         self,
         symbol: str,
         factor_name: str,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ) -> pd.Series:
         """
         从 DuckDB 加载指定因子序列。
@@ -5484,7 +5509,7 @@ class UnifiedDataInterface:
             )
             return -1
 
-    def list_stored_factors(self, symbol: Optional[str] = None) -> pd.DataFrame:
+    def list_stored_factors(self, symbol: str | None = None) -> pd.DataFrame:
         """
         查询 DuckDB 中已存储的因子汇总信息。
 
@@ -5517,7 +5542,7 @@ def get_stock_data(
     end_date: str,
     period: str = "1d",
     adjust: str = "none",
-    duckdb_path: Optional[str] = None,
+    duckdb_path: str | None = None,
 ) -> pd.DataFrame:
     """
     便捷函数：获取股票数据（统一入口）

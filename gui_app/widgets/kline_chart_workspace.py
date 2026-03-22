@@ -48,6 +48,7 @@ from PyQt5.QtWidgets import (
 from core.events import Events
 from core.signal_bus import signal_bus
 from core.theme_manager import ThemeManager
+from core.thread_manager import thread_manager
 from data_manager.duckdb_connection_pool import resolve_duckdb_path
 from data_manager.realtime_pipeline_manager import RealtimePipelineManager
 from easy_xt.realtime_data.persistence.duckdb_sink import RealtimeDuckDBSink
@@ -1522,7 +1523,7 @@ class KLineChartWorkspace(QWidget):
         self._load_persisted_state()
 
         # 异步加载标的补全列表
-        threading.Thread(target=self._load_symbol_completions, daemon=True).start()
+        thread_manager.run(self._load_symbol_completions, name="load_symbol_completions")
 
         return panel
 
@@ -1731,9 +1732,9 @@ class KLineChartWorkspace(QWidget):
         if data is None or data.empty or manager is None:
             return
         data_copy = data.copy()
-        threading.Thread(
-            target=self._compute_subchart_bg, args=(manager, data_copy, full_set), daemon=True
-        ).start()
+        thread_manager.run(
+            self._compute_subchart_bg, args=(manager, data_copy, full_set), name="compute_subchart_bg"
+        )
 
     def _compute_subchart_bg(self, manager: SubchartManager, data: pd.DataFrame, full_set: bool = False):
         """后台线程: 执行所有指标 pandas 计算 (Fix 71: 用 pyqtSignal 跨线程回主线程)"""
@@ -2363,7 +2364,7 @@ class KLineChartWorkspace(QWidget):
             self._check_metrics_periodically()
             return
         self._flush_in_progress = True
-        threading.Thread(target=self._bg_flush_pipeline, daemon=True).start()
+        thread_manager.run(self._bg_flush_pipeline, name="bg_flush_pipeline")
         self._check_metrics_periodically()
 
     def _bg_flush_pipeline(self):
@@ -2432,11 +2433,11 @@ class KLineChartWorkspace(QWidget):
                 symbol = self.symbol_input.text().strip()
         except Exception:
             symbol = ""
-        threading.Thread(
-            target=self._log_degrade_event_worker,
+        thread_manager.run(
+            self._log_degrade_event_worker,
             args=(mode, interval_ms, symbol),
-            daemon=True,
-        ).start()
+            name="log_degrade_event",
+        )
 
     @staticmethod
     def _log_degrade_event_worker(mode: str, interval_ms: int, symbol: str):
@@ -2539,7 +2540,7 @@ class KLineChartWorkspace(QWidget):
             except Exception:
                 pass
 
-        threading.Thread(target=_send, daemon=True).start()
+        thread_manager.run(_send, name="post_monitor_payload")
 
     def _trigger_degrade_alert(self, alert_type: str = "degraded", interval: int = 0):
         payload = {
@@ -2643,7 +2644,7 @@ class KLineChartWorkspace(QWidget):
             # Fix 58: force-flush 也推到后台线程，与 _bg_flush_pipeline 保持一致
             if not self._flush_in_progress:
                 self._flush_in_progress = True
-                threading.Thread(target=self._bg_flush_pipeline_force, daemon=True).start()
+                thread_manager.run(self._bg_flush_pipeline_force, name="bg_flush_pipeline_force")
 
     def _apply_pipeline_result(self, result: dict[str, Any]):
         action = result.get("action")
@@ -3005,7 +3006,7 @@ class KLineChartWorkspace(QWidget):
             return
         self._source_status_refreshing = True
         api = self.realtime_api
-        threading.Thread(target=self._bg_refresh_source_status, args=(api,), daemon=True).start()
+        thread_manager.run(self._bg_refresh_source_status, args=(api,), name="bg_refresh_source_status")
 
     def _bg_refresh_source_status(self, api):
         """后台线程: 获取数据源状态"""
@@ -3058,9 +3059,7 @@ class KLineChartWorkspace(QWidget):
         symbol = self._normalize_symbol(self.symbol_input.text().strip())
         if not symbol:
             return False
-        threading.Thread(
-            target=self._bg_load_orderbook, args=(symbol, reason), daemon=True
-        ).start()
+        thread_manager.run(self._bg_load_orderbook, args=(symbol, reason), name="bg_load_orderbook")
         return True  # 异步发起，返回 True 表示已尝试
 
     def _bg_load_orderbook(self, symbol: str, reason: str):

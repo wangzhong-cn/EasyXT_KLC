@@ -7,7 +7,6 @@ import socket
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QLabel, QPushButton, QTabWidget, QVBoxLayout, QWidget
@@ -19,7 +18,7 @@ from gui_app.widgets.operation_panel.tabs import AccountTab, PositionTab, TradeT
 _logger = logging.getLogger(__name__)
 
 
-def _safe_int(env_key: str, default: int, min_val: Optional[int] = None, max_val: Optional[int] = None) -> int:
+def _safe_int(env_key: str, default: int, min_val: int | None = None, max_val: int | None = None) -> int:
     try:
         val = int(os.environ.get(env_key, str(default)))
         if min_val is not None and val < min_val:
@@ -116,7 +115,7 @@ def _create_error_placeholder(
 
         def open_log_dir():
             try:
-                subprocess.Popen(f'explorer "{log_dir}"', shell=True)
+                subprocess.Popen(["explorer", str(log_dir)])
             except Exception:
                 pass
 
@@ -219,7 +218,7 @@ class OperationPanel(QWidget):
         else:
             return f"运行异常({error_type})"
 
-    def _create_widget(self, module_path: str, class_name: str, retry_index: Optional[int] = None):
+    def _create_widget(self, module_path: str, class_name: str, retry_index: int | None = None):
         t0 = time.perf_counter()
         try:
             module = importlib.import_module(module_path)

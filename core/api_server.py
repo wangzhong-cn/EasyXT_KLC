@@ -30,9 +30,19 @@ import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional, Set
+from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -43,7 +53,8 @@ log = logging.getLogger(__name__)
 # 配置（环境变量驱动）
 # ---------------------------------------------------------------------------
 
-_API_TOKEN: str = os.environ.get("EASYXT_API_TOKEN", "")          # 空 = 不启用鉴权
+_API_TOKEN: str = os.environ.get("EASYXT_API_TOKEN", "")          # 空 = 生产环境拒绝启动
+_DEV_MODE: bool = os.environ.get("EASYXT_DEV_MODE", "").lower() in ("1", "true", "yes")  # 本地开发跳过鉴权
 _RATE_LIMIT: int = int(os.environ.get("EASYXT_RATE_LIMIT", "60"))  # 每分钟每IP上限
 _WS_SEND_TIMEOUT: float = float(os.environ.get("EASYXT_WS_TIMEOUT", "0.1"))  # 慢消费者超时(秒)
 _WS_MAX_QUEUE_SIZE: int = int(os.environ.get("EASYXT_WS_QUEUE_SIZE", "64"))   # 每连接队列上限（满则丢帧）
@@ -92,10 +103,10 @@ def _init_prometheus() -> tuple[bool, Any, Any, Any, Any, Any, Any, Any]:
 # 限流：滑动窗口（每 IP 每 60 秒最多 _RATE_LIMIT 次）
 # ---------------------------------------------------------------------------
 
-_rate_buckets: Dict[str, deque] = {}
+_rate_buckets: dict[str, deque] = {}
 _rate_limit_lock = threading.Lock()   # 保护 _rate_buckets 和 _rate_limit_hits 的并发访问
 _rate_limit_hits: int = 0             # 限流命中累计计数（仅增不减，供监控采集）
-_cleanup_stats: Dict[str, Any] = {
+_cleanup_stats: dict[str, Any] = {
     "last_run_epoch": None,   # 最近一次清理任务运行的 epoch(s)，None 表示尚未运行
     "last_removed_count": 0,  # 最近一次清理删除的 IP 桶数量
     "error_count": 0,         # 清理任务累计异常次数（任务活着但反复报错时可见）
@@ -190,7 +201,7 @@ async def _verify_auth_and_rate(
 # 统一错误响应格式
 # ---------------------------------------------------------------------------
 
-_HTTP_MESSAGES: Dict[int, str] = {
+_HTTP_MESSAGES: dict[int, str] = {
     400: "Bad Request",
     401: "Unauthorized",
     403: "Forbidden",
@@ -235,11 +246,11 @@ class _MarketBroadcaster:
     _EVENT_WINDOW_MAX: int = 10_000   # 最多保留条目数（100 次/秒 × ~100 s）
 
     def __init__(self) -> None:
-        self._channels: Dict[str, Set[WebSocket]] = {}
-        self._seq: Dict[str, int] = {}             # per-symbol 单调递增序号
-        self._queues: Dict[WebSocket, asyncio.Queue] = {}
-        self._drain_tasks: Dict[WebSocket, asyncio.Task] = {}
-        self._drop_counts: Dict[str, int] = {}     # per-symbol 丢帧累计
+        self._channels: dict[str, set[WebSocket]] = {}
+        self._seq: dict[str, int] = {}             # per-symbol 单调递增序号
+        self._queues: dict[WebSocket, asyncio.Queue] = {}
+        self._drain_tasks: dict[WebSocket, asyncio.Task] = {}
+        self._drop_counts: dict[str, int] = {}     # per-symbol 丢帧累计
         self._total_attempted: int = 0                 # 全生命周期 put_nowait 调用总次数（含成功与丢帧）
         # publish_latency 滑动窗口（单位 ms，仅统计有订阅者时的 broadcast 耗时）
         self._latency_window: deque = deque(maxlen=self._LATENCY_WINDOW)
@@ -304,23 +315,23 @@ class _MarketBroadcaster:
     def all_symbols(self) -> list[str]:
         return [s for s, ch in self._channels.items() if ch]
 
-    def drop_counts(self) -> Dict[str, int]:
+    def drop_counts(self) -> dict[str, int]:
         """返回各标的累计丢帧数（队列满时丢弃）。"""
         return dict(self._drop_counts)
 
-    def queue_depths(self) -> Dict[str, int]:
+    def queue_depths(self) -> dict[str, int]:
         """返回每个活跃 WS 连接的当前队列水位（key 为连接对象 id 的字符串）。"""
         return {str(id(ws)): q.qsize() for ws, q in self._queues.items()}
 
     @property
-    def avg_publish_latency_ms(self) -> Optional[float]:
+    def avg_publish_latency_ms(self) -> float | None:
         """最近 _LATENCY_WINDOW 次 broadcast 的平均耗时（ms），无数据时返回 None。"""
         if not self._latency_window:
             return None
         return round(sum(self._latency_window) / len(self._latency_window), 3)
 
     @property
-    def max_publish_latency_ms(self) -> Optional[float]:
+    def max_publish_latency_ms(self) -> float | None:
         """最近 _LATENCY_WINDOW 次 broadcast 的最大耗时（ms），无数据时返回 None。
 
         用于灰度阶段感知尾延迟：单次异常帧（如 GC 停顿、事件循环阻塞）
@@ -436,8 +447,8 @@ broadcaster = _MarketBroadcaster()
 # 线程→事件循环桥接（QMT 回调注入实时行情）
 # ---------------------------------------------------------------------------
 
-_server_loop: Optional[asyncio.AbstractEventLoop] = None
-_server_start_time: Optional[float] = None  # monotonic 启动时刻，用于计算 uptime_s
+_server_loop: asyncio.AbstractEventLoop | None = None
+_server_start_time: float | None = None  # monotonic 启动时刻，用于计算 uptime_s
 
 
 def ingest_tick_from_thread(symbol: str, tick_data: dict) -> None:
@@ -473,7 +484,7 @@ def ingest_tick_from_thread(symbol: str, tick_data: dict) -> None:
 # 模拟行情推送后台任务（实盘时用 ingest_tick_from_thread 替代）
 # ---------------------------------------------------------------------------
 
-_mock_tick_tasks: Dict[str, asyncio.Task] = {}
+_mock_tick_tasks: dict[str, asyncio.Task] = {}
 
 
 async def _mock_tick_loop(symbol: str) -> None:
@@ -483,7 +494,7 @@ async def _mock_tick_loop(symbol: str) -> None:
     while True:
         await broadcaster.broadcast(symbol, {
             "symbol": symbol,
-            "price": round(base + random.uniform(-0.5, 0.5), 3),
+            "price": round(base + random.uniform(-0.5, 0.5), 3),  # noqa: S311  # mock only
             "source": "mock",
         })
         await asyncio.sleep(1.0)
@@ -520,9 +531,22 @@ async def _lifespan(app: FastAPI):
     _server_loop = asyncio.get_event_loop()
     _server_start_time = time.monotonic()
     _cleanup_task = asyncio.create_task(_cleanup_rate_buckets())
+    if not _API_TOKEN:
+        if _DEV_MODE:
+            log.warning(
+                "⚠️  [DEV_MODE] EASYXT_API_TOKEN 未设置，鉴权已跳过（仅限本地开发）。"
+                " 生产部署必须设置 EASYXT_API_TOKEN 并移除 EASYXT_DEV_MODE=1。"
+            )
+        else:
+            raise RuntimeError(
+                "EASYXT_API_TOKEN 未设置，服务拒绝启动。\n"
+                "  生产环境：设置 EASYXT_API_TOKEN=<secret>\n"
+                "  本地开发：设置 EASYXT_DEV_MODE=1（不得用于生产）"
+            )
     log.info(
-        "EasyXT 中台服务启动 (auth=%s, rate_limit=%d req/min, ws_timeout=%.2fs)",
-        "enabled" if _API_TOKEN else "disabled",
+        "EasyXT 中台服务启动 (auth=%s, dev_mode=%s, rate_limit=%d req/min, ws_timeout=%.2fs)",
+        "enabled" if _API_TOKEN else "disabled(DEV)",
+        _DEV_MODE,
         _RATE_LIMIT,
         _WS_SEND_TIMEOUT,
     )
@@ -1064,8 +1088,9 @@ def refresh_financial_data(
         try:
             iface = _get_datasource_health_interface()
             if getattr(iface, "qmt_available", False):
-                from xtquant import xtdata  # type: ignore[import]
                 import pandas as pd
+
+                from xtquant import xtdata  # type: ignore[import]
 
                 raw = xtdata.get_financial_data(
                     stock_list=[stock_code],
@@ -1163,7 +1188,7 @@ def prometheus_metrics() -> Response:
                 _prom_rate_limit_hits.inc(diff)  # type: ignore[union-attr]
         except Exception:
             pass
-        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
         return Response(
             content=generate_latest(_prom_registry),
             media_type=CONTENT_TYPE_LATEST,
@@ -1171,23 +1196,23 @@ def prometheus_metrics() -> Response:
 
     # 降级：纯文本 Prometheus 格式（无 prometheus_client）
     lines = [
-        f"# HELP easyxt_rate_limit_hits_total 累计限流命中次数",
-        f"# TYPE easyxt_rate_limit_hits_total counter",
+        "# HELP easyxt_rate_limit_hits_total 累计限流命中次数",
+        "# TYPE easyxt_rate_limit_hits_total counter",
         f"easyxt_rate_limit_hits_total {_rate_limit_hits}",
-        f"# HELP easyxt_ws_drop_rate WebSocket 全生命周期丢帧率",
-        f"# TYPE easyxt_ws_drop_rate gauge",
+        "# HELP easyxt_ws_drop_rate WebSocket 全生命周期丢帧率",
+        "# TYPE easyxt_ws_drop_rate gauge",
         f"easyxt_ws_drop_rate {broadcaster.drop_rate}",
-        f"# HELP easyxt_ws_drop_rate_1m WebSocket 近 60s 丢帧率",
-        f"# TYPE easyxt_ws_drop_rate_1m gauge",
+        "# HELP easyxt_ws_drop_rate_1m WebSocket 近 60s 丢帧率",
+        "# TYPE easyxt_ws_drop_rate_1m gauge",
         f"easyxt_ws_drop_rate_1m {broadcaster.drop_rate_1m}",
-        f"# HELP easyxt_strategies_running 当前运行中的策略数量",
-        f"# TYPE easyxt_strategies_running gauge",
+        "# HELP easyxt_strategies_running 当前运行中的策略数量",
+        "# TYPE easyxt_strategies_running gauge",
         f"easyxt_strategies_running {max(running_count, 0)}",
-        f"# HELP easyxt_ws_queue_total_len WS 队列积压帧总数",
-        f"# TYPE easyxt_ws_queue_total_len gauge",
+        "# HELP easyxt_ws_queue_total_len WS 队列积压帧总数",
+        "# TYPE easyxt_ws_queue_total_len gauge",
         f"easyxt_ws_queue_total_len {total_queue_len}",
-        f"# HELP easyxt_uptime_seconds 服务运行时长",
-        f"# TYPE easyxt_uptime_seconds gauge",
+        "# HELP easyxt_uptime_seconds 服务运行时长",
+        "# TYPE easyxt_uptime_seconds gauge",
         f"easyxt_uptime_seconds {uptime_s}",
     ]
     return Response(

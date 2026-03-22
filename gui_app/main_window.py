@@ -270,6 +270,7 @@ def _is_realtime_failure_reason(reason: str) -> bool:
 Events = importlib.import_module("core.events").Events
 signal_bus = importlib.import_module("core.signal_bus").signal_bus
 ThemeManager = importlib.import_module("core.theme_manager").ThemeManager
+thread_manager = importlib.import_module("core.thread_manager").thread_manager
 try:
     engine_status_ui_module = importlib.import_module("gui_app.backtest.engine_status_ui")
     format_engine_status_ui = getattr(engine_status_ui_module, "format_engine_status_ui")
@@ -724,7 +725,7 @@ class MainWindow(QMainWindow):
         self._alerts_rollup_timer.start()
 
     def _rollup_alerts_log(self):
-        threading.Thread(target=self._rollup_alerts_log_worker, daemon=True).start()
+        thread_manager.run(self._rollup_alerts_log_worker, name="rollup_alerts_log")
 
     def _rollup_alerts_log_worker(self):
         log_dir = os.path.join(project_path, "logs")
@@ -809,7 +810,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        threading.Thread(target=_send, daemon=True).start()
+        thread_manager.run(_send, name="send_alerts_notification")
 
     def _send_alerts_to_dashboard(self, summary: dict[str, object]):
         base = os.environ.get("EASYXT_MONITOR_DASHBOARD_URL", "").strip()
@@ -828,7 +829,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        threading.Thread(target=_send, daemon=True).start()
+        thread_manager.run(_send, name="send_alerts_dashboard")
 
     def _save_alerts_state(self):
         try:
@@ -839,7 +840,7 @@ class MainWindow(QMainWindow):
 
     def _probe_backtest_engine_status(self):
         # 回测引擎探测包含重量级 import (backtrader 等)，推到后台线程（㊷修复）
-        threading.Thread(target=self._probe_backtest_engine_status_bg, daemon=True).start()
+        thread_manager.run(self._probe_backtest_engine_status_bg, name="probe_backtest_engine_status")
 
     def _probe_backtest_engine_status_bg(self):
         status = {
@@ -883,11 +884,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._health_check_results["chart"] = {"status": "error", "message": str(e)}
         # DuckDB 和 easyxt 检查推到后台线程
-        threading.Thread(
-            target=self._run_health_checks_bg,
-            args=(stage,),
-            daemon=True,
-        ).start()
+        thread_manager.run(self._run_health_checks_bg, args=(stage,), name="run_health_checks_bg")
 
     def _run_health_checks_bg(self, stage: str):
         """后台执行 DuckDB + easyxt + pipeline 检查，完成后回主线程更新 UI"""
@@ -1052,7 +1049,7 @@ class MainWindow(QMainWindow):
 
     def _emit_stability_summary(self):
         """启动后 60 秒稳定性摘要：DB 访问在后台线程，UI 回主线程。"""
-        threading.Thread(target=self._emit_stability_summary_bg, daemon=True).start()
+        thread_manager.run(self._emit_stability_summary_bg, name="emit_stability_summary_bg")
 
     def _emit_stability_summary_bg(self):
         try:
@@ -1095,7 +1092,7 @@ class MainWindow(QMainWindow):
             self.health_status.setToolTip(tooltip)
 
     def _emit_service_log_diagnostics(self):
-        threading.Thread(target=self._emit_service_log_diagnostics_worker, daemon=True).start()
+        thread_manager.run(self._emit_service_log_diagnostics_worker, name="emit_service_log_diagnostics")
 
     def _emit_service_log_diagnostics_worker(self):
         log_path = os.path.join(project_path, "logs", "service_manager.log")
@@ -1378,11 +1375,11 @@ class MainWindow(QMainWindow):
                 "[WATCHDOG][SLO] p99=%.3fs > target=%.3fs consecutive=%s",
                 p99, self._watchdog_slo_p99_s, self._watchdog_consecutive_violations,
             )
-        threading.Thread(
-            target=self._append_json_log_line,
+        thread_manager.run(
+            self._append_json_log_line,
             args=(self._watchdog_log_path, record),
-            daemon=True,
-        ).start()
+            name="append_watchdog_log",
+        )
 
     def _thread_watermark_tick(self):
         active_threads = int(threading.active_count())
@@ -1396,11 +1393,11 @@ class MainWindow(QMainWindow):
                 "[THREAD_WATERMARK] active=%s > threshold=%s",
                 active_threads, self._thread_watermark_threshold,
             )
-        threading.Thread(
-            target=self._append_json_log_line,
+        thread_manager.run(
+            self._append_json_log_line,
             args=(self._thread_watermark_log_path, record),
-            daemon=True,
-        ).start()
+            name="append_thread_watermark_log",
+        )
 
     @staticmethod
     def _append_json_log_line(path: str, payload: dict[str, object]):
@@ -2443,7 +2440,7 @@ class MainWindow(QMainWindow):
 
             # 连接成功后，后台预热 xtquant_broker 单例，
             # 减少 realtime worker 首次 fast-fail 空窗期
-            threading.Thread(target=self._warmup_xtquant_broker, daemon=True).start()
+            thread_manager.run(self._warmup_xtquant_broker, name="warmup_xtquant_broker")
 
             # 自动启动服务（如果尚未运行，且未熔断）
             if (not self.service_process or self.service_process.state() == QProcess.NotRunning)\
