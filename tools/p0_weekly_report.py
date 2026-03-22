@@ -27,9 +27,21 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:
-    from .release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary, rag_tag
+    from .release_rag_policy import (
+        gate_detail_tag,
+        header_rag_status,
+        parse_gate_detail_tag,
+        period_validation_summary,
+        rag_tag,
+    )
 except Exception:
-    from release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary, rag_tag
+    from release_rag_policy import (
+        gate_detail_tag,
+        header_rag_status,
+        parse_gate_detail_tag,
+        period_validation_summary,
+        rag_tag,
+    )
 
 HISTORY_PATH = pathlib.Path("artifacts/p0_trend_history.json")
 REPORT_DIR   = pathlib.Path("artifacts")
@@ -248,6 +260,12 @@ def _build_report(
         recon_rate = float(latest_recon.get("pass_rate", 0.0) or 0.0) * 100.0
         qmt_ok = latest_recon.get("qmt_available", None)
         ak_ok = latest_recon.get("akshare_available", None)
+        p0b_status = str(latest.get("p0b_concurrent_status") or "missing")
+        p0b_failed = int(latest.get("p0b_concurrent_failed_items", 0) or 0)
+        p0b_msg = str(latest.get("p0b_concurrent_message") or "")
+        api_smoke_status = str(latest.get("api_smoke_status") or "missing")
+        api_smoke_failed = int(latest.get("api_smoke_failed_items", 0) or 0)
+        api_smoke_msg = str(latest.get("api_smoke_message") or "")
         period_failed_items, period_max_allowed = period_validation_summary(
             stability_evidence_latest,
             peak_release_gate_latest,
@@ -270,6 +288,10 @@ def _build_report(
             f"| 双源对账通过率（最新） | {recon_pass}/{recon_total} ({recon_rate:.1f}%) |",
             f"| 双源对账失败标的（最新） | {recon_fail} |",
             f"| 双源源可用性（最新） | QMT={'✅' if qmt_ok else '❌' if qmt_ok is not None else 'N/A'} / AKShare={'✅' if ak_ok else '❌' if ak_ok is not None else 'N/A'} |",
+            f"| P0-B 并发门禁状态（最新） | {p0b_status}（failed_items={p0b_failed}） |",
+            f"| P0-B 并发门禁摘要（最新） | {p0b_msg or 'N/A'} |",
+            f"| API 冒烟门禁状态（最新） | {api_smoke_status}（failed_items={api_smoke_failed}） |",
+            f"| API 冒烟门禁摘要（最新） | {api_smoke_msg or 'N/A'} |",
         ]
         if isinstance(strategy_impact_latest, dict):
             si_available = bool(strategy_impact_latest.get("available", False))
@@ -341,11 +363,13 @@ def _build_report(
         "",
         f"- **对账通过率趋势**: {_slope_analysis(recon_scope, 'recon_pass_rate_pct') if recon_scope else '数据不足，无法分析趋势'}",
         f"- **失败标的趋势**: {_slope_analysis(recon_scope, 'recon_failed_symbols') if recon_scope else '数据不足，无法分析趋势'}",
+        f"- **P0-B 并发门禁趋势**: {_slope_analysis(records_week, 'p0b_concurrent_failed_items') if records_week else '数据不足，无法分析趋势'}",
+        f"- **API 冒烟门禁趋势**: {_slope_analysis(records_week, 'api_smoke_failed_items') if records_week else '数据不足，无法分析趋势'}",
         "",
         "## 明细（最近 14 条）",
         "",
-        "| 时间 | P0_open | crit/high | gate_pass | allowlist |",
-        "|------|---------|-----------|-----------|-----------|",
+        "| 时间 | P0_open | crit/high | gate_pass | p0b_status | p0b_failed | api_smoke | api_failed | allowlist |",
+        "|------|---------|-----------|-----------|------------|------------|-----------|------------|-----------|",
     ]
 
     for r in detail_rows:
@@ -353,8 +377,12 @@ def _build_report(
         p0  = _p0_of(r)
         ach = _ach_of(r)
         gp  = "PASS" if r.get("strict_gate_pass", False) else "FAIL"
+        p0b_status = str(r.get("p0b_concurrent_status") or "missing")
+        p0b_failed = int(r.get("p0b_concurrent_failed_items", 0) or 0)
+        api_status = str(r.get("api_smoke_status") or "missing")
+        api_failed = int(r.get("api_smoke_failed_items", 0) or 0)
         al  = r.get("allowlist_total", r.get("allowlist_suppressed", "?"))
-        lines.append(f"| {ts} | {p0} | {ach} | {gp} | {al} |")
+        lines.append(f"| {ts} | {p0} | {ach} | {gp} | {p0b_status} | {p0b_failed} | {api_status} | {api_failed} | {al} |")
 
     # SLO 告警（连续 3 天 active_critical_high 不下降且 > 0）
     if len(records_week) >= 4:

@@ -9,11 +9,11 @@ ChartEvents 的依赖（轻量 chart 和 signal_bus）均可以 MagicMock 替代
   - _on_search / _on_period_change / _on_click (全路径 + exception)
 """
 
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from gui_app.widgets.chart.chart_events import ChartEvents
-
 
 # ---------------------------------------------------------------------------
 # 存根辅助
@@ -218,3 +218,65 @@ class TestOnClick:
         with patch("gui_app.widgets.chart.chart_events.signal_bus") as mock_bus:
             mock_bus.emit.side_effect = RuntimeError("emit error")
             ce._on_click(MagicMock(), "t", 10.0)  # must not raise
+
+
+# ===========================================================================
+# set_symbol / set_period — 缓存行为
+# ===========================================================================
+
+class TestSymbolPeriodCache:
+    def test_set_symbol_updates_cache(self):
+        ce = _make_events()
+        assert ce._symbol == ""
+        ce.set_symbol("000001.SZ")
+        assert ce._symbol == "000001.SZ"
+
+    def test_set_symbol_empty_does_not_update_cache(self):
+        ce = _make_events()
+        ce._symbol = "old"
+        ce.set_symbol("")
+        assert ce._symbol == "old"
+
+    def test_set_period_updates_cache(self):
+        ce = _make_events()
+        assert ce._period == ""
+        ce.set_period("5m")
+        assert ce._period == "5m"
+
+    def test_set_period_empty_does_not_update_cache(self):
+        ce = _make_events()
+        ce._period = "1d"
+        ce.set_period("")
+        assert ce._period == "1d"
+
+
+# ===========================================================================
+# _on_crosshair_move
+# ===========================================================================
+
+class TestOnCrosshairMove:
+    def test_crosshair_emits_with_symbol_and_period(self):
+        ce = _make_events()
+        ce._symbol = "000001.SZ"
+        ce._period = "1m"
+        with patch("gui_app.widgets.chart.chart_events.signal_bus") as mock_bus:
+            ce._on_crosshair_move(MagicMock(), "2024-01-01 09:31", 11.5)
+        mock_bus.emit.assert_called_once()
+        kwargs = mock_bus.emit.call_args.kwargs
+        assert kwargs["price"] == pytest.approx(11.5)
+        assert kwargs["symbol"] == "000001.SZ"
+        assert kwargs["period"] == "1m"
+
+    def test_crosshair_emits_empty_symbol_when_not_set(self):
+        ce = _make_events()
+        with patch("gui_app.widgets.chart.chart_events.signal_bus") as mock_bus:
+            ce._on_crosshair_move(MagicMock(), None, None)
+        kwargs = mock_bus.emit.call_args.kwargs
+        assert kwargs["symbol"] == ""
+        assert kwargs["period"] == ""
+
+    def test_crosshair_exception_swallowed(self):
+        ce = _make_events()
+        with patch("gui_app.widgets.chart.chart_events.signal_bus") as mock_bus:
+            mock_bus.emit.side_effect = RuntimeError("bus error")
+            ce._on_crosshair_move(MagicMock(), "t", 1.0)  # must not raise

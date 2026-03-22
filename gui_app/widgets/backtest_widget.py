@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional, cast
 
@@ -1936,6 +1937,7 @@ class BacktestWidget(QWidget):
         self.strategy_param_widgets = {}
         self.strategy_scan_records = []
         self.strategy_editor_path = None
+        self._crosshair_last_t: float = 0.0
 
         self.init_ui()
         self.setup_connections()
@@ -3856,11 +3858,77 @@ class BacktestWidget(QWidget):
 
     def _connect_events(self):
         signal_bus.subscribe(Events.CHART_DATA_LOADED, self.on_chart_data_loaded)
+        signal_bus.subscribe(Events.CHART_CROSSHAIR_MOVED, self._on_crosshair_moved)
 
     def on_chart_data_loaded(self, symbol: str, **kwargs):
         if not symbol:
             return
         self.stock_code_edit.setText(symbol)
+
+    _CROSSHAIR_THROTTLE_S: float = max(
+        0.01,
+        int(os.environ.get("EASYXT_CROSSHAIR_THROTTLE_MS", "100")) / 1000.0,
+    )  # 可通过环境变量 EASYXT_CROSSHAIR_THROTTLE_MS（毫秒整数）覆盖
+
+    def _on_crosshair_moved(self, **kwargs: object) -> None:
+        """响应十字线移动事件，在 trades_table 中高亮最近的交易行（100ms 节流）。"""
+        sym = kwargs.get("symbol", "")
+        if sym and sym != self.stock_code_edit.text():
+            return
+        time_val = kwargs.get("time")
+        if time_val is None:
+            return
+        now = time.monotonic()
+        if now - self._crosshair_last_t < self._CROSSHAIR_THROTTLE_S:
+            return
+        self._crosshair_last_t = now
+        self._highlight_trades_row_at_time(time_val)
+
+    def _highlight_trades_row_at_time(self, time_val: object) -> None:
+        """在 trades_table 中找到最接近 time_val 的行并选中、滚动到视图。"""
+        row_count = self.trades_table.rowCount()
+        if row_count == 0:
+            return
+        if isinstance(time_val, (int, float)) and float(time_val) > 1_000_000_000:
+            from datetime import datetime
+            try:
+                target = datetime.fromtimestamp(float(time_val)).strftime("%Y-%m-%d")
+            except (OSError, OverflowError, ValueError):
+                return
+        else:
+            target = str(time_val)[:10]
+        if len(target) < 10:
+            return
+        # 找最近且不超过 target 的行（按日期列0的前10字符比较）
+        best_row = -1
+        best_date = ""
+        for row in range(row_count):
+            item = self.trades_table.item(row, 0)
+            if item is None:
+                continue
+            cell = item.text()[:10]
+            if len(cell) < 10:
+                continue
+            if cell <= target and (best_date == "" or cell >= best_date):
+                best_date = cell
+                best_row = row
+        # 全部日期都晚于 target 时，回退到最早行
+        if best_row == -1:
+            for row in range(row_count):
+                item = self.trades_table.item(row, 0)
+                if item is None:
+                    continue
+                cell = item.text()[:10]
+                if len(cell) < 10:
+                    continue
+                if best_date == "" or cell <= best_date:
+                    best_date = cell
+                    best_row = row
+        if best_row >= 0:
+            self.trades_table.selectRow(best_row)
+            scroll_item = self.trades_table.item(best_row, 0)
+            if scroll_item is not None:
+                self.trades_table.scrollToItem(scroll_item)
 
     def update_optimize_controls(self, enabled: bool):
         self.optimize_method_combo.setEnabled(enabled)

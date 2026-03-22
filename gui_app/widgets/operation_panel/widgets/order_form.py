@@ -17,6 +17,7 @@ class OrderForm(QWidget):
         layout.addWidget(self._panel)
         self._panel.order_requested.connect(self._emit_order)
         signal_bus.subscribe(Events.CHART_PRICE_CLICKED, self._on_chart_price_clicked)
+        signal_bus.subscribe(Events.CHART_CROSSHAIR_MOVED, self._on_chart_crosshair_moved)
 
     def _emit_order(self, side: str, symbol: str, price: float, volume: int):
         self.order_submitted.emit(
@@ -28,3 +29,14 @@ class OrderForm(QWidget):
 
     def _on_chart_price_clicked(self, price: float, **kwargs):
         self._panel.set_price(price)
+
+    def _on_chart_crosshair_moved(self, **kwargs):
+        event_symbol = str(kwargs.get("symbol") or "").strip()
+        panel_symbol = ""
+        try:
+            panel_symbol = str(self._panel.stock_combo.currentText() or "").strip()
+        except Exception:
+            panel_symbol = ""
+        if event_symbol and panel_symbol and event_symbol != panel_symbol:
+            return
+        self._panel.set_crosshair_hint(kwargs.get("time"), kwargs.get("price"))

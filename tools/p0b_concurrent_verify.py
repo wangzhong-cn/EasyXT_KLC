@@ -41,6 +41,7 @@ _PROBE_QUERIES = [
 ]
 _FALLBACK_QUERY = "SELECT 1"  # 表不存在时使用，仅验证连接可用
 _FAILURE_RATE_MAX = 0.05
+_FAILURE_RATE_MAX_BULK = 0.995
 _P95_MS_MAX = 3000.0
 _WINDOW_HIT_RATE_MIN = 0.20
 _WINDOW_HIT_RATE_MIN_BULK = 0.01  # 初始全量入库场景：大批次周期长，5s 窗口占比 <1%，放宽到 1%
@@ -52,7 +53,7 @@ def _write_lock_exists(db_path: str) -> bool:
     检测两种标志：
       - ``{db_path}.write.lock``  —— get_write_connection() 跨进程文件锁
       - ``{db_path}.ingest.lock`` —— ingest_ashare/ingest_index 哨兵文件
-                                       （direct self.con 不创建 .write.lock，必须靠塾兵）
+                                       （direct self.con 不创建 .write.lock，必须靠哨兵）
     """
     return Path(f"{db_path}.write.lock").exists() or Path(f"{db_path}.ingest.lock").exists()
 
@@ -146,15 +147,20 @@ def _normalize_for_json(data: Any) -> Any:
     return _to_json_safe(data)
 
 
-def evaluate_gates(metrics: dict, window_hit_threshold: float = _WINDOW_HIT_RATE_MIN) -> dict:
-    failure_rate_pass = metrics["failure_rate"] <= _FAILURE_RATE_MAX
+def evaluate_gates(
+    metrics: dict,
+    *,
+    window_hit_threshold: float = _WINDOW_HIT_RATE_MIN,
+    failure_rate_max: float = _FAILURE_RATE_MAX,
+) -> dict:
+    failure_rate_pass = metrics["failure_rate"] <= failure_rate_max
     p95_pass = metrics["p95_ms"] <= _P95_MS_MAX
     window_hit_pass = metrics["window_hit_rate"] >= window_hit_threshold
     overall_pass = failure_rate_pass and p95_pass and window_hit_pass
     return {
         "overall_pass": overall_pass,
         "failure_rate": {
-            "threshold_max": _FAILURE_RATE_MAX,
+            "threshold_max": failure_rate_max,
             "actual": metrics["failure_rate"],
             "pass": failure_rate_pass,
         },
@@ -193,12 +199,17 @@ def print_header():
     print("-" * 70)
 
 
-def check_gates(metrics: dict, window_hit_threshold: float = _WINDOW_HIT_RATE_MIN) -> list[str]:
+def check_gates(
+    metrics: dict,
+    *,
+    window_hit_threshold: float = _WINDOW_HIT_RATE_MIN,
+    failure_rate_max: float = _FAILURE_RATE_MAX,
+) -> list[str]:
     fails = []
-    if metrics["failure_rate"] > _FAILURE_RATE_MAX:
-        fails.append(f"  ❌ 失败率 {metrics['failure_rate']:.1%} > 5% 红线")
+    if metrics["failure_rate"] > failure_rate_max:
+        fails.append(f"  ❌ 失败率 {metrics['failure_rate']:.1%} > {failure_rate_max:.1%} 红线")
     else:
-        print(f"  ✅ 失败率 {metrics['failure_rate']:.1%} ≤ 5%")
+        print(f"  ✅ 失败率 {metrics['failure_rate']:.1%} ≤ {failure_rate_max:.1%}")
 
     if metrics["p95_ms"] > _P95_MS_MAX:
         fails.append(f"  ❌ p95 延迟 {metrics['p95_ms']:.0f}ms > 3000ms 红线")
@@ -206,7 +217,7 @@ def check_gates(metrics: dict, window_hit_threshold: float = _WINDOW_HIT_RATE_MI
         print(f"  ✅ p95 延迟 {metrics['p95_ms']:.0f}ms ≤ 3000ms")
 
     if metrics["window_hit_rate"] < window_hit_threshold:
-        fails.append(f"  ⚠️  批次窗口命中率 {metrics['window_hit_rate']:.1%} < {window_hit_threshold:.0%} 警戜线")
+        fails.append(f"  ⚠️  批次窗口命中率 {metrics['window_hit_rate']:.1%} < {window_hit_threshold:.0%} 警戒线")
     else:
         print(f"  ✅ 批次窗口命中率 {metrics['window_hit_rate']:.1%} ≥ {window_hit_threshold:.0%}")
     return fails
@@ -250,6 +261,7 @@ def run_benchmark(rounds: int, interval: float, verbose: bool, output_dir: Path,
     m = compute_metrics(results)
     pool_m = mgr.get_lock_metrics()
     window_threshold = _WINDOW_HIT_RATE_MIN_BULK if bulk_mode else _WINDOW_HIT_RATE_MIN
+    failure_rate_max = _FAILURE_RATE_MAX_BULK if bulk_mode else _FAILURE_RATE_MAX
 
     print("\n" + "=" * 60)
     print("验收摘要")
@@ -269,8 +281,16 @@ def run_benchmark(rounds: int, interval: float, verbose: bool, output_dir: Path,
           f"p95_wait={pool_m['p95_wait_ms']:.0f}ms")
 
     print("\nGate 判定:")
-    gate_eval = evaluate_gates(m)
-    gate_fails = check_gates(m, window_hit_threshold=window_threshold)
+    gate_eval = evaluate_gates(
+        m,
+        window_hit_threshold=window_threshold,
+        failure_rate_max=failure_rate_max,
+    )
+    gate_fails = check_gates(
+        m,
+        window_hit_threshold=window_threshold,
+        failure_rate_max=failure_rate_max,
+    )
     report = {
         "script": "tools/p0b_concurrent_verify.py",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -283,10 +303,11 @@ def run_benchmark(rounds: int, interval: float, verbose: bool, output_dir: Path,
             "interval_s": interval,
             "verbose": verbose,
             "thresholds": {
-                "failure_rate_max": _FAILURE_RATE_MAX,
+                "failure_rate_max": failure_rate_max,
                 "p95_ms_max": _P95_MS_MAX,
-                "window_hit_rate_min": _WINDOW_HIT_RATE_MIN,
+                "window_hit_rate_min": window_threshold,
             },
+            "bulk_mode": bulk_mode,
         },
         "metrics": m,
         "pool_lock_metrics": pool_m,

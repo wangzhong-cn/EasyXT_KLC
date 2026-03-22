@@ -49,6 +49,7 @@ def _make_udi():
         "base_s": 3.0,
         "max_s": 300.0,
     }
+    udi._cb_disabled = False
     return udi
 
 

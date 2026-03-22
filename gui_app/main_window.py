@@ -581,7 +581,7 @@ class MainWindow(QMainWindow):
         os.environ.setdefault("EASYXT_ENABLE_XTDATA_QUOTE_PROBE", "1")
         os.environ.setdefault("EASYXT_RT_XTDATA_ONLY", "0")
         os.environ.setdefault("EASYXT_ENABLE_XT_LISTING_DATE", "0")
-        os.environ.setdefault("EASYXT_ENABLE_QMT_ONLINE", "0")
+        os.environ.setdefault("EASYXT_ENABLE_QMT_ONLINE", "1")
         os.environ.setdefault("EASYXT_ENABLE_AUTO_CHECKPOINT", "0")
         os.environ.setdefault("EASYXT_CHECKPOINT_ON_PROCESS_EXIT", "0")
         in_session, _session_name = TradingHoursGuard.current_session()
@@ -1587,6 +1587,11 @@ class MainWindow(QMainWindow):
         self.release_gate_status.setToolTip("读取 artifacts/p0_metrics_latest.json")
         setattr(self.release_gate_status, "mousePressEvent", self.on_release_gate_status_clicked)
         self.status_bar.addPermanentWidget(self.release_gate_status)
+        self.qmt_diag_status = QLabel("QMT诊断: 待检测")
+        self.qmt_diag_status.setStyleSheet("color:#999; padding-left:8px;")
+        self.qmt_diag_status.setToolTip("显示 EASYXT_ENABLE_QMT_ONLINE 与 qmt_available")
+        setattr(self.qmt_diag_status, "mousePressEvent", self.on_qmt_diag_status_clicked)
+        self.status_bar.addPermanentWidget(self.qmt_diag_status)
         self.status_bar.showMessage("就绪")
 
         # 检查MiniQMT连接状态（启动时延迟1秒检查）
@@ -1599,6 +1604,9 @@ class MainWindow(QMainWindow):
         self.release_gate_timer = QTimer()
         self.release_gate_timer.timeout.connect(self._refresh_release_gate_status)
         self.release_gate_timer.start(int(os.environ.get("EASYXT_RELEASE_GATE_REFRESH_MS", "10000")))
+        self.qmt_diag_timer = QTimer()
+        self.qmt_diag_timer.timeout.connect(self._refresh_qmt_diag_status)
+        self.qmt_diag_timer.start(int(os.environ.get("EASYXT_QMT_DIAG_REFRESH_MS", "15000")))
         autostart_services = os.environ.get("EASYXT_AUTOSTART_SERVICES", "0") in (
             "1",
             "true",
@@ -1609,6 +1617,7 @@ class MainWindow(QMainWindow):
         self._render_realtime_pipeline_status()
         self._render_backtest_engine_status()
         self._refresh_release_gate_status()
+        self._refresh_qmt_diag_status()
 
     def on_connection_status_clicked(self, event):
         """连接状态标签被点击事件"""
@@ -1773,6 +1782,9 @@ class MainWindow(QMainWindow):
         if os.path.exists(metrics_path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(metrics_path))
         QMessageBox.information(self, "发布门禁详情", "\n".join(lines))
+
+    def on_qmt_diag_status_clicked(self, event):
+        self._refresh_qmt_diag_status()
 
     def on_backtest_engine_status_clicked(self, event):
         status = self._backtest_engine_status or {}
@@ -2456,7 +2468,52 @@ class MainWindow(QMainWindow):
             if hasattr(self, "connection_check_timer"):
                 backoff = min(self._check_base_interval * (2**self._check_fail_count), 300000)
                 self.connection_check_timer.setInterval(backoff)
+        self._refresh_qmt_diag_status()
         self.signal_bus.emit(Events.CONNECTION_STATUS_CHANGED, connected=connected)
+
+    def _collect_qmt_diag_snapshot(self) -> dict[str, object]:
+        online_raw = str(os.environ.get("EASYXT_ENABLE_QMT_ONLINE", "1"))
+        online_on = online_raw in ("1", "true", "True")
+        qmt_available: Optional[bool] = None
+        error = ""
+        try:
+            from data_manager.unified_data_interface import UnifiedDataInterface
+
+            ui = UnifiedDataInterface()
+            ui._refresh_qmt_status()
+            qmt_available = bool(ui.qmt_available)
+        except Exception as exc:
+            error = str(exc)[:120]
+        return {
+            "online_on": online_on,
+            "online_raw": online_raw,
+            "qmt_available": qmt_available,
+            "error": error,
+        }
+
+    def _refresh_qmt_diag_status(self):
+        if not hasattr(self, "qmt_diag_status") or self.qmt_diag_status is None:
+            return
+        info = self._collect_qmt_diag_snapshot()
+        online_on = bool(info.get("online_on"))
+        qmt_available = info.get("qmt_available")
+        error = str(info.get("error") or "")
+        if online_on and qmt_available is True:
+            text = "QMT在线: ON | qmt_available: True"
+            style = "color:#6bd968; padding-left:8px;"
+        elif online_on and qmt_available is False:
+            text = "QMT在线: ON | qmt_available: False"
+            style = "color:#ffb74d; padding-left:8px;"
+        elif online_on:
+            text = "QMT在线: ON | qmt_available: Unknown"
+            style = "color:#90a4ae; padding-left:8px;"
+        else:
+            text = "QMT在线: OFF | qmt_available: Skipped"
+            style = "color:#90a4ae; padding-left:8px;"
+        if error:
+            text = f"{text} | err:{error}"
+        self.qmt_diag_status.setText(text)
+        self.qmt_diag_status.setStyleSheet(style)
 
     def _warmup_xtquant_broker(self):
         """后台预热 xtquant_broker 单例，使 realtime worker 的 fast-fail 检查通过"""
@@ -2524,6 +2581,8 @@ class MainWindow(QMainWindow):
         # 停止连接检查定时器
         if hasattr(self, "connection_check_timer"):
             self.connection_check_timer.stop()
+        if hasattr(self, "qmt_diag_timer"):
+            self.qmt_diag_timer.stop()
         if getattr(self, "_watchdog_timer", None):
             self._watchdog_timer.stop()
         thread_watermark_timer = getattr(self, "_thread_watermark_timer", None)

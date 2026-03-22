@@ -46,6 +46,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -56,10 +57,20 @@ BASELINE_FILE = PROJECT_ROOT / ".p0_baseline.json"
 SCRIPT_VERSION = "2.4.0"
 
 try:
-    from tools.release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary
+    from tools.release_rag_policy import (
+        gate_detail_tag,
+        header_rag_status,
+        parse_gate_detail_tag,
+        period_validation_summary,
+    )
 except Exception:
     try:
-        from release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary
+        from release_rag_policy import (
+            gate_detail_tag,
+            header_rag_status,
+            parse_gate_detail_tag,
+            period_validation_summary,
+        )
     except Exception:
         gate_detail_tag = None
         header_rag_status = None
@@ -1615,6 +1626,206 @@ def check_period_validation_report() -> CheckResult:
     return CheckResult("period_validation_report_check", status, detail, violations)
 
 
+def check_p0b_concurrent_gate() -> CheckResult:
+    report_path = pathlib.Path(
+        os.environ.get(
+            "EASYXT_P0B_REPORT_PATH",
+            str(PROJECT_ROOT / "artifacts" / "p0b_concurrent_latest.json"),
+        )
+    )
+    if not report_path.is_absolute():
+        report_path = (PROJECT_ROOT / report_path).resolve()
+    require_report = os.environ.get("EASYXT_REQUIRE_P0B_CONCURRENT", "0") in ("1", "true", "True")
+    max_age_min = int(os.environ.get("EASYXT_P0B_MAX_AGE_MIN", "180") or 180)
+    if not report_path.exists():
+        if require_report:
+            return CheckResult(
+                "p0b_concurrent_gate",
+                "fail",
+                "缺少 P0-B 并发验收报告",
+                [
+                    Violation(
+                        location=str(report_path),
+                        message="p0b_concurrent_latest.json 缺失",
+                        severity="high",
+                        fix_hint="先运行 python tools/p0b_concurrent_verify.py 生成验收报告",
+                    )
+                ],
+            )
+        return CheckResult("p0b_concurrent_gate", "skip", "未发现 P0-B 并发验收报告（本地跳过）")
+
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return CheckResult(
+            "p0b_concurrent_gate",
+            "fail",
+            f"P0-B 报告解析失败: {exc}",
+            [
+                Violation(
+                    location=str(report_path),
+                    message=f"报告 JSON 解析失败: {exc}",
+                    severity="high",
+                    fix_hint="重新生成 P0-B 报告并检查 JSON 编码",
+                )
+            ],
+        )
+    if not isinstance(payload, dict):
+        return CheckResult(
+            "p0b_concurrent_gate",
+            "fail",
+            "P0-B 报告结构非法",
+            [
+                Violation(
+                    location=str(report_path),
+                    message="报告根对象不是 JSON object",
+                    severity="high",
+                    fix_hint="重新生成报告并检查输出结构",
+                )
+            ],
+        )
+
+    gate_obj = payload.get("gate")
+    metrics_obj = payload.get("metrics")
+    config_obj = payload.get("config")
+    gate: dict[str, object] = gate_obj if isinstance(gate_obj, dict) else {}
+    metrics: dict[str, object] = metrics_obj if isinstance(metrics_obj, dict) else {}
+    config: dict[str, object] = config_obj if isinstance(config_obj, dict) else {}
+    violations: list[Violation] = []
+
+    generated_at = str(payload.get("generated_at") or "")
+    if generated_at:
+        try:
+            ts = datetime.datetime.fromisoformat(generated_at)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=datetime.timezone.utc)
+            age_min = (datetime.datetime.now(datetime.timezone.utc) - ts.astimezone(datetime.timezone.utc)).total_seconds() / 60.0
+            if age_min > max_age_min:
+                violations.append(
+                    Violation(
+                        location=str(report_path),
+                        message=f"P0-B 报告过旧: age={age_min:.1f}min > {max_age_min}min",
+                        severity="high",
+                        fix_hint="重新运行并发验收脚本生成最新报告",
+                    )
+                )
+        except Exception:
+            violations.append(
+                Violation(
+                    location=str(report_path),
+                    message=f"generated_at 非法: {generated_at}",
+                    severity="high",
+                    fix_hint="修复报告时间格式（ISO8601）",
+                )
+            )
+
+    interrupted = bool(config.get("interrupted", False))
+    if interrupted:
+        violations.append(
+            Violation(
+                location=str(report_path),
+                message="P0-B 验收在中途中断，结果不完整",
+                severity="high",
+                fix_hint="在入库运行期间完成整轮并发验收，避免手动中断",
+            )
+        )
+
+    overall_pass = bool(gate.get("overall_pass", False))
+    if not overall_pass:
+        failure_rate = metrics.get("failure_rate")
+        p95_ms = metrics.get("p95_ms")
+        window_hit_rate = metrics.get("window_hit_rate")
+        violations.append(
+            Violation(
+                location=str(report_path),
+                message=(
+                    f"P0-B gate 未通过: failure_rate={failure_rate}, "
+                    f"p95_ms={p95_ms}, window_hit_rate={window_hit_rate}"
+                ),
+                severity="high",
+                fix_hint="优化写锁释放窗口/批次粒度，达标后重新生成并发验收报告",
+            )
+        )
+
+    status: Status = "fail" if violations else "pass"
+    detail = "P0-B 并发验收门禁通过" if not violations else f"P0-B 并发验收门禁失败 {len(violations)} 项"
+    return CheckResult("p0b_concurrent_gate", status, detail, violations)
+
+
+def check_api_server_smoke_gate() -> CheckResult:
+    test_path = pathlib.Path(
+        os.environ.get("EASYXT_API_SMOKE_TEST_PATH", str(PROJECT_ROOT / "tests" / "test_api_server_smoke.py"))
+    )
+    if not test_path.is_absolute():
+        test_path = (PROJECT_ROOT / test_path).resolve()
+    required = os.environ.get("EASYXT_REQUIRE_API_SMOKE", "1") in ("1", "true", "True")
+    timeout_s = int(os.environ.get("EASYXT_API_SMOKE_TIMEOUT_SEC", "180") or 180)
+    extra_args = str(os.environ.get("EASYXT_API_SMOKE_PYTEST_ARGS", "") or "").strip().split()
+    if not test_path.exists():
+        if required:
+            return CheckResult(
+                "api_server_smoke_gate",
+                "fail",
+                "API 冒烟测试文件缺失",
+                [
+                    Violation(
+                        location=str(test_path),
+                        message="找不到 API 冒烟测试文件",
+                        severity="high",
+                        fix_hint="补齐 tests/test_api_server_smoke.py 后重跑门禁",
+                    )
+                ],
+            )
+        return CheckResult("api_server_smoke_gate", "skip", "API 冒烟测试文件不存在（按配置跳过）")
+    rel_path = test_path.relative_to(PROJECT_ROOT).as_posix()
+    cmd = [sys.executable, "-m", "pytest", "-q", rel_path, *extra_args]
+    started = time.time()
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=max(10, timeout_s),
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            "api_server_smoke_gate",
+            "fail",
+            f"API 冒烟测试超时（>{timeout_s}s）",
+            [
+                Violation(
+                    location=rel_path,
+                    message=f"pytest 超时（>{timeout_s}s）",
+                    severity="high",
+                    fix_hint="缩小测试范围或排查 FastAPI 生命周期阻塞",
+                )
+            ],
+        )
+    elapsed = time.time() - started
+    if result.returncode == 0:
+        return CheckResult(
+            "api_server_smoke_gate",
+            "pass",
+            f"API 冒烟测试通过（{elapsed:.2f}s）",
+        )
+    merged = (result.stdout or "") + "\n" + (result.stderr or "")
+    tail = "\n".join(merged.splitlines()[-20:]).strip()
+    return CheckResult(
+        "api_server_smoke_gate",
+        "fail",
+        f"API 冒烟测试失败（exit={result.returncode}）",
+        [
+            Violation(
+                location=rel_path,
+                message=f"pytest 失败输出: {tail[:800]}",
+                severity="high",
+                fix_hint=f"本地复现: {' '.join(cmd)}",
+            )
+        ],
+    )
+
+
 def check_watchdog_slo_gate() -> CheckResult:
     """读取主线程延迟日志，连续 SLO 违规次数达阈值则阻断。"""
     threshold = int(os.environ.get("EASYXT_WATCHDOG_SLO_CONSECUTIVE_FAIL_THRESHOLD", "3") or 3)
@@ -1782,13 +1993,15 @@ ALL_CHECKS: dict[str, object] = {
     "intraday_bar": check_intraday_bar_semantic_guard,
     "governance_nightly": check_governance_nightly_jobs,
     "period_validation": check_period_validation_report,
+    "p0b_concurrent": check_p0b_concurrent_gate,
+    "api_smoke": check_api_server_smoke_gate,
     "schema":      check_schema_version,
     "allowlist":   check_allowlist_governance,
     "watchdog_slo": check_watchdog_slo_gate,
     "fake_ohlcv": check_fake_ohlcv_in_tests,
 }
 
-P0_CHECKS = {"credential", "sql", "timestamp", "xtdata", "publish", "sla", "duckdb_write", "duckdb_crash", "realtime", "intraday_bar", "governance_nightly", "period_validation", "allowlist", "watchdog_slo"}
+P0_CHECKS = {"credential", "sql", "timestamp", "xtdata", "publish", "sla", "duckdb_write", "duckdb_crash", "realtime", "intraday_bar", "governance_nightly", "period_validation", "p0b_concurrent", "api_smoke", "allowlist", "watchdog_slo"}
 P0_RESULT_NAMES = {
     "credential_scan",
     "sql_injection_scan",
@@ -1802,6 +2015,8 @@ P0_RESULT_NAMES = {
     "intraday_bar_semantic_guard",
     "governance_nightly_jobs_check",
     "period_validation_report_check",
+    "p0b_concurrent_gate",
+    "api_server_smoke_gate",
     "allowlist_governance",
     "watchdog_slo_gate",
 }
@@ -2051,6 +2266,40 @@ def _extract_period_validation_detail(results: list[CheckResult]) -> dict[str, o
     }
 
 
+def _extract_p0b_concurrent_detail(results: list[CheckResult]) -> dict[str, object]:
+    target = next((r for r in results if r.name == "p0b_concurrent_gate"), None)
+    if target is None:
+        return {
+            "status": "missing",
+            "failed_items": 0,
+            "recommended_action": "运行完整门禁: python tools/p0_gate_check.py --strict --json",
+            "message": "p0b_concurrent_gate 未执行",
+        }
+    return {
+        "status": target.status,
+        "failed_items": len(target.violations),
+        "recommended_action": (target.violations[0].fix_hint if target.violations else ""),
+        "message": target.detail,
+    }
+
+
+def _extract_api_smoke_detail(results: list[CheckResult]) -> dict[str, object]:
+    target = next((r for r in results if r.name == "api_server_smoke_gate"), None)
+    if target is None:
+        return {
+            "status": "missing",
+            "failed_items": 0,
+            "recommended_action": "运行完整门禁: python tools/p0_gate_check.py --strict --json",
+            "message": "api_server_smoke_gate 未执行",
+        }
+    return {
+        "status": target.status,
+        "failed_items": len(target.violations),
+        "recommended_action": (target.violations[0].fix_hint if target.violations else ""),
+        "message": target.detail,
+    }
+
+
 def _load_artifact_json(name: str) -> dict[str, object]:
     path = PROJECT_ROOT / "artifacts" / name
     if not path.exists():
@@ -2136,6 +2385,8 @@ def _build_json_output(results: list[CheckResult], *, new_only: bool) -> dict[st
             except (ValueError, AttributeError):
                 pass
     period_validation_detail = _extract_period_validation_detail(results)
+    p0b_concurrent_detail = _extract_p0b_concurrent_detail(results)
+    api_smoke_detail = _extract_api_smoke_detail(results)
     strict_gate_pass = p0_fail_count == 0 and active_ch == 0
     output = {
         "script_version": SCRIPT_VERSION,
@@ -2158,6 +2409,8 @@ def _build_json_output(results: list[CheckResult], *, new_only: bool) -> dict[st
         "watermark_profile_audit_detail": _extract_watermark_profile_audit_detail(),
         "watermark_profile_approval_detail": _extract_watermark_profile_approval_detail(),
         "period_validation_detail": period_validation_detail,
+        "p0b_concurrent_detail": p0b_concurrent_detail,
+        "api_smoke_detail": api_smoke_detail,
         "checks": [r.to_dict() for r in results],
     }
     contract_summary = _build_gate_contract_summary(

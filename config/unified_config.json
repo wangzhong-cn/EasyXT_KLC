@@ -103,8 +103,8 @@
     "chart_comment": "图表引擎配置（灰度发布与后端选择）",
     "engine": {
       "engine_comment": "后端选择策略：env var EASYXT_CHART_BACKEND > 白名单 > default_backend",
-      "default_backend": "lwc_python",
-      "default_backend_comment": "默认图表后端: lwc_python | native_lwc",
+      "default_backend": "klinechart",
+      "default_backend_comment": "默认图表后端: lwc_python | native_lwc | klinechart",
       "native_lwc_whitelist": {
         "whitelist_comment": "只有在白名单中的账户/策略才会启用 native_lwc",
         "accounts": [],

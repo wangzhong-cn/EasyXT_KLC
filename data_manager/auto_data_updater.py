@@ -541,8 +541,10 @@ class AutoDataUpdater:
             if stop_event is not None and stop_event.is_set():
                 logger.info("custom_period_bars 预计算收到停止信号，已完成 %d/%d", done, total)
                 return
+            multi_listing_date = self.get_listing_date(code)
             for period in self._PRECOMPUTE_PERIODS:
                 try:
+                    listing_date = multi_listing_date if period in ("5d", "10d") else None
                     # _read_from_duckdb 内部：缓存未命中 → 构建 → 自动写入 custom_period_bars
                     self.interface._read_from_duckdb(
                         stock_code=code,
@@ -550,6 +552,7 @@ class AutoDataUpdater:
                         end_date=end_date,
                         period=period,
                         adjust="none",
+                        listing_date=listing_date,
                     )
                 except Exception as exc:
                     logger.debug("预计算 %s %s 失败: %s", code, period, exc)

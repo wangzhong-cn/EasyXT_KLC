@@ -74,14 +74,15 @@ def _save_history(history: list, keep_days: int) -> list:
 
 
 def _make_row(gate: dict, ts: str) -> dict:
-    period_validation_detail = (
-        gate.get("period_validation_detail")
-        if isinstance(gate.get("period_validation_detail"), dict)
-        else {}
-    )
+    period_validation_obj = gate.get("period_validation_detail")
+    period_validation_detail: dict = period_validation_obj if isinstance(period_validation_obj, dict) else {}
     gate_contract_valid = bool(gate.get("gate_contract_valid", False))
     gate_contract_version = int(gate.get("gate_contract_version", 0) or 0)
     gate_contract_error = str(gate.get("gate_contract_error", "") or "")
+    p0b_obj = gate.get("p0b_concurrent_detail")
+    p0b_detail: dict = p0b_obj if isinstance(p0b_obj, dict) else {}
+    api_smoke_obj = gate.get("api_smoke_detail")
+    api_smoke_detail: dict = api_smoke_obj if isinstance(api_smoke_obj, dict) else {}
     row: dict = {
         "ts": ts,
         "strict_gate_pass": gate.get("strict_gate_pass", False),
@@ -98,13 +99,27 @@ def _make_row(gate: dict, ts: str) -> dict:
         "gate_contract_rag": str(gate.get("gate_contract_rag", "") or ""),
         "gate_detail_tag": str(gate.get("gate_detail_tag", "") or ""),
         "contract_health": _contract_health(gate_contract_valid, gate_contract_version, gate_contract_error),
+        "p0b_concurrent_status": str(p0b_detail.get("status") or ""),
+        "p0b_concurrent_failed_items": int(p0b_detail.get("failed_items", 0) or 0),
+        "p0b_concurrent_message": str(p0b_detail.get("message") or ""),
+        "api_smoke_status": str(api_smoke_detail.get("status") or ""),
+        "api_smoke_failed_items": int(api_smoke_detail.get("failed_items", 0) or 0),
+        "api_smoke_message": str(api_smoke_detail.get("message") or ""),
         "checks": {},
     }
-    for c in gate.get("checks", []):
-        row["checks"][c["name"]] = {
-            "status": c.get("status", "?"),
-            "violations": len(c.get("violations", [])),
-        }
+    checks = gate.get("checks", [])
+    if isinstance(checks, list):
+        for c in checks:
+            if not isinstance(c, dict):
+                continue
+            name = str(c.get("name") or "")
+            if not name:
+                continue
+            viol = c.get("violations", [])
+            row["checks"][name] = {
+                "status": c.get("status", "?"),
+                "violations": len(viol) if isinstance(viol, list) else 0,
+            }
     return row
 
 
@@ -136,6 +151,10 @@ def _render_dashboard(history: list) -> str:
     ach = latest.get("ach", -1)
     po = latest.get("P0_open", -1)
     pv_failed = int(latest.get("period_validation_failed_items", 0) or 0)
+    p0b_status = str(latest.get("p0b_concurrent_status") or "missing")
+    p0b_failed = int(latest.get("p0b_concurrent_failed_items", 0) or 0)
+    api_smoke_status = str(latest.get("api_smoke_status") or "missing")
+    api_smoke_failed = int(latest.get("api_smoke_failed_items", 0) or 0)
     gate_contract_valid = bool(latest.get("gate_contract_valid", False))
     gate_contract_version = int(latest.get("gate_contract_version", 0) or 0)
     gate_contract_error = str(latest.get("gate_contract_error", "") or "")
@@ -150,10 +169,12 @@ def _render_dashboard(history: list) -> str:
         date = r["ts"][:10]
         gate_ok = "✅" if r.get("strict_gate_pass") else "❌"
         contract_ok = "✅" if bool(r.get("gate_contract_valid", False)) else "❌"
+        p0b_sym = "✅" if str(r.get("p0b_concurrent_status") or "") == "pass" else "❌"
+        api_smoke_sym = "✅" if str(r.get("api_smoke_status") or "") == "pass" else "❌"
         contract_health_item = str(r.get("contract_health") or _contract_health(bool(r.get("gate_contract_valid", False)), int(r.get("gate_contract_version", 0) or 0), str(r.get("gate_contract_error", "") or "")))
         trend_rows += (
             f"| {date} | {gate_ok} | {r.get('P0_open', '?')} | {r.get('ach', '?')} "
-            f"| {r.get('period_validation_failed_items', 0)} | {contract_ok} | {contract_health_item} |\n"
+            f"| {r.get('period_validation_failed_items', 0)} | {p0b_sym} | {api_smoke_sym} | {contract_ok} | {contract_health_item} |\n"
         )
 
     # 各检查项状态（取最新一条）
@@ -177,6 +198,10 @@ def _render_dashboard(history: list) -> str:
 | P0_open_count | {po} |
 | active_critical_high | {ach} |
 | period_validation_failed_items | {pv_failed} |
+| p0b_concurrent_status | {p0b_status} |
+| p0b_concurrent_failed_items | {p0b_failed} |
+| api_smoke_status | {api_smoke_status} |
+| api_smoke_failed_items | {api_smoke_failed} |
 | gate_contract_valid | {'✅ True' if gate_contract_valid else '❌ False'} |
 | gate_contract_version | {gate_contract_version} |
 | gate_contract_rag | {gate_contract_rag or 'N/A'} |
@@ -187,8 +212,8 @@ def _render_dashboard(history: list) -> str:
 
 ## 最近 14 次巡检
 
-| 日期 | 门禁 | P0_open | active_crit_high | period_validation_failed | gate_contract_ok | contract_health |
-|---|---|---|---|---|---|---|
+| 日期 | 门禁 | P0_open | active_crit_high | period_validation_failed | p0b_concurrent | api_smoke | gate_contract_ok | contract_health |
+|---|---|---|---|---|---|---|---|---|
 {trend_rows}
 ## 最新各检查项状态
 

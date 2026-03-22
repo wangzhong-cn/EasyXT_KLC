@@ -7,6 +7,12 @@ GUI应用快速启动脚本
 import os
 import sys
 
+# Windows GBK 终端无法输出 emoji，保持原生编码但遇到不可编码字符时替换而非报错
+for _stream in ('stdout', 'stderr'):
+    _s = getattr(sys, _stream, None)
+    if _s and hasattr(_s, 'reconfigure'):
+        _s.reconfigure(errors='replace')
+
 
 def main():
     # 获取项目根目录

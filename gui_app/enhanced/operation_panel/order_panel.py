@@ -19,7 +19,7 @@ class OrderPanel(QGroupBox):
 
     def __init__(self):
         super().__init__("交易操作")
-        self.setFixedHeight(120)
+        self.setFixedHeight(138)
         layout = QGridLayout(self)
 
         layout.addWidget(QLabel("股票代码:"), 0, 0)
@@ -42,6 +42,9 @@ class OrderPanel(QGroupBox):
         self.price_spin.setDecimals(2)
         self.price_spin.setSingleStep(0.01)
         layout.addWidget(self.price_spin, 2, 1)
+        self.crosshair_hint_label = QLabel("十字: --")
+        self.crosshair_hint_label.setStyleSheet("color:#7c9fbf; font-size:10px;")
+        layout.addWidget(self.crosshair_hint_label, 3, 0, 1, 2)
 
         button_layout = QHBoxLayout()
         self.buy_btn = QPushButton("📈 买入")
@@ -107,6 +110,31 @@ class OrderPanel(QGroupBox):
             self.price_spin.setValue(float(price))
         except Exception:
             return
+
+    def set_crosshair_hint(self, time_value: object, price_value: object) -> None:
+        if time_value is None and price_value is None:
+            self.crosshair_hint_label.setText("十字: --")
+            return
+        # 时间：Unix ts → 本地时间；价格：2位小数
+        if isinstance(time_value, (int, float)) and float(time_value) > 1_000_000_000:
+            from datetime import datetime
+            try:
+                t_str = datetime.fromtimestamp(float(time_value)).strftime("%Y-%m-%d %H:%M")
+            except (OSError, OverflowError, ValueError):
+                t_str = str(time_value)
+        else:
+            t_str = str(time_value) if time_value is not None else ""
+        if isinstance(price_value, (int, float)):
+            p_str = f"{float(price_value):.2f}"
+        elif isinstance(price_value, str):
+            try:
+                p_str = f"{float(price_value):.2f}"
+            except (TypeError, ValueError):
+                p_str = price_value
+        else:
+            p_str = str(price_value) if price_value is not None else ""
+        parts = ([f"t={t_str}"] if t_str else []) + ([f"p={p_str}"] if p_str else [])
+        self.crosshair_hint_label.setText("十字: " + ("  ".join(parts) or "--"))
 
     def _emit_order(self, side: str):
         symbol = self.stock_combo.currentText()

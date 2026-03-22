@@ -11,7 +11,7 @@ backend_config.py — 图表后端灰度开关配置中心
 
     "chart": {
         "engine": {
-            "default_backend": "lwc_python",
+            "default_backend": "klinechart",
             "native_lwc_whitelist": {
                 "accounts": ["demo_001", "paper_test"],
                 "strategies": ["grid_v2", "momentum_alpha"]
@@ -39,21 +39,22 @@ log = logging.getLogger(__name__)
 _ROOT = Path(__file__).resolve().parents[3]
 _CONFIG_PATH = _ROOT / "config" / "unified_config.json"
 _LOCK = threading.Lock()
-_INSTANCE: "ChartBackendConfig | None" = None
+_INSTANCE: ChartBackendConfig | None = None
 
 
 class ChartBackendConfig:
     """
     图表后端灰度配置，线程安全单例。
 
-    get_backend(account_id, strategy_id) → "lwc_python" | "native_lwc"
+    get_backend(account_id, strategy_id) → "lwc_python" | "native_lwc" | "klinechart"
     can_switch_now()                     → (bool, reason: str)
     """
 
     # 默认值（当配置文件缺失对应键时使用）
     _DEFAULTS: dict[str, Any] = {
-        "default_backend": "lwc_python",
+        "default_backend": "klinechart",
         "native_lwc_whitelist": {"accounts": [], "strategies": []},
+        "klinechart_whitelist": {"accounts": [], "strategies": []},
         "freeze_during_trading": True,
         "ws_handshake_timeout_s": 5.0,
     }
@@ -61,11 +62,18 @@ class ChartBackendConfig:
     def __init__(self, cfg: dict[str, Any]) -> None:
         self._default = str(cfg.get("default_backend", self._DEFAULTS["default_backend"]))
         wl = cfg.get("native_lwc_whitelist") or {}
+        wl_kline = cfg.get("klinechart_whitelist") or {}
         self._wl_accounts: frozenset[str] = frozenset(
             str(a).strip().lower() for a in (wl.get("accounts") or [])
         )
         self._wl_strategies: frozenset[str] = frozenset(
             str(s).strip().lower() for s in (wl.get("strategies") or [])
+        )
+        self._wl_kline_accounts: frozenset[str] = frozenset(
+            str(a).strip().lower() for a in (wl_kline.get("accounts") or [])
+        )
+        self._wl_kline_strategies: frozenset[str] = frozenset(
+            str(s).strip().lower() for s in (wl_kline.get("strategies") or [])
         )
         self._freeze_trading: bool = bool(
             cfg.get("freeze_during_trading", self._DEFAULTS["freeze_during_trading"])
@@ -97,9 +105,17 @@ class ChartBackendConfig:
           3. 配置文件 default_backend
         """
         env_override = os.environ.get("EASYXT_CHART_BACKEND", "").strip().lower()
-        if env_override in ("lwc_python", "native_lwc"):
+        if env_override in ("lwc_python", "native_lwc", "klinechart"):
             log.debug("ChartBackendConfig: env override → %s", env_override)
             return env_override
+
+        if account_id and account_id.strip().lower() in self._wl_kline_accounts:
+            log.debug("ChartBackendConfig: account '%s' in kline whitelist → klinechart", account_id)
+            return "klinechart"
+
+        if strategy_id and strategy_id.strip().lower() in self._wl_kline_strategies:
+            log.debug("ChartBackendConfig: strategy '%s' in kline whitelist → klinechart", strategy_id)
+            return "klinechart"
 
         if account_id and account_id.strip().lower() in self._wl_accounts:
             log.debug("ChartBackendConfig: account '%s' in whitelist → native_lwc", account_id)
@@ -143,6 +159,8 @@ class ChartBackendConfig:
             "default_backend": self._default,
             "wl_accounts_count": len(self._wl_accounts),
             "wl_strategies_count": len(self._wl_strategies),
+            "wl_kline_accounts_count": len(self._wl_kline_accounts),
+            "wl_kline_strategies_count": len(self._wl_kline_strategies),
             "freeze_during_trading": self._freeze_trading,
             "ws_handshake_timeout_s": self.ws_handshake_timeout_s,
             "env_override": os.environ.get("EASYXT_CHART_BACKEND", ""),

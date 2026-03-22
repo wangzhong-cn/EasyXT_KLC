@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import json
 import pathlib
+from datetime import datetime, timedelta, timezone
 
 from tools import p0_weekly_report as weekly
 
 
 def test_main_supports_custom_strategy_impact_path(tmp_path, monkeypatch):
+    _recent_ts = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     history_path = tmp_path / "history.json"
     history_path.write_text(
         json.dumps(
             [
                 {
-                    "ts": "2026-03-15T00:00:00Z",
+                    "ts": _recent_ts,
                     "strict_gate_pass": True,
                     "P0_open_count": 0,
                     "active_critical_high": 0,

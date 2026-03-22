@@ -994,6 +994,9 @@ class TestRealtimeBarConstruction:
         stub._floor_bar_time = _types.MethodType(
             KLineChartWorkspace._floor_bar_time, stub
         )
+        stub._to_datetime_safe = _types.MethodType(
+            KLineChartWorkspace._to_datetime_safe, stub
+        )
 
     def test_intraday_new_bar_open_uses_last_trade_not_day_open(self):
         stub = _make_stub()

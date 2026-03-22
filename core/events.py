@@ -23,6 +23,7 @@ class Events:
     # 图表子系统事件（Stage 2/3 chart migration）
     CHART_SLO_ALERT = "chart_slo_alert"
     CHART_BACKEND_SWITCHED = "chart_backend_switched"
+    CHART_CROSSHAIR_MOVED = "chart_crosshair_moved"
     # 风控引擎事件（Phase 1）
     RISK_ALERT = "risk_alert"
     RISK_LIMIT_BREACHED = "risk_limit_breached"

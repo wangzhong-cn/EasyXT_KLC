@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿# Python
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -25,6 +25,9 @@ MANIFEST
 
 # Native chart adapter — auto-copied LWC lib (populated at first run)
 gui_app/chart_native/lib/
+!gui_app/chart_native/lib/
+gui_app/chart_native/lib/*
+!gui_app/chart_native/lib/klinecharts.min.js
 
 # PyInstaller
 *.manifest
@@ -270,6 +273,19 @@ integration_test_logs/
 logs/
 reports/
 tests/
+!/tests/
+/tests/*
+!/tests/test_api_server_smoke.py
+!/tests/test_ws_bridge_logic.py
+!/tests/test_rpc_protocol.py
+!/tests/test_chart_adapter_factory.py
+!/tests/test_backend_config_klinechart.py
+!/tests/test_kline_workspace_backend_routing.py
+!/tests/test_order_form_crosshair.py
+!/tests/test_watchlist_widget.py
+!/tests/test_positions_panel.py
+!/tests/test_orders_panel.py
+!/tests/test_intraday_panel.py
 demo*/
 deploy/
 demo_config_new/

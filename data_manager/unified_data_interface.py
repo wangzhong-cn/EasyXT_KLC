@@ -554,20 +554,29 @@ class UnifiedDataInterface:
         if xtquant_path.exists() and str(xtquant_path) not in sys.path:
             sys.path.insert(0, str(xtquant_path))
         extra_xtquant_dir = self._ensure_qmt_paths()
-        try:
-            import xtquant as _xtquant_pkg
+        retry_count = max(1, int(os.environ.get("EASYXT_QMT_CHECK_RETRY", "3")))
+        retry_sleep = max(0.0, float(os.environ.get("EASYXT_QMT_CHECK_RETRY_SLEEP", "0.6")))
+        last_err: Exception | None = None
+        for i in range(retry_count):
+            try:
+                import xtquant as _xtquant_pkg
 
-            if extra_xtquant_dir and extra_xtquant_dir not in _xtquant_pkg.__path__:
-                _xtquant_pkg.__path__.append(extra_xtquant_dir)
+                if extra_xtquant_dir and extra_xtquant_dir not in _xtquant_pkg.__path__:
+                    _xtquant_pkg.__path__.append(extra_xtquant_dir)
 
-            from xtquant import xtdata
+                from xtquant import xtdata
 
-            _ = xtdata
-            self.qmt_available = True
-            self._log("[INFO] QMT xtdata 可用")
-        except Exception as e:  # 捕获 ImportError、OSError（pyd加载）和 xtdatacenter rpc_init 抛出的 Exception
-            self.qmt_available = False
-            self._log(f"[WARNING] QMT xtdata 不可用: {e}")
+                _ = xtdata
+                self.qmt_available = True
+                self._log("[INFO] QMT xtdata 可用")
+                return
+            except Exception as e:  # 捕获 ImportError、OSError（pyd加载）和 xtdatacenter rpc_init 抛出的 Exception
+                last_err = e
+                self.qmt_available = False
+                if i < retry_count - 1:
+                    time.sleep(retry_sleep)
+                    continue
+        self._log(f"[WARNING] QMT xtdata 不可用: {last_err}")
 
     def _refresh_qmt_status(self):
         self._qmt_checked = False
@@ -3141,6 +3150,7 @@ class UnifiedDataInterface:
         period: str,
         adjust: str,
         _allow_aggregate: bool = True,
+        listing_date: Optional[str] = None,
     ) -> Optional[pd.DataFrame]:
         """从DuckDB读取数据 - 修复版（添加表存在性检查 + 派生周期聚合）"""
         try:
@@ -3194,7 +3204,7 @@ class UnifiedDataInterface:
 
             # ── 多日自定义周期：上市首日左对齐，N交易日≠自然周/月 ──
             if _allow_aggregate and period in self._MULTIDAY_CUSTOM_PERIODS:
-                listing_date = self.get_listing_date(stock_code)
+                listing_date = listing_date or self.get_listing_date(stock_code)
                 expected_hash = self._compute_adj_factor_hash(
                     stock_code=stock_code,
                     start_date=listing_date,

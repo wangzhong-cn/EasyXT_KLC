@@ -55,14 +55,16 @@ from gui_app.widgets.chart import (
     PERIOD_DATE_COL_MAP,
     PERIOD_TABLE_MAP,
     ChartEvents,
+    KLineChartAdapter,
+    NativeLwcChartAdapter,
     PositionTable,
     SubchartManager,
     ToolboxPanel,
     create_chart_adapter,
 )
 from gui_app.widgets.chart.pipeline_guard import validate_pipeline_bar_for_period
-from gui_app.widgets.orderbook_panel import OrderbookPanel
 from gui_app.widgets.realtime_settings_dialog import RealtimeSettingsDialog
+from gui_app.widgets.watchlist import WatchlistWidget
 
 
 class _RealtimeQuoteWorker(QThread):
@@ -306,7 +308,19 @@ class _WsMarketQuoteWorker(QThread):
         self._should_stop.set()
 
     def run(self) -> None:
-        asyncio.run(self._client_loop())
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self._client_loop())
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            try:
+                loop.close()
+            except Exception:
+                pass
 
     @staticmethod
     def _compute_reconnect_delay(
@@ -480,12 +494,14 @@ class KLineChartWorkspace(QWidget):
         self._fallback_thread: Optional[QThread] = None
         self._quote_worker: Optional[_RealtimeQuoteWorker] = None
         self._ws_quote_worker: Optional[_WsMarketQuoteWorker] = None
-        self._use_ws_quote: bool = os.environ.get("EASYXT_USE_WS_QUOTE", "1") in ("1", "true", "True")
+        self._use_ws_quote: bool = os.environ.get("EASYXT_USE_WS_QUOTE", "0") in ("1", "true", "True")
         self._ws_error_consecutive: int = 0
         self._ws_error_emit_threshold: int = int(os.environ.get("EASYXT_WS_ERROR_ALERT_THRESHOLD", "3"))
         self._last_realtime_probe_line: Optional[str] = None
         self._orderbook_sink: Optional[RealtimeDuckDBSink] = None
-        self.orderbook_panel: Optional[OrderbookPanel] = None
+        self.orderbook_panel: Optional[WatchlistWidget] = None
+        self._tab_watchlist_widget: Optional[WatchlistWidget] = None
+        self._tab_intraday_widget: Optional[Any] = None
         self._source_status_timer: Optional[QTimer] = None
         self._source_status_refreshing = False
         self._period_fallback_attempted: set[tuple[str, str]] = set()
@@ -612,6 +628,59 @@ class KLineChartWorkspace(QWidget):
         signal_bus.subscribe(Events.POSITION_UPDATED, self._on_position_updated)
         signal_bus.subscribe(Events.BACKFILL_TASK_UPDATED, self._on_backfill_event)
         signal_bus.subscribe(Events.DATA_INGESTION_COMPLETE, self._on_ingestion_complete)
+        signal_bus.subscribe(Events.CHART_CROSSHAIR_MOVED, self._on_crosshair_moved)
+
+    @staticmethod
+    def _fmt_crosshair_time(time_val: object) -> str:
+        """将图表时间值格式化为可读字符串（date str / Unix ts / 其他）。"""
+        if time_val is None:
+            return ""
+        if isinstance(time_val, (int, float)) and time_val > 1_000_000_000:
+            from datetime import datetime
+            try:
+                return datetime.fromtimestamp(float(time_val)).strftime("%Y-%m-%d %H:%M")
+            except (OSError, OverflowError, ValueError):
+                pass
+        return str(time_val)
+
+    @staticmethod
+    def _fmt_crosshair_price(price_val: object) -> str:
+        """将价格格式化为2位小数字符串。"""
+        if price_val is None:
+            return ""
+        if isinstance(price_val, (int, float)):
+            return f"{float(price_val):.2f}"
+        if isinstance(price_val, str):
+            try:
+                return f"{float(price_val):.2f}"
+            except (TypeError, ValueError):
+                return price_val
+        return str(price_val)
+
+    def _on_crosshair_moved(self, **payload):
+        try:
+            event_symbol = str(payload.get("symbol") or "").strip()
+            symbol_input = vars(self).get("symbol_input")
+            current_symbol = symbol_input.text().strip() if symbol_input is not None else ""
+            if event_symbol and current_symbol and event_symbol != current_symbol:
+                return
+            event_period = str(payload.get("period") or "").strip()
+            period_combo = vars(self).get("period_combo")
+            current_period = period_combo.currentText() if period_combo is not None else ""
+            if event_period and current_period and event_period != current_period:
+                return
+            time_val = payload.get("time")
+            price_val = payload.get("price")
+            if hasattr(self, "_crosshair_info_label") and self._crosshair_info_label is not None:
+                if price_val is None and time_val is None:
+                    self._crosshair_info_label.setText("十字: --")
+                else:
+                    t_str = self._fmt_crosshair_time(time_val)
+                    p_str = self._fmt_crosshair_price(price_val)
+                    parts = ([f"t={t_str}"] if t_str else []) + ([f"p={p_str}"] if p_str else [])
+                    self._crosshair_info_label.setText("十字: " + ("  ".join(parts) or "--"))
+        except Exception:
+            self._logger.exception("crosshair status update failed")
 
     def _on_backfill_event(self, **payload):
         try:
@@ -657,7 +726,7 @@ class KLineChartWorkspace(QWidget):
             return
         # 取消/忽略上一个正在运行的同步（soft cancel）
         prev = getattr(self, "_sync_thread", None)
-        if self._is_thread_running(prev):
+        if prev is not None and self._is_thread_running(prev):
             prev.requestInterruption()
 
         if hasattr(self, "_data_status_label"):
@@ -702,6 +771,12 @@ class KLineChartWorkspace(QWidget):
             return False
         except Exception:
             return False
+
+    def _safe_stop_thread(self, thread_obj: Optional["QThread"]) -> None:
+        """requestInterruption + quit；None-safe，不阻塞（无 wait）。"""
+        if thread_obj is not None and self._is_thread_running(thread_obj):
+            thread_obj.requestInterruption()
+            thread_obj.quit()
 
     def _drain_owned_threads(self) -> None:
         try:
@@ -772,7 +847,7 @@ class KLineChartWorkspace(QWidget):
                     self.result_ready.emit("本地: --")
 
         prev = getattr(self, "_coverage_thread", None)
-        if self._is_thread_running(prev):
+        if prev is not None and self._is_thread_running(prev):
             prev.requestInterruption()
         t = _CovThread(duckdb_path, symbol, period)
         t.setParent(self)
@@ -782,24 +857,115 @@ class KLineChartWorkspace(QWidget):
         t.start()
 
     def _bind_range_change_event(self):
-        if self.chart is None or self._range_change_bound:
+        if self._range_change_bound:
             return
         try:
-            self.chart.events.range_change += self._on_range_change
+            if self.chart is not None:
+                self.chart.events.range_change += self._on_range_change
+            elif self.chart_adapter is not None and hasattr(self.chart_adapter, "on_range_changed"):
+                on_range_changed = getattr(self.chart_adapter, "on_range_changed", None)
+                if callable(on_range_changed):
+                    on_range_changed(self._on_adapter_range_changed)
+                on_chart_click = getattr(self.chart_adapter, "on_chart_click", None)
+                if callable(on_chart_click):
+                    on_chart_click(self._on_adapter_chart_click)
+                on_crosshair_move = getattr(self.chart_adapter, "on_crosshair_move", None)
+                if callable(on_crosshair_move):
+                    on_crosshair_move(self._on_adapter_crosshair_move)
             self._range_change_bound = True
         except Exception:
             self._logger.exception("Failed to bind range change event")
+
+    def _to_datetime_safe(self, value: Any):
+        if value is None:
+            return pd.NaT
+        try:
+            return pd.to_datetime(str(value), errors="coerce")
+        except Exception:
+            return pd.NaT
+
+    def _on_adapter_chart_click(self, payload: dict) -> None:
+        try:
+            price = payload.get("price") if isinstance(payload, dict) else None
+            if price is None:
+                return
+            signal_bus.emit(
+                Events.CHART_PRICE_CLICKED,
+                price=float(price),
+                time=(payload.get("time") if isinstance(payload, dict) else None),
+            )
+        except Exception:
+            self._logger.exception("adapter chart click event handling failed")
+
+    def _on_adapter_range_changed(self, payload: dict) -> None:
+        if not isinstance(payload, dict) or self._loaded_range is None:
+            return
+        period = self.period_combo.currentText()
+        step = self._get_time_step(period)
+        if step.total_seconds() <= 0:
+            return
+        start_ts = pd.Timestamp(self._loaded_range[0])
+        end_ts = pd.Timestamp(self._loaded_range[1])
+        from_ts = self._to_datetime_safe(payload.get("from"))
+        to_ts = self._to_datetime_safe(payload.get("to"))
+        if pd.isna(from_ts) or pd.isna(to_ts):
+            return
+        bars_before = float((from_ts - start_ts) / step)
+        bars_after = float((end_ts - to_ts) / step)
+        self._on_range_change(None, bars_before, bars_after)
+
+    def _on_adapter_crosshair_move(self, payload: dict) -> None:
+        try:
+            if not isinstance(payload, dict):
+                return
+            state = vars(self)
+            symbol_input = state.get("symbol_input")
+            period_combo = state.get("period_combo")
+            symbol = ""
+            if symbol_input is not None and hasattr(symbol_input, "text"):
+                try:
+                    symbol = str(symbol_input.text()).strip()
+                except Exception:
+                    symbol = ""
+            period = ""
+            if period_combo is not None and hasattr(period_combo, "currentText"):
+                try:
+                    period = str(period_combo.currentText())
+                except Exception:
+                    period = ""
+            signal_bus.emit(
+                Events.CHART_CROSSHAIR_MOVED,
+                time=payload.get("time"),
+                price=payload.get("price"),
+                symbol=symbol,
+                period=period,
+                payload=payload,
+            )
+        except Exception:
+            self._logger.exception("adapter crosshair event handling failed")
 
     def load_symbol(self, symbol: str, **kwargs):
         if not symbol:
             return
         self.symbol_input.setText(symbol)
+        if self.orderbook_panel is not None:
+            self.orderbook_panel.set_current_symbol(symbol)
+        if self._tab_watchlist_widget is not None:
+            self._tab_watchlist_widget.set_current_symbol(symbol)
+        if self._tab_intraday_widget is not None:
+            self._tab_intraday_widget.set_symbol(symbol)
         # 打开标的时立即触发后台自动同步（增量补充历史数据）
         self._start_auto_data_sync(symbol)
         if self.toolbox_panel:
             self.toolbox_panel.set_symbol(symbol)
         if self.chart_events:
             self.chart_events.set_symbol(symbol)
+        # Sprint 4: 更新图表水印
+        if isinstance(self.chart_adapter, NativeLwcChartAdapter):
+            try:
+                self.chart_adapter.set_watermark(symbol)
+            except Exception:
+                pass
         # 标的切换时刷新 WS 行情订阅（仅当 realtime 模式已激活）
         if self._use_ws_quote and self.realtime_timer is not None and self.realtime_timer.isActive():
             self._restart_ws_quote_worker()
@@ -822,7 +988,7 @@ class KLineChartWorkspace(QWidget):
             self.chart_events.set_period(period)
 
     def mark_order(self, side: str, symbol: str, price: float, volume: int, **kwargs):
-        if self.chart is None:
+        if self.chart is None and self.chart_adapter is None:
             return
         current_symbol = self.symbol_input.text().strip()
         if symbol != current_symbol:
@@ -831,7 +997,7 @@ class KLineChartWorkspace(QWidget):
         marker_text = f"{'📈' if normalized_side == 'buy' else '📉'} {normalized_side.upper()}"
         if self.chart_adapter:
             self.chart_adapter.marker(marker_text)
-        else:
+        elif self.chart is not None:
             self.chart.marker(text=marker_text)
         if self.position_table:
             self.position_table.update_from_order(symbol, normalized_side, price, volume)
@@ -858,6 +1024,8 @@ class KLineChartWorkspace(QWidget):
         if cost_price is None:
             cost_price = target.get("avg_price") or target.get("open_price")
         if cost_price is None:
+            return
+        if self.chart is None:  # KLine 路径：cost_line 仅 LWC 支持
             return
         if self.cost_line is None or self.cost_line_symbol != symbol:
             if self.cost_line is not None:
@@ -937,6 +1105,13 @@ class KLineChartWorkspace(QWidget):
                 )(),
                 "数据查看",
             ),
+            (self._create_watchlist_tab, "报价列表"),
+            (self._create_heatmap_tab, "行情热图"),
+            (self._create_intraday_tab, "分时联动"),
+            (self._create_positions_tab, "持仓/结算"),
+            (self._create_orders_tab, "委托/成交"),
+            (self._create_funds_tab,  "资金账户"),
+            (self._create_risk_monitor_tab, "实时风控"),
             (self._create_trading_panel, "交易面板"),
         ]
 
@@ -981,6 +1156,7 @@ class KLineChartWorkspace(QWidget):
     def _on_bottom_tab_changed(self, index: int):
         if not self.bottom_tabs:
             return
+        self._sync_watchlist_page_btn_state(index)
         if self._bottom_tab_loaded.get(index):
             return
         self._bottom_tab_loaded[index] = True
@@ -1000,6 +1176,7 @@ class KLineChartWorkspace(QWidget):
             tabs.removeTab(index)
             tabs.insertTab(index, widget, title)
             tabs.setCurrentIndex(index)
+            self._sync_watchlist_page_btn_state(index)
             self._relax_widget_constraints(widget)
         except Exception:
             pass
@@ -1027,6 +1204,13 @@ class KLineChartWorkspace(QWidget):
         ("月K", "1M"),
         ("Tick", "tick"),
     ]
+    _TIMEZONE_OPTIONS: list[tuple[str, str]] = [
+        ("北京时间", "Asia/Shanghai"),
+        ("UTC", "UTC"),
+        ("纽约", "America/New_York"),
+        ("伦敦", "Europe/London"),
+        ("东京", "Asia/Tokyo"),
+    ]
 
     _PERIOD_BTN_STYLE = """
         QPushButton {
@@ -1046,6 +1230,13 @@ class KLineChartWorkspace(QWidget):
         }
         QPushButton:hover { border-color: #4fc3f7; color: #fff; }
         QPushButton::menu-indicator { width: 0; height: 0; }
+    """
+    _WATCHLIST_PAGE_BTN_ACTIVE_STYLE = """
+        QPushButton {
+            border: 1px solid #2d6f9f; background: rgba(79,195,247,0.20); color: #d7f3ff;
+            padding: 3px 10px; font-size: 12px; border-radius: 3px;
+        }
+        QPushButton:hover { border-color: #67d8ff; color: #fff; }
     """
 
     def _create_chart_controls(self) -> QWidget:
@@ -1187,6 +1378,27 @@ class KLineChartWorkspace(QWidget):
 
         self._add_toolbar_separator(layout)
 
+        # ── 画线工具下拉按钮 (Sprint 4) ──
+        self._drawing_btn = QPushButton("画线 ▾")
+        self._drawing_btn.setStyleSheet(self._INDICATOR_BTN_STYLE)
+        self._drawing_menu = QMenu(self)
+        self._drawing_menu.setStyleSheet(
+            "QMenu { background:#2a2a3e; color:#ccc; border:1px solid #555; padding:4px; }"
+            "QMenu::item { padding:4px 16px; }"
+            "QMenu::item:selected { background:#4fc3f7; color:#000; }"
+        )
+        self._build_drawing_menu()
+        self._drawing_btn.setMenu(self._drawing_menu)
+        layout.addWidget(self._drawing_btn)
+
+        self.watchlist_page_btn = QPushButton("报价页")
+        self.watchlist_page_btn.setCheckable(True)
+        self.watchlist_page_btn.setStyleSheet(self._INDICATOR_BTN_STYLE)
+        self.watchlist_page_btn.clicked.connect(self._open_watchlist_tab)
+        layout.addWidget(self.watchlist_page_btn)
+
+        self._add_toolbar_separator(layout)
+
         # ── 实时/自动交易/操作面板 ──
         self.auto_update_check = QCheckBox("实时")
         self.auto_update_check.setStyleSheet("QCheckBox { color:#aaa; font-size:11px; }")
@@ -1219,11 +1431,28 @@ class KLineChartWorkspace(QWidget):
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         layout.addWidget(self.theme_combo)
 
+        self.timezone_combo = QComboBox()
+        for tz_label, tz_key in self._TIMEZONE_OPTIONS:
+            self.timezone_combo.addItem(tz_label, tz_key)
+        self.timezone_combo.setStyleSheet(
+            "QComboBox { background:#2a2a3e; color:#ccc; border:1px solid #444; "
+            "border-radius:3px; padding:2px 6px; font-size:11px; min-width:90px; }"
+            "QComboBox:hover { border-color:#4fc3f7; }"
+            "QComboBox::drop-down { border:none; }"
+            "QComboBox QAbstractItemView { background:#2a2a3e; color:#ccc; selection-background-color:#4fc3f7; }"
+        )
+        self.timezone_combo.currentIndexChanged.connect(self._on_timezone_changed)
+        layout.addWidget(self.timezone_combo)
+
         # ── 源状态 / 监控设置 ──
         self.source_status_label = QLabel("源: --")
         self.source_status_label.setStyleSheet("color:#666; font-size:10px;")
         self.source_status_label.setToolTip("数据源健康状态")
         layout.addWidget(self.source_status_label)
+        self._crosshair_info_label = QLabel("十字: --")
+        self._crosshair_info_label.setStyleSheet("color:#7c9fbf; font-size:10px;")
+        self._crosshair_info_label.setToolTip("十字光标当前位置（时间/价格）")
+        layout.addWidget(self._crosshair_info_label)
 
         self.rt_settings_button = QPushButton("⚙")
         self.rt_settings_button.setToolTip("实时管道监控参数设置")
@@ -1334,6 +1563,73 @@ class KLineChartWorkspace(QWidget):
         self._kdj_action.triggered.connect(lambda c: self._toggle_indicator("kdj", c))
         menu.addAction(self._kdj_action)
 
+    # ── 画线工具菜单构建 (Sprint 4) ──
+
+    # 画线工具分组定义: (显示名, drawing_type)
+    _DRAWING_TOOL_GROUPS = [
+        ("── 水平线 ──", None),
+        ("水平直线", "hline"),
+        ("水平射线", "hray"),
+        ("水平线段", "hseg"),
+        ("── 垂直线 ──", None),
+        ("垂直直线", "vline"),
+        ("垂直射线", "vray"),
+        ("垂直线段", "vseg"),
+        ("── 趋势线 ──", None),
+        ("趋势线段", "tline"),
+        ("射线", "rayLine"),
+        ("直线", "straightLine"),
+        ("── 通道 & 斐波那契 ──", None),
+        ("价格通道", "priceChannel"),
+        ("平行直线", "parallel"),
+        ("斐波那契回撤", "fibonacci"),
+        ("── 标注 ──", None),
+        ("价格线", "priceLine"),
+        ("标注", "annotation"),
+        ("标签", "tag"),
+    ]
+
+    def _build_drawing_menu(self):
+        menu = self._drawing_menu
+        for label, dtype in self._DRAWING_TOOL_GROUPS:
+            if dtype is None:
+                # 分组标题 separator
+                sep = menu.addSeparator()
+                sep.setText(label)
+                continue
+            act = QAction(label, menu)
+            act.setData(dtype)
+            act.triggered.connect(lambda _checked=False, dt=dtype: self._on_drawing_tool_clicked(dt))
+            menu.addAction(act)
+
+        # 末尾添加「清除全部画线」
+        menu.addSeparator()
+        clear_act = QAction("🗑 清除全部画线", menu)
+        clear_act.triggered.connect(self._clear_all_drawings)
+        menu.addAction(clear_act)
+
+    def _on_drawing_tool_clicked(self, drawing_type: str):
+        """在当前图表上添加画线。"""
+        if not isinstance(self.chart_adapter, NativeLwcChartAdapter):
+            return
+        try:
+            self.chart_adapter.add_drawing(drawing_type)
+        except Exception:
+            self._logger.exception("add drawing %s failed", drawing_type)
+
+    def _clear_all_drawings(self):
+        """清除当前图表上的全部画线。"""
+        if not isinstance(self.chart_adapter, NativeLwcChartAdapter):
+            return
+        try:
+            drawings = self.chart_adapter.get_drawings(timeout=2.0)
+            for d in drawings:
+                did = d.get("id")
+                if did:
+                    self.chart_adapter.remove_drawing(did)
+        except Exception:
+            self._logger.exception("clear all drawings failed")
+
     def _toggle_indicator(self, name: str, checked: bool):
         setattr(self, f"{name}_visible", checked)
         # 同步复选框 (向后兼容)
@@ -1344,6 +1640,9 @@ class KLineChartWorkspace(QWidget):
         self._apply_indicator_visibility()
 
     def _apply_indicator_visibility(self):
+        if isinstance(self.chart_adapter, KLineChartAdapter):
+            self._apply_kline_indicator_visibility()
+            return
         if self.subchart_manager:
             self.subchart_manager.set_visibility(
                 macd=self.macd_visible,
@@ -1355,6 +1654,32 @@ class KLineChartWorkspace(QWidget):
             )
             if self.last_data is not None and not self.last_data.empty:
                 self._request_subchart_update(self.last_data, full_set=True)
+
+    def _apply_kline_indicator_visibility(self) -> None:
+        adapter = self.chart_adapter
+        if not isinstance(adapter, KLineChartAdapter):
+            return
+        try:
+            adapter.remove_indicator(pane_id="pane_macd")
+            adapter.remove_indicator(pane_id="pane_rsi")
+            adapter.remove_indicator(pane_id="pane_vol")
+            adapter.remove_indicator(pane_id="pane_kdj")
+            adapter.remove_indicator(pane_id="candle_pane", name="MA")
+            adapter.remove_indicator(pane_id="candle_pane", name="BOLL")
+            if self.macd_visible:
+                adapter.create_indicator("MACD", is_stack=True, pane_id="pane_macd", height=90)
+            if self.rsi_visible:
+                adapter.create_indicator("RSI", is_stack=True, pane_id="pane_rsi", height=90)
+            if self.vol_visible:
+                adapter.create_indicator("VOL", is_stack=True, pane_id="pane_vol", height=90, calc_params=[5, 10])
+            if self.kdj_visible:
+                adapter.create_indicator("KDJ", is_stack=True, pane_id="pane_kdj", height=90)
+            if self.ma_visible:
+                adapter.create_indicator("MA", is_stack=False, pane_id="candle_pane", calc_params=[5, 10, 20, 60])
+            if self.boll_visible:
+                adapter.create_indicator("BOLL", is_stack=False, pane_id="candle_pane", calc_params=[20, 2])
+        except Exception:
+            self._logger.exception("apply kline indicator visibility failed")
 
     def _on_period_btn_clicked(self, period_key: str):
         """周期按钮点击 → 同步隐藏的 period_combo → 触发刷新。
@@ -1457,8 +1782,8 @@ class KLineChartWorkspace(QWidget):
         except Exception:
             pass
 
-    def showEvent(self, event):
-        super().showEvent(event)
+    def showEvent(self, a0):
+        super().showEvent(a0)
         if not self.initial_data_loaded:
             self.initial_data_loaded = True
             QTimer.singleShot(0, self._load_default_chart_data)
@@ -1473,8 +1798,8 @@ class KLineChartWorkspace(QWidget):
             for delay in (0, 50, 150, 300, 600):
                 QTimer.singleShot(delay, self._enforce_split_limits)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
+    def resizeEvent(self, a0):
+        super().resizeEvent(a0)
         if self.include_operation_panel:
             self._enforce_split_limits()
 
@@ -1579,7 +1904,8 @@ class KLineChartWorkspace(QWidget):
                 self.last_bottom_ratio = sizes[1] / total
             top_size = total
             bottom_size = 0
-            self._sync_bottom_policy(bottom_size)
+        self._sync_bottom_policy(bottom_size)
+        self._sync_watchlist_page_btn_state()
         self.root_splitter.setSizes([top_size, bottom_size])
         self._enforce_split_limits()
 
@@ -1592,6 +1918,67 @@ class KLineChartWorkspace(QWidget):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(label)
             return frame
+        # ── 提前检测后端，决定走哪条路径 ────────────────────────────────────
+        try:
+            from gui_app.widgets.chart.backend_config import get_chart_backend_config
+            _backend_key = get_chart_backend_config().get_backend()
+        except Exception:
+            _backend_key = os.environ.get("EASYXT_CHART_BACKEND", "klinechart").strip().lower()
+
+        if _backend_key == "klinechart":
+            return self._create_klinechart_widget(parent)
+        return self._create_lwc_widget(parent)
+
+    def _create_klinechart_widget(self, parent: QWidget) -> QWidget:
+        """KLineChart 路径：无 QtChart / SubchartManager，仅 adapter + webview。"""
+        try:
+            from PyQt5.QtWebEngineWidgets import QWebEngineView
+            _ = QWebEngineView  # 确认依赖可用
+            adapter = KLineChartAdapter()
+            webview, _is_native = adapter.initialize(parent)
+            # KLine 路径：chart 保持 None，指标 / 画线全走 adapter RPC
+            self.chart = None
+            self.chart_adapter = adapter
+            self.subchart_manager = None
+            # toolbox_panel / position_table / chart_events 保持 None（由 __init__ 初始化）
+            self._bind_range_change_event()
+            if self.timezone_combo is not None:
+                self._on_timezone_changed(self.timezone_combo.currentIndex())
+            self._apply_kline_indicator_visibility()
+            webview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            webview.setMinimumHeight(0)
+            webview.setMinimumWidth(0)
+            self.orderbook_panel = WatchlistWidget(state_key="side_watchlist", enable_fullscreen=True)
+            self.orderbook_panel.symbol_selected.connect(self.load_symbol)
+            splitter = QSplitter(Qt.Horizontal)
+            splitter.setChildrenCollapsible(True)
+            splitter.addWidget(webview)
+            splitter.addWidget(self.orderbook_panel)
+            splitter.setStretchFactor(0, 6)
+            splitter.setStretchFactor(1, 2)
+            splitter.setSizes([900, 260])
+            container = QWidget()
+            container_layout = QVBoxLayout(container)
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            container_layout.setSpacing(0)
+            container_layout.addWidget(splitter)
+            if self.auto_load_chart:
+                self.refresh_chart_data()
+            return container
+        except Exception as exc:
+            self._logger.exception("KLineChart initialization failed")
+            frame = QFrame()
+            frame.setFrameStyle(QFrame.StyledPanel)
+            frame.setMinimumHeight(520)
+            layout = QVBoxLayout(frame)
+            label = QLabel(f"KLineChart 初始化失败: {exc}")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setStyleSheet("font-size: 14px; color: #666666;")
+            layout.addWidget(label)
+            return frame
+
+    def _create_lwc_widget(self, parent: QWidget) -> QWidget:
+        """LWC 路径（lwc_python / native_lwc）：QtChart + SubchartManager 完整栈。"""
         try:
             project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
             external_lwc_path = os.path.join(project_root, "external", "lightweight-charts-python")
@@ -1620,17 +2007,17 @@ class KLineChartWorkspace(QWidget):
             self.chart_events.bind_signal_bus()
             self._bind_range_change_event()
             self._apply_chart_theme("dark")
-            if self.subchart_manager:
-                self.subchart_manager.set_visibility(
-                    macd=self.macd_visible, rsi=self.rsi_visible,
-                    vol=self.vol_visible, kdj=self.kdj_visible,
-                    ma=self.ma_visible, boll=self.boll_visible,
-                )
+            self.subchart_manager.set_visibility(
+                macd=self.macd_visible, rsi=self.rsi_visible,
+                vol=self.vol_visible, kdj=self.kdj_visible,
+                ma=self.ma_visible, boll=self.boll_visible,
+            )
             webview = self.chart.get_webview()
             webview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             webview.setMinimumHeight(0)
             webview.setMinimumWidth(0)
-            self.orderbook_panel = OrderbookPanel()
+            self.orderbook_panel = WatchlistWidget(state_key="side_watchlist", enable_fullscreen=True)
+            self.orderbook_panel.symbol_selected.connect(self.load_symbol)
             splitter = QSplitter(Qt.Horizontal)
             splitter.setChildrenCollapsible(True)
             splitter.addWidget(webview)
@@ -1658,7 +2045,7 @@ class KLineChartWorkspace(QWidget):
             return frame
 
     def _load_default_chart_data(self):
-        if self.chart is None:
+        if self.chart is None and self.chart_adapter is None:
             return
         if not self.auto_load_chart:
             return
@@ -1756,6 +2143,108 @@ class KLineChartWorkspace(QWidget):
         panel.setParent(self)
         self.trading_panel = panel
         return panel
+
+    def _create_watchlist_tab(self) -> QWidget:
+        panel = WatchlistWidget(state_key="tab_watchlist", enable_fullscreen=True)
+        panel.symbol_selected.connect(self.load_symbol)
+        panel.set_current_symbol(self.symbol_input.text().strip())
+        self._tab_watchlist_widget = panel
+        return panel
+
+    def _create_heatmap_tab(self) -> QWidget:
+        TreemapWidget = self._dynamic_class(
+            "gui_app.widgets.treemap.treemap_widget", "TreemapWidget"
+        )
+        panel = TreemapWidget()
+        panel = cast(Any, panel)
+        panel.symbol_clicked.connect(self.load_symbol)
+        return panel
+
+    def _create_positions_tab(self) -> QWidget:
+        PositionsPanel = self._dynamic_class(
+            "gui_app.widgets.positions.positions_panel", "PositionsPanel"
+        )
+        panel = PositionsPanel()
+        panel = cast(Any, panel)
+        panel.symbol_clicked.connect(self.load_symbol)
+        return panel
+
+    def _create_intraday_tab(self) -> QWidget:
+        IntradayPanel = self._dynamic_class(
+            "gui_app.widgets.intraday.intraday_panel", "IntradayPanel"
+        )
+        panel = IntradayPanel()
+        panel = cast(Any, panel)
+        panel.symbol_clicked.connect(self.load_symbol)
+        if hasattr(panel, "set_symbol"):
+            panel.set_symbol(self.symbol_input.text().strip())
+        self._tab_intraday_widget = panel
+        return panel
+
+    def _create_orders_tab(self) -> QWidget:
+        OrdersPanel = self._dynamic_class(
+            "gui_app.widgets.orders.orders_panel", "OrdersPanel"
+        )
+        panel = OrdersPanel()
+        panel = cast(Any, panel)
+        panel.symbol_clicked.connect(self.load_symbol)
+        return panel
+
+    def _create_funds_tab(self) -> QWidget:
+        FundsPanel = self._dynamic_class(
+            "gui_app.widgets.funds.funds_panel", "FundsPanel"
+        )
+        panel = FundsPanel()
+        return panel
+
+    def _create_risk_monitor_tab(self) -> QWidget:
+        RealtimeRiskMonitor = self._dynamic_class(
+            "gui_app.widgets.realtime_risk_monitor", "RealtimeRiskMonitor"
+        )
+        panel = RealtimeRiskMonitor()
+        return panel
+
+    def _open_watchlist_tab(self) -> None:
+        if not self.include_operation_panel or self.bottom_tabs is None:
+            return
+        if self.root_splitter is not None:
+            sizes = self.root_splitter.sizes()
+            if len(sizes) >= 2 and sizes[1] <= 5:
+                self._toggle_bottom_panel()
+        target = None
+        for i in range(self.bottom_tabs.count()):
+            if self.bottom_tabs.tabText(i) == "报价列表":
+                target = i
+                break
+        if target is None:
+            return
+        self._on_bottom_tab_changed(target)
+        self.bottom_tabs.setCurrentIndex(target)
+        self._sync_watchlist_page_btn_state(target)
+
+    def _watchlist_tab_index(self) -> int:
+        if self.bottom_tabs is None:
+            return -1
+        for i in range(self.bottom_tabs.count()):
+            if self.bottom_tabs.tabText(i) == "报价列表":
+                return i
+        return -1
+
+    def _sync_watchlist_page_btn_state(self, index: int | None = None) -> None:
+        if not hasattr(self, "watchlist_page_btn") or self.watchlist_page_btn is None:
+            return
+        active = False
+        if self.bottom_tabs is not None and self.include_operation_panel:
+            idx = self.bottom_tabs.currentIndex() if index is None else index
+            active = idx == self._watchlist_tab_index()
+            if self.root_splitter is not None:
+                sizes = self.root_splitter.sizes()
+                if len(sizes) >= 2 and sizes[1] <= 5:
+                    active = False
+        self.watchlist_page_btn.setChecked(active)
+        self.watchlist_page_btn.setStyleSheet(
+            self._WATCHLIST_PAGE_BTN_ACTIVE_STYLE if active else self._INDICATOR_BTN_STYLE
+        )
 
     def _toggle_auto_update(self, state: int):
         if state == Qt.CheckState.Checked:
@@ -1864,7 +2353,7 @@ class KLineChartWorkspace(QWidget):
                 w.wait(500)
 
     def _flush_realtime_pipeline(self):
-        if self.chart is None:
+        if self.chart is None and self.chart_adapter is None:
             return
         # Fix 54: flush() 内部有 _last_data.copy() 等重操作，推到后台线程
         if self._flush_in_progress:
@@ -2104,7 +2593,7 @@ class KLineChartWorkspace(QWidget):
             self._set_orderbook_status(f"实时行情不可用: {message}")
 
     def _poll_realtime_quote(self):
-        if self.chart is None or self.interface is None:
+        if (self.chart is None and self.chart_adapter is None) or self.interface is None:
             return
         if self.auto_update_check is None or not self.auto_update_check.isChecked():
             self._emit_realtime_probe(connected=None, reason="auto_update_disabled")
@@ -2141,7 +2630,7 @@ class KLineChartWorkspace(QWidget):
         self._last_quote_monotonic = time.monotonic()
         quote_ts = pd.Timestamp.now().strftime("%H:%M:%S")
         self._emit_realtime_probe(connected=True, reason="quote_ok", quote_ts=quote_ts)
-        if self.chart is None:
+        if self.chart is None and self.chart_adapter is None:
             return
         period = self.period_combo.currentText() if self.period_combo is not None else "1d"
         # Fix 58: 只在 symbol/period 变化时才重新 configure，避免每秒在主线程做 tail().copy()
@@ -2172,12 +2661,8 @@ class KLineChartWorkspace(QWidget):
             # Fix 56: flush() 不再返回 data 全量拷贝，用 bar 就地更新 last_data
             if self.last_data is not None and not self.last_data.empty:
                 last_time = self.last_data.iloc[-1].get("time")
-                try:
-                    new_ts = pd.to_datetime(bar.get("time"), errors="coerce")
-                    last_ts = pd.to_datetime(last_time, errors="coerce")
-                except Exception:
-                    new_ts = pd.NaT
-                    last_ts = pd.NaT
+                new_ts = self._to_datetime_safe(bar.get("time"))
+                last_ts = self._to_datetime_safe(last_time)
                 if pd.notna(new_ts) and pd.notna(last_ts) and new_ts < last_ts:
                     return
                 if last_time == bar.get("time"):
@@ -2274,12 +2759,8 @@ class KLineChartWorkspace(QWidget):
             return
         last_row = self.last_data.iloc[-1].copy()
         last_time = last_row.get("time")
-        try:
-            new_ts = pd.to_datetime(bar_time, errors="coerce")
-            last_ts = pd.to_datetime(last_time, errors="coerce")
-        except Exception:
-            new_ts = pd.NaT
-            last_ts = pd.NaT
+        new_ts = self._to_datetime_safe(bar_time)
+        last_ts = self._to_datetime_safe(last_time)
         if pd.notna(new_ts) and pd.notna(last_ts) and new_ts < last_ts:
             return
         if last_time == bar_time:
@@ -2402,7 +2883,8 @@ class KLineChartWorkspace(QWidget):
     def _normalize_realtime_quote(self, quote: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(quote, dict):
             return {}
-        raw = quote.get("data") if isinstance(quote.get("data"), dict) else quote
+        _data_field = quote.get("data")
+        raw: dict[str, Any] = cast(dict[str, Any], _data_field) if isinstance(_data_field, dict) else quote
         normalized: dict[str, Any] = dict(raw)
 
         price = (
@@ -2473,6 +2955,10 @@ class KLineChartWorkspace(QWidget):
 
     def _update_orderbook(self, quote: dict):
         quote = self._normalize_realtime_quote(quote)
+        if hasattr(self, "_tab_watchlist_widget") and self._tab_watchlist_widget is not None:
+            self._tab_watchlist_widget.update_orderbook(dict(quote))
+        if hasattr(self, "_tab_intraday_widget") and self._tab_intraday_widget is not None:
+            self._tab_intraday_widget.update_quote(dict(quote))
         if hasattr(self, "orderbook_panel") and self.orderbook_panel is not None:
             self.orderbook_panel.update_orderbook(quote)
             return
@@ -2953,7 +3439,7 @@ class KLineChartWorkspace(QWidget):
         end_date: str,
         mode: str,
     ):
-        if not symbol or self.chart is None:
+        if not symbol or (self.chart is None and self.chart_adapter is None):
             return
         try:
             if pd.Timestamp(end_date) < pd.Timestamp(start_date):
@@ -2997,7 +3483,7 @@ class KLineChartWorkspace(QWidget):
     def _on_range_change(self, chart, bars_before: float, bars_after: float):
         if not self._progressive_enabled:
             return
-        if self.chart is None or self.last_data is None or self.last_data.empty:
+        if (self.chart is None and self.chart_adapter is None) or self.last_data is None or self.last_data.empty:
             return
         if self._loaded_range is None:
             return
@@ -3044,7 +3530,7 @@ class KLineChartWorkspace(QWidget):
                 )
 
     def refresh_chart_data(self):
-        if self.chart is None:
+        if self.chart is None and self.chart_adapter is None:
             return
         symbol = self.symbol_input.text().strip()
         period = self.period_combo.currentText()
@@ -3054,12 +3540,10 @@ class KLineChartWorkspace(QWidget):
             self.symbol_input.setText(normalized_symbol)
             symbol = normalized_symbol
         self._save_persisted_state()
-        if self._is_thread_running(self._chart_load_thread):
-            try:
-                self._chart_load_thread.requestInterruption()
-                self._chart_load_thread.quit()
-            except Exception:
-                pass
+        try:
+            self._safe_stop_thread(self._chart_load_thread)
+        except Exception:
+            pass
         self._reset_progressive_state()
         self._auto_fallback_attempted = False
         if not symbol:
@@ -3110,7 +3594,7 @@ class KLineChartWorkspace(QWidget):
             key = None
             if symbol_str and start_str and end_str:
                 key = (symbol_str, period_str, adjust_str, start_str, end_str)
-            if df is None or df.empty or self.chart is None:
+            if df is None or df.empty or (self.chart is None and self.chart_adapter is None):
                 if key and key in self._loading_segments:
                     self._loading_segments.discard(key)
                 if self.chart is not None and symbol_str and period_str in ("1m", "5m", "tick"):
@@ -3127,7 +3611,7 @@ class KLineChartWorkspace(QWidget):
                             self._set_orderbook_status(f"{symbol_str} 无{period_str}历史，已自动切换到1d")
                             self.refresh_chart_data()
                             return
-                if self.chart is not None and symbol_str:
+                if (self.chart is not None or self.chart_adapter is not None) and symbol_str:
                     self._start_realtime_polling()
                     self._set_orderbook_status(f"{symbol_str} 无历史数据，等待实时行情...")
                     status_text = str(payload.get("ingestion_status") or "")
@@ -3179,8 +3663,7 @@ class KLineChartWorkspace(QWidget):
                 self._backfill_retry_remaining = 0
                 self._backfill_retry_timer.stop()
             if self._is_thread_running(self._data_process_thread):
-                self._data_process_thread.requestInterruption()
-                self._data_process_thread.quit()
+                self._safe_stop_thread(self._data_process_thread)
                 # 不再 .wait() 阻塞主线程；requestInterruption 已足够
             self._data_process_thread = _DataProcessThread(df, period_str, payload)
             self._data_process_thread.setParent(self)
@@ -3284,7 +3767,9 @@ class KLineChartWorkspace(QWidget):
     def _finalize_chart_set(self, merged, symbol, period, mode):
         """主线程: chart.set + 状态保存 (从 _apply_data_processed 提取出)"""
         try:
-            if merged is None or merged.empty or self.chart is None:
+            if merged is None or merged.empty:
+                return
+            if self.chart is None and self.chart_adapter is None:
                 return
             if self._full_range is None or mode == "replace":
                 self._full_range = (
@@ -3294,13 +3779,15 @@ class KLineChartWorkspace(QWidget):
             # ㊸修复：跳过与上次完全相同形状+末行的 chart.set 调用
             _shape = (len(merged), symbol, period, str(merged["time"].iloc[-1]),
                       float(merged["close"].iloc[-1]))
+            if self.chart is None and self.chart_adapter is None:
+                return
             if _shape == self._last_chart_set_shape and mode != "merge":
                 self._logger.debug("_apply_data_processed: skipped duplicate chart.set")
             else:
                 self._last_chart_set_shape = _shape
                 if self.chart_adapter:
                     self.chart_adapter.set_data(merged)
-                else:
+                elif self.chart is not None:
                     self.chart.set(merged)
                 self._request_subchart_update(merged, full_set=True)
             self.last_data = merged
@@ -3347,11 +3834,10 @@ class KLineChartWorkspace(QWidget):
         if self.last_signal_key == signal_key:
             return
         self.last_signal_key = signal_key
-        if self.chart:
-            if self.chart_adapter:
-                self.chart_adapter.marker(signal["label"])
-            else:
-                self.chart.marker(text=signal["label"])
+        if self.chart_adapter:
+            self.chart_adapter.marker(signal["label"])
+        elif self.chart is not None:
+            self.chart.marker(text=signal["label"])
         if hasattr(self, "auto_trade_check") and self.auto_trade_check and self.auto_trade_check.isChecked():
             self._execute_trade_signal(signal)
 
@@ -3372,7 +3858,7 @@ class KLineChartWorkspace(QWidget):
             adjust: 复权类型
             initial_loaded: 是否为首屏数据加载完成后触发
         """
-        if not symbol or self.chart is None:
+        if not symbol or (self.chart is None and self.chart_adapter is None):
             return
 
         if self._full_range is None:
@@ -3442,7 +3928,7 @@ class KLineChartWorkspace(QWidget):
         self.refresh_chart_data()
 
     def _load_realtime_fallback(self, symbol: str, period: str) -> bool:
-        if not symbol or self.chart is None:
+        if not symbol or (self.chart is None and self.chart_adapter is None):
             return False
         self._ensure_realtime_api()
         if self.realtime_api is None:
@@ -3457,7 +3943,7 @@ class KLineChartWorkspace(QWidget):
         fallback_data = pd.DataFrame([bar])
         if self.chart_adapter:
             self.chart_adapter.set_data(fallback_data)
-        else:
+        elif self.chart is not None:
             self.chart.set(fallback_data)
         self._request_subchart_update(fallback_data, full_set=True)
         self.last_data = fallback_data
@@ -3508,6 +3994,22 @@ class KLineChartWorkspace(QWidget):
             return
         self.theme_manager.apply(cast(QApplication, app), theme)
 
+    def _on_timezone_changed(self, index: int):
+        if self.timezone_combo is None:
+            return
+        timezone = self.timezone_combo.itemData(index)
+        if not timezone:
+            return
+        adapter = self.chart_adapter
+        if adapter is None:
+            return
+        try:
+            set_timezone = getattr(adapter, "set_timezone", None)
+            if callable(set_timezone):
+                set_timezone(str(timezone))
+        except Exception:
+            self._logger.exception("Failed to apply chart timezone")
+
     def _toggle_full_range(self):
         use_full = True
         if self.start_date_edit is not None:
@@ -3556,6 +4058,12 @@ class KLineChartWorkspace(QWidget):
             index = self.adjust_combo.findText(display)
             if index >= 0:
                 self.adjust_combo.setCurrentIndex(index)
+        saved_timezone = settings.value("timezone", "Asia/Shanghai", type=str)
+        if saved_timezone:
+            for i in range(self.timezone_combo.count()):
+                if self.timezone_combo.itemData(i) == saved_timezone:
+                    self.timezone_combo.setCurrentIndex(i)
+                    break
 
     def _get_adjust_key(self) -> str:
         """从复权 ComboBox 当前文本获取内部 key"""
@@ -3567,9 +4075,11 @@ class KLineChartWorkspace(QWidget):
         settings.setValue("symbol", self.symbol_input.text().strip())
         settings.setValue("period", self.period_combo.currentText())
         settings.setValue("adjust", self._get_adjust_key())
+        if self.timezone_combo is not None:
+            settings.setValue("timezone", self.timezone_combo.currentData())
 
     def refresh_latest_bar(self):
-        if self.chart is None:
+        if self.chart is None and self.chart_adapter is None:
             return
         if self.auto_update_check is not None and not self.auto_update_check.isChecked():
             return
@@ -3619,7 +4129,7 @@ class KLineChartWorkspace(QWidget):
 
     def _on_latest_bar_ready(self, payload: dict):
         try:
-            if self.chart is None:
+            if self.chart is None and self.chart_adapter is None:
                 return
             df = payload.get("data") if isinstance(payload, dict) else None
             if df is None or df.empty:
@@ -3667,20 +4177,17 @@ class KLineChartWorkspace(QWidget):
 
     def _apply_latest_bar_from_bg(self, last_row_dict, signal, symbol, period):
         """主线程: chart.update(单行) + 就地合并 last_data + 子图更新"""
-        if self.chart is None:
+        if self.chart is None and self.chart_adapter is None:
             return
         if self.last_data is not None and not self.last_data.empty:
-            try:
-                prev_ts = pd.to_datetime(self.last_data.iloc[-1].get("time"), errors="coerce")
-                curr_ts = pd.to_datetime(last_row_dict.get("time"), errors="coerce")
-                if pd.notna(prev_ts) and pd.notna(curr_ts) and curr_ts < prev_ts:
-                    return
-            except Exception:
-                pass
+            prev_ts = self._to_datetime_safe(self.last_data.iloc[-1].get("time"))
+            curr_ts = self._to_datetime_safe(last_row_dict.get("time"))
+            if pd.notna(prev_ts) and pd.notna(curr_ts) and curr_ts < prev_ts:
+                return
         last_row = pd.Series(last_row_dict)
         if self.chart_adapter:
             self.chart_adapter.update_data(last_row)
-        else:
+        elif self.chart is not None:
             self.chart.update(last_row)
         current_close = float(last_row.get("close", 0))
         self.last_close = current_close
@@ -3704,11 +4211,10 @@ class KLineChartWorkspace(QWidget):
             signal_key = f"{signal['time']}_{signal['name']}"
             if self.last_signal_key != signal_key:
                 self.last_signal_key = signal_key
-                if self.chart:
-                    if self.chart_adapter:
-                        self.chart_adapter.marker(signal["label"])
-                    else:
-                        self.chart.marker(text=signal["label"])
+                if self.chart_adapter:
+                    self.chart_adapter.marker(signal["label"])
+                elif self.chart is not None:
+                    self.chart.marker(text=signal["label"])
                 if hasattr(self, "auto_trade_check") and self.auto_trade_check.isChecked():
                     self._execute_trade_signal(signal)
         signal_bus.emit(Events.DATA_UPDATED, symbol=symbol, period=period)
@@ -3807,6 +4313,15 @@ class KLineChartWorkspace(QWidget):
             trading_window.place_order_signal(symbol, "sell", price, volume)
 
     def _apply_chart_theme(self, theme: str):
+        if self.chart_adapter is not None:
+            # Adapter 路径：通过 RPC 发送配色方案（若实现）
+            try:
+                apply_theme = getattr(self.chart_adapter, "apply_theme", None)
+                if callable(apply_theme):
+                    apply_theme(theme)
+            except Exception:
+                self._logger.exception("Failed to apply adapter chart theme")
+            return
         if self.chart is None:
             return
         try:
@@ -3860,12 +4375,12 @@ class KLineChartWorkspace(QWidget):
         except Exception as e:
             self._logger.exception(f"打开实时设置对话框失败: {e}")
 
-    def hideEvent(self, event):
-        super().hideEvent(event)
+    def hideEvent(self, a0):
+        super().hideEvent(a0)
         if self.realtime_timer and self.realtime_timer.isActive():
             self.realtime_timer.stop()
 
-    def closeEvent(self, event):
+    def closeEvent(self, a0):
         try:
             self._drain_owned_threads()
             self._backfill_retry_timer.stop()
@@ -3882,7 +4397,7 @@ class KLineChartWorkspace(QWidget):
             # 对 _realtime_connect_thread 单独处理：它可能阻塞在 TDX 网络上，
             # 先 requestInterruption+quit，加大等待窗口并记录日志，作为第二道保险。
             rct = self._realtime_connect_thread
-            if self._is_thread_running(rct):
+            if rct is not None and self._is_thread_running(rct):
                 rct.requestInterruption()
                 rct.quit()
                 if not rct.wait(1000):  # 给实盘连接线程 1s 宽限
@@ -3930,7 +4445,7 @@ class KLineChartWorkspace(QWidget):
                     self.toolbox_panel.save_current()
                 except Exception:
                     pass
-            super().closeEvent(event)
+            super().closeEvent(a0)
 
 
 class _ChartDataLoadThread(QThread):

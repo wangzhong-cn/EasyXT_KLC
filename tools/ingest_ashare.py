@@ -26,6 +26,7 @@ logging.basicConfig(
 log = logging.getLogger("ingest-ashare")
 
 CHECKPOINT = Path("data/ashare_ingest_ckpt.json")
+INGEST_LOCK_STALE_S = 6 * 3600
 
 
 def load_ckpt():
@@ -37,6 +38,48 @@ def load_ckpt():
 def save_ckpt(ckpt):
     CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
     CHECKPOINT.write_text(json.dumps(ckpt, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _cleanup_stale_ingest_lock(lock_path: Path, stale_s: int = INGEST_LOCK_STALE_S) -> bool:
+    if not lock_path.exists():
+        return False
+    now = time.time()
+    try:
+        content = lock_path.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        content = ""
+    pid = -1
+    ts = 0.0
+    if "|" in content:
+        p, t = content.split("|", 1)
+        try:
+            pid = int(p)
+        except ValueError:
+            pid = -1
+        try:
+            ts = float(t)
+        except ValueError:
+            ts = 0.0
+    age_s = max(0.0, now - ts) if ts > 0 else float(stale_s + 1)
+    alive = _pid_exists(pid)
+    if (not alive) or age_s > stale_s:
+        lock_path.unlink(missing_ok=True)
+        return True
+    return False
+
+
+def _write_ingest_lock(lock_path: Path) -> None:
+    lock_path.write_text(f"{os.getpid()}|{time.time():.3f}", encoding="utf-8")
 
 
 def main():
@@ -101,10 +144,15 @@ def main():
         log.info("全部待处理 A 股在 xtdata 中均无数据")
         return
 
-    # 4. 分批入库
-    BATCH = 200
-    total_batches = (len(have_data) + BATCH - 1) // BATCH
-    log.info("将分 %d 批入库 %d 只 A 股", total_batches, len(have_data))
+    init_batch = max(1, int(os.environ.get("EASYXT_INGEST_INIT_BATCH", "200") or 200))
+    min_batch = max(1, int(os.environ.get("EASYXT_INGEST_MIN_BATCH", "20") or 20))
+    max_batch = max(min_batch, int(os.environ.get("EASYXT_INGEST_MAX_BATCH", "200") or 200))
+    target_batch_sec = max(10.0, float(os.environ.get("EASYXT_INGEST_TARGET_BATCH_SEC", "120") or 120))
+    batch_size = min(max_batch, max(min_batch, init_batch))
+    log.info(
+        "动态批次入库 A 股: 总数=%d, 初始=%d, 区间=[%d,%d], 目标耗时=%.0fs",
+        len(have_data), batch_size, min_batch, max_batch, target_batch_sec,
+    )
 
     updater = AutoDataUpdater()
     updater.initialize_interface()
@@ -113,11 +161,12 @@ def main():
         return
 
     ingest_lock = Path(str(db_path) + ".ingest.lock")
+    _cleanup_stale_ingest_lock(ingest_lock)
 
     def _rotate_interface_connection() -> None:
         if updater.interface is None:
             return
-        ingest_lock.unlink(missing_ok=True)  # 释放：删哨兵，此时 DB 文件无持久写锁
+        ingest_lock.unlink(missing_ok=True)
         try:
             updater.interface._close_duckdb_connection()
         except Exception:
@@ -125,48 +174,70 @@ def main():
         time.sleep(5.0)
         if not updater.interface.connect(read_only=False):
             raise RuntimeError("批次连接重建失败")
-        ingest_lock.touch()  # 重新持有：建哨兵
+        _write_ingest_lock(ingest_lock)
+
+    def _next_batch_size(current: int, elapsed_sec: float) -> int:
+        if elapsed_sec > target_batch_sec * 1.2:
+            return max(min_batch, int(current * 0.7))
+        if elapsed_sec < target_batch_sec * 0.5:
+            return min(max_batch, int(current * 1.2))
+        return current
 
     t0 = time.time()
     total_success = ckpt["success"]
     total_failed = ckpt["failed"]
     total_records = ckpt["records"]
 
-    ingest_lock.touch()  # 入库开始
-    for batch_idx in range(total_batches):
-        batch = have_data[batch_idx * BATCH : (batch_idx + 1) * BATCH]
-        log.info("=== 批次 %d/%d: %d 只 [%s ... %s] ===",
-                 batch_idx + 1, total_batches, len(batch), batch[0], batch[-1])
+    _write_ingest_lock(ingest_lock)
+    try:
+        cursor = 0
+        batch_idx = 0
+        while cursor < len(have_data):
+            batch_idx += 1
+            batch = have_data[cursor : cursor + batch_size]
+            log.info(
+                "=== 批次 %d: %d 只 [%s ... %s] | 已完成=%d/%d ===",
+                batch_idx, len(batch), batch[0], batch[-1], cursor, len(have_data),
+            )
 
-        bt0 = time.time()
-        result = updater.bulk_download(
-            stock_codes=batch,
-            periods=["1d", "5m"],
-            start_date="20100101",
-        )
-        bt1 = time.time()
+            bt0 = time.time()
+            result = updater.bulk_download(
+                stock_codes=batch,
+                periods=["1d", "5m"],
+                start_date="20100101",
+            )
+            bt1 = time.time()
 
-        total_success += result["success_stocks"]
-        total_failed += result["failed_stocks"]
-        total_records += result["total_records"]
+            total_success += result["success_stocks"]
+            total_failed += result["failed_stocks"]
+            total_records += result["total_records"]
 
-        ckpt["done_codes"].extend(batch)
-        ckpt["success"] = total_success
-        ckpt["failed"] = total_failed
-        ckpt["records"] = total_records
-        save_ckpt(ckpt)
+            ckpt["done_codes"].extend(batch)
+            ckpt["success"] = total_success
+            ckpt["failed"] = total_failed
+            ckpt["records"] = total_records
+            save_ckpt(ckpt)
 
-        elapsed = bt1 - bt0
-        overall = bt1 - t0
-        remaining = (total_batches - batch_idx - 1) * (overall / (batch_idx + 1))
-        log.info(
-            "批次完成: 成功=%d 失败=%d 记录=%d 耗时=%.0fs | 累计: 成功=%d 失败=%d ETA=%.0fm",
-            result["success_stocks"], result["failed_stocks"], result["total_records"],
-            elapsed, total_success, total_failed, remaining / 60,
-        )
-        if batch_idx < total_batches - 1:
-            _rotate_interface_connection()
-    ingest_lock.unlink(missing_ok=True)  # 入库完成清理
+            elapsed = bt1 - bt0
+            overall = bt1 - t0
+            cursor += len(batch)
+            avg_batch_sec = overall / batch_idx
+            remaining_items = max(0, len(have_data) - cursor)
+            remaining_batches = (remaining_items + batch_size - 1) // batch_size
+            remaining = remaining_batches * avg_batch_sec
+            log.info(
+                "批次完成: 成功=%d 失败=%d 记录=%d 耗时=%.0fs | 累计: 成功=%d 失败=%d ETA=%.0fm",
+                result["success_stocks"], result["failed_stocks"], result["total_records"],
+                elapsed, total_success, total_failed, remaining / 60,
+            )
+            prev_batch_size = batch_size
+            batch_size = _next_batch_size(batch_size, elapsed)
+            if batch_size != prev_batch_size:
+                log.info("调整批次大小: %d -> %d (本批耗时 %.0fs)", prev_batch_size, batch_size, elapsed)
+            if cursor < len(have_data):
+                _rotate_interface_connection()
+    finally:
+        ingest_lock.unlink(missing_ok=True)
 
     log.info("=== A 股入库全部完成 ===")
     log.info("累计: 成功=%d 失败=%d 记录=%d 耗时=%.1fs",
@@ -176,8 +247,10 @@ def main():
     with mgr.get_read_connection() as con:
         for t in ["stock_daily", "stock_5m", "custom_period_bars"]:
             try:
-                rc = con.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
-                sc = con.execute("SELECT COUNT(DISTINCT stock_code) FROM " + t).fetchone()[0]
+                rc_row = con.execute("SELECT COUNT(*) FROM " + t).fetchone()
+                sc_row = con.execute("SELECT COUNT(DISTINCT stock_code) FROM " + t).fetchone()
+                rc = int(rc_row[0]) if rc_row else 0
+                sc = int(sc_row[0]) if sc_row else 0
                 log.info("  %s: %s 行, %s 只标的", t, f"{rc:,}", f"{sc:,}")
             except Exception as e:
                 log.info("  %s: %s", t, e)

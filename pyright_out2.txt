@@ -1,0 +1,4 @@
+'pyright' is not recognized as an internal or external command,
+operable program or batch file.
+
+ERROR conda.cli.main_run:execute(127): `conda run pyright gui_app/widgets/kline_chart_workspace.py` failed. (See above for error)

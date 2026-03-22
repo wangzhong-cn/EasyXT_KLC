@@ -12,6 +12,8 @@ class ChartEvents:
         self._logger = logging.getLogger(__name__)
         self._bound = False
         self._enable_topbar = enable_topbar
+        self._symbol: str = ""
+        self._period: str = ""
         self._build_topbar()
 
     def bind_signal_bus(self):
@@ -21,12 +23,16 @@ class ChartEvents:
         try:
             self.chart.events.search += self._on_search
             self.chart.events.click += self._on_click
+            crosshair = getattr(self.chart.events, "crosshair_move", None)
+            if crosshair is not None:
+                crosshair += self._on_crosshair_move
         except Exception:
             self._logger.exception("Failed to bind chart search event")
 
     def set_symbol(self, symbol: str):
         if not symbol:
             return
+        self._symbol = symbol
         try:
             widget = self.chart.topbar.get("symbol")
             if widget:
@@ -37,6 +43,7 @@ class ChartEvents:
     def set_period(self, period: str):
         if not period:
             return
+        self._period = period
         try:
             widget = self.chart.topbar.get("period")
             if widget:
@@ -80,3 +87,16 @@ class ChartEvents:
             signal_bus.emit(Events.CHART_PRICE_CLICKED, price=price, time=time)
         except Exception:
             self._logger.exception("Failed to emit chart price click event")
+
+    def _on_crosshair_move(self, chart, time, price):
+        try:
+            signal_bus.emit(
+                Events.CHART_CROSSHAIR_MOVED,
+                price=price,
+                time=time,
+                symbol=self._symbol,
+                period=self._period,
+                payload={"source": "lwc"},
+            )
+        except Exception:
+            self._logger.exception("Failed to emit chart crosshair event")

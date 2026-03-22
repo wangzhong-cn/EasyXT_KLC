@@ -128,7 +128,31 @@ class NativeLwcChartAdapter:
         self._webview.setHtml(html, base_url)
 
         # 4. 等待 JS chart.ready 握手（通过 WsBridge.wait_connect）
-        connected = self._bridge.wait_connect(timeout=timeout)
+        #    注意：不能用 threading.Event.wait() 阻塞主线程，
+        #    因为 QWebEngineView 需要事件循环来加载页面和运行 JS。
+        #    改用 QEventLoop + QTimer 确保 Qt 事件循环持续运行。
+        from PyQt5.QtCore import QEventLoop, QTimer
+        connected = False
+        _loop = QEventLoop()
+
+        def _check():
+            nonlocal connected
+            if self._bridge and self._bridge.is_connected:
+                connected = True
+                _loop.quit()
+
+        _poll = QTimer()
+        _poll.timeout.connect(_check)
+        _poll.start(50)  # 每 50ms 检查一次
+
+        _timeout = QTimer()
+        _timeout.setSingleShot(True)
+        _timeout.timeout.connect(_loop.quit)
+        _timeout.start(int(timeout * 1000))
+
+        _loop.exec_()
+        _poll.stop()
+        _timeout.stop()
         if not connected:
             log.warning(
                 "NativeLwcChartAdapter: WS 握手超时 (%.1fs)，自动降级 lwc_python",
@@ -198,6 +222,102 @@ class NativeLwcChartAdapter:
             if self._fallback:
                 self._fallback.marker(text)
 
+    def create_indicator(
+        self,
+        name: str,
+        *,
+        is_stack: bool = False,
+        pane_id: str | None = None,
+        height: int | None = None,
+        calc_params: list[int] | None = None,
+        short_name: str | None = None,
+    ) -> None:
+        if not self._initialized or not self._bridge:
+            return
+        from . import rpc_protocol as rpc
+        params: dict[str, object] = {"name": name, "isStack": bool(is_stack)}
+        if pane_id:
+            pane_options: dict[str, object] = {"id": pane_id}
+            if height is not None:
+                pane_options["height"] = int(height)
+            params["paneOptions"] = pane_options
+        if calc_params:
+            params["calcParams"] = [int(x) for x in calc_params]
+        if short_name:
+            params["shortName"] = short_name
+        try:
+            self._bridge.notify(rpc.M_CREATE_INDICATOR, params)
+        except Exception:
+            log.warning("NativeLwcChartAdapter.create_indicator: notify failed")
+
+    def add_indicator_from_data(
+        self,
+        indicator_id: str,
+        data: pd.DataFrame,
+        *,
+        value_col: str,
+        pane: str | None = None,
+        style: dict[str, object] | None = None,
+    ) -> None:
+        if not self._initialized or not self._bridge:
+            return
+        if not indicator_id or data is None or data.empty:
+            return
+        if "time" not in data.columns or value_col not in data.columns:
+            return
+        from . import rpc_protocol as rpc
+        records = data.loc[:, ["time", value_col]].to_dict("records")
+        style_payload = dict(style or {})
+        style_payload.setdefault("valueKey", value_col)
+        params: dict[str, object] = {"id": indicator_id, "data": records, "style": style_payload}
+        if pane:
+            params["pane"] = pane
+        try:
+            self._bridge.notify(rpc.M_ADD_INDICATOR, params)
+        except Exception:
+            log.warning("NativeLwcChartAdapter.add_indicator_from_data: notify failed")
+
+    def remove_indicator(self, *, pane_id: str, name: str | None = None) -> None:
+        if not self._initialized or not self._bridge:
+            return
+        from . import rpc_protocol as rpc
+        params: dict[str, object] = {"paneId": pane_id}
+        if name:
+            params["name"] = name
+        try:
+            self._bridge.notify(rpc.M_REMOVE_INDICATOR, params)
+        except Exception:
+            log.warning("NativeLwcChartAdapter.remove_indicator: notify failed")
+
+    def apply_theme(self, theme: str) -> None:
+        """KLine 路径主题应用：通过 RPC chart.applyTheme 发送配色方案。"""
+        if not self._initialized or not self._bridge:
+            return
+        from . import rpc_protocol as rpc
+        _DARK = {
+            "backgroundColor": "#0f172a",
+            "textColor": "#e2e8f0",
+            "axisColor": "#334155",
+            "crosshairColor": "rgba(59,130,246,0.7)",
+            "gridColor": "#1e293b",
+            "upColor": "#22c55e",
+            "downColor": "#ef4444",
+        }
+        _LIGHT = {
+            "backgroundColor": "#f8fafc",
+            "textColor": "#0f172a",
+            "axisColor": "#cbd5e1",
+            "crosshairColor": "rgba(59,130,246,0.7)",
+            "gridColor": "#e2e8f0",
+            "upColor": "#16a34a",
+            "downColor": "#dc2626",
+        }
+        palette = _DARK if theme == "dark" else _LIGHT
+        try:
+            self._bridge.notify(rpc.M_APPLY_THEME, rpc.build_apply_theme(palette))
+        except Exception:
+            log.warning("NativeLwcChartAdapter.apply_theme: notify failed")
+
     # ── Event registration (扩展接口，Stage 2.2 实装) ──────────────────────────
 
     def on_chart_click(self, callback: Callable[[dict], None]) -> None:
@@ -245,8 +365,12 @@ class NativeLwcChartAdapter:
             return None
         from . import rpc_protocol as rpc
         try:
-            params = rpc.build_add_drawing(drawing_type, **kwargs)
-            self._bridge.notify(rpc.M_ADD_DRAWING, params)
+            if kwargs:
+                params = rpc.build_add_drawing(drawing_type, **kwargs)
+                self._bridge.notify(rpc.M_ADD_DRAWING, params)
+            else:
+                params = rpc.build_start_draw(drawing_type)
+                self._bridge.notify(rpc.M_START_DRAW, params)
             return params["id"]
         except Exception:
             log.warning("NativeLwcChartAdapter.add_drawing: notify failed")
@@ -289,6 +413,28 @@ class NativeLwcChartAdapter:
             log.warning("NativeLwcChartAdapter.get_drawings: 超时或失败")
             return []
 
+    # ── Timezone & Watermark (Sprint 4) ───────────────────────────────────────
+
+    def set_timezone(self, timezone: str) -> None:
+        """设置图表时区，如 'Asia/Shanghai', 'UTC' 等。"""
+        if not self._initialized or not self._bridge:
+            return
+        from . import rpc_protocol as rpc
+        try:
+            self._bridge.notify(rpc.M_SET_TIMEZONE, {"timezone": timezone})
+        except Exception:
+            log.warning("NativeLwcChartAdapter.set_timezone: notify failed")
+
+    def set_watermark(self, text: str) -> None:
+        """设置图表水印文字（品种代码大字居中半透明显示）。"""
+        if not self._initialized or not self._bridge:
+            return
+        from . import rpc_protocol as rpc
+        try:
+            self._bridge.notify(rpc.M_SET_WATERMARK, {"text": text})
+        except Exception:
+            log.warning("NativeLwcChartAdapter.set_watermark: notify failed")
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _make_fallback(self, parent):
@@ -312,7 +458,7 @@ class NativeLwcChartAdapter:
 
     @classmethod
     def _get_native_dir(cls) -> Path:
-        return Path(__file__).parent.parent / "chart_native"
+        return Path(__file__).parent.parent.parent / "chart_native"
 
     @classmethod
     def _get_lwc_js_src(cls) -> Path:
@@ -380,6 +526,73 @@ class NativeLwcChartAdapter:
 </html>"""
 
 
+# ── KLineChart adapter（Sprint 1 — 路径 B: KLineChart v9.x）─────────────────────
+
+class KLineChartAdapter(NativeLwcChartAdapter):
+    """
+    KLineChart v9.8.x 适配器。
+
+    继承 NativeLwcChartAdapter 的全部 WsBridge / 事件 / 画线 API，
+    仅覆盖 HTML 模板（klinecharts.min.js + kline-bridge.js + KlineBridge.init）
+    和运行时库校验（klinecharts.min.js 已随项目提交，无需动态复制）。
+    """
+
+    def _ensure_lwc_lib(self) -> None:
+        """klinecharts.min.js 已随项目提交到 chart_native/lib/，仅做存在性校验。"""
+        lib = self._get_native_dir() / "lib" / "klinecharts.min.js"
+        if not lib.exists():
+            log.warning("KLineChartAdapter: klinecharts.min.js 缺失: %s", lib)
+
+    def _build_html(self, port: int) -> str:
+        """生成 KLineChart 图表页面 HTML（相对路径相对于 chart_native/）。"""
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EasyXT KLineChart</title>
+  <style>
+    html, body {{
+      margin: 0; padding: 0;
+      width: 100%; height: 100%;
+      background: #0c0d0f;
+      overflow: hidden;
+    }}
+    #chart {{ width: 100%; height: 100%; }}
+    #easyxt-labels {{
+      position: absolute; top: 6px; left: 8px;
+      font-family: sans-serif; font-size: 12px; color: #d8d9db;
+      pointer-events: none; z-index: 10;
+    }}
+    #easyxt-symbol-label {{ font-weight: bold; margin-right: 8px; }}
+    #easyxt-period-label  {{ color: #888; }}
+    #easyxt-watermark {{
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      font-family: sans-serif; font-size: 48px; font-weight: bold;
+      color: rgba(255,255,255,0.04);
+      pointer-events: none; z-index: 5;
+      white-space: nowrap; user-select: none;
+    }}
+  </style>
+</head>
+<body>
+  <div id="easyxt-watermark"></div>
+  <div id="easyxt-labels">
+    <span id="easyxt-symbol-label"></span>
+    <span id="easyxt-period-label"></span>
+  </div>
+  <div id="chart"></div>
+  <script src="./lib/klinecharts.min.js"></script>
+  <script src="./kline-bridge.js"></script>
+  <script>
+    // KLineChartAdapter 注入 WS 端口
+    KlineBridge.init(document.getElementById('chart'), {port});
+  </script>
+</body>
+</html>"""
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 def create_chart_adapter(
@@ -413,7 +626,7 @@ def create_chart_adapter(
             )
         except Exception:
             # 配置中心不可用时降级到 env var
-            backend_key = os.environ.get("EASYXT_CHART_BACKEND", "lwc_python").strip().lower()
+            backend_key = os.environ.get("EASYXT_CHART_BACKEND", "klinechart").strip().lower()
 
     # ── 2. native_lwc：先做交易时段冻结检查 ──────────────────────────────────
     if backend_key == "native_lwc":
@@ -425,6 +638,9 @@ def create_chart_adapter(
                 backend_key = "lwc_python"
         except Exception:
             pass  # 检查失败时不阻断，继续创建 native_lwc
+
+    if backend_key == "klinechart":
+        return KLineChartAdapter()
 
     if backend_key == "native_lwc":
         return NativeLwcChartAdapter()

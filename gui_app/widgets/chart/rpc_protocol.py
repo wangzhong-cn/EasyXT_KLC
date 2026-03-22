@@ -13,11 +13,14 @@ Python → JS 方法（Method）：
   chart.setSymbolText   更新顶栏标的显示
   chart.setPeriodText   更新顶栏周期显示
   chart.addDrawing      添加画线（返回 drawing_id）
+  chart.startDraw       启动画线交互模式（用户点击确定锚点）
   chart.removeDrawing   删除画线
   chart.getDrawings     获取所有画线（call_sync 调用，用于持久化）
   chart.loadDrawings    从持久化加载画线
   chart.takeScreenshot  截图（call_sync 调用，返回 base64 PNG）
   chart.fitContent      自动适配可视范围
+  chart.setTimezone     设置图表时区（Sprint 4）
+  chart.setWatermark    设置图表水印（Sprint 4）
 
 JS → Python 事件（Event）：
   chart.click           用户单击图表 {time, price}
@@ -45,12 +48,17 @@ M_RESIZE = "chart.resize"
 M_SET_SYMBOL = "chart.setSymbolText"
 M_SET_PERIOD = "chart.setPeriodText"
 M_ADD_DRAWING = "chart.addDrawing"
+M_START_DRAW = "chart.startDraw"
 M_REMOVE_DRAWING = "chart.removeDrawing"
 M_GET_DRAWINGS = "chart.getDrawings"  # call_sync
 M_LOAD_DRAWINGS = "chart.loadDrawings"
 M_TAKE_SCREENSHOT = "chart.takeScreenshot"  # call_sync → base64 PNG
 M_FIT_CONTENT = "chart.fitContent"
 
+# ── KLineChart-specific method names (Sprint 1+) ──────────────────────────────
+M_CREATE_INDICATOR = "chart.createIndicator"  # KLineChart 内置指标（Sprint 2 SubchartManager 使用）
+M_SET_TIMEZONE = "chart.setTimezone"          # 设置图表时区（Sprint 4）
+M_SET_WATERMARK = "chart.setWatermark"        # 设置图表水印（Sprint 4）
 # ── Event names ───────────────────────────────────────────────────────────────
 E_CHART_CLICK = "chart.click"
 E_CROSSHAIR_MOVE = "chart.crosshairMove"
@@ -121,30 +129,56 @@ def build_apply_theme(theme: dict) -> dict:
     return {"theme": theme}
 
 
+# 全部支持的画线类型（与 kline-bridge.js OVERLAY_TYPE_MAP 一一对应）
+DRAWING_TYPES = frozenset([
+    "hline", "hray", "hseg",
+    "vline", "vray", "vseg",
+    "tline", "rayLine", "straightLine",
+    "priceLine",
+    "priceChannel", "parallel",
+    "fibonacci",
+    "annotation", "tag",
+])
+
+
 def build_add_drawing(
     drawing_type: str,
     style: dict | None = None,
     *,
-    # hline
+    # hline / hray
     price: float | None = None,
     title: str = "",
     axis_label: bool = True,
-    # tline
+    # two-point types (tline/rayLine/straightLine/priceLine/fibonacci/hseg/vseg)
     time1: str | int | None = None,
     price1: float | None = None,
     time2: str | int | None = None,
     price2: float | None = None,
-    # vline
+    # three-point types (priceChannel/parallel)
+    time3: str | int | None = None,
+    price3: float | None = None,
+    # single-time types (vline/vray/annotation/tag)
     time: str | int | None = None,
+    # annotation/tag text
+    text: str = "",
+    # generic multi-point format (overrides individual params when provided)
+    points: list[dict] | None = None,
     # caller-supplied id (optional; JS will use it as-is)
     drawing_id: str | None = None,
 ) -> dict:
     """
-    构造 chart.addDrawing 参数。
+    构造 chart.addDrawing 参数。支持全部16种画线类型。
 
-    - hline  水平价格线: price=...
-    - tline  趋势线:     time1, price1, time2, price2
-    - vline  垂直时间线: time=...
+    - hline/hray       水平价格线:      price=...
+    - hseg             水平线段:          time1, time2, price
+    - vline/vray       垂直时间线:      time=...
+    - vseg             垂直线段:          time1, time2
+    - tline/rayLine/straightLine/priceLine/fibonacci:
+                       两点型:            time1,price1,time2,price2
+    - priceChannel/parallel:
+                       三点型:            time1,price1,time2,price2,time3,price3
+    - annotation/tag   标注:              time, price, text
+    - 通用:             points=[{time, value}, ...] 可覆盖上述所有参数
     """
     import uuid
     params: dict = {
@@ -152,18 +186,52 @@ def build_add_drawing(
         "type": drawing_type,
         "style": style or {},
     }
-    if drawing_type == "hline":
+    if points is not None:
+        params["points"] = points
+    elif drawing_type in ("hline", "hray"):
         params["price"] = price
         params["title"] = title
         params["axisLabel"] = axis_label
-    elif drawing_type == "tline":
+    elif drawing_type == "hseg":
+        params["time1"] = time1
+        params["time2"] = time2
+        params["price"] = price
+    elif drawing_type in ("tline", "rayLine", "straightLine", "priceLine", "fibonacci"):
         params["time1"] = time1
         params["price1"] = price1
         params["time2"] = time2
         params["price2"] = price2
-    elif drawing_type == "vline":
+    elif drawing_type in ("vline", "vray"):
         params["time"] = time
+    elif drawing_type == "vseg":
+        params["time1"] = time1
+        params["time2"] = time2
+    elif drawing_type in ("priceChannel", "parallel"):
+        params["time1"] = time1
+        params["price1"] = price1
+        params["time2"] = time2
+        params["price2"] = price2
+        params["time3"] = time3
+        params["price3"] = price3
+    elif drawing_type in ("annotation", "tag"):
+        params["time"] = time
+        params["price"] = price
+        params["text"] = text
     return params
+
+
+def build_start_draw(
+    drawing_type: str,
+    style: dict | None = None,
+    *,
+    drawing_id: str | None = None,
+) -> dict:
+    import uuid
+    return {
+        "id": drawing_id or str(uuid.uuid4()),
+        "type": drawing_type,
+        "style": style or {},
+    }
 
 
 def build_remove_drawing(drawing_id: str) -> dict:
