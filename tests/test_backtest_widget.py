@@ -46,6 +46,19 @@ def test_strategy_registry_contains_factor_workflow_strategy(qapp):
         widget.close()
 
 
+def test_strategy_registry_contains_optimizer_strategy(qapp):
+    widget = BacktestWidget()
+    try:
+        registry = widget.strategy_registry
+        assert "组合优化器策略" in registry
+        cfg = registry["组合优化器策略"]
+        keys = [p["key"] for p in cfg.get("params", [])]
+        assert "lookback" in keys
+        assert "rebalance_every" in keys
+    finally:
+        widget.close()
+
+
 def test_update_config_summary_contains_factor_context(qapp):
     widget = BacktestWidget()
     try:

@@ -672,6 +672,10 @@ class KLineChartWorkspace(QWidget):
         self._last_realtime_probe_line: Optional[str] = None
         self._xtdata_probe_enabled: bool = os.environ.get("EASYXT_ENABLE_XTDATA_QUOTE_PROBE", "0") in ("1", "true", "True")
         self._last_enrich_orderbook_ts: float = 0.0  # Fix-B: WS 五档补齐防抖时间戳
+        self._last_orderbook_snapshot: dict[str, Any] = {}
+        self._orderbook_status_text: str = "五档盘口"
+        self._orderbook_status_source: str = ""
+        self._orderbook_status_ts: float = 0.0
         self._orderbook_sink: Optional[RealtimeDuckDBSink] = None
         self.orderbook_panel: Optional[Any] = None  # OrderbookPanel in KLC path; WatchlistWidget in LWC path
         self._kline_side_watchlist: Optional[WatchlistWidget] = None
@@ -3219,6 +3223,18 @@ class KLineChartWorkspace(QWidget):
 
     def _update_orderbook(self, quote: dict):
         quote = self._normalize_realtime_quote(quote)
+        has_five_levels = (
+            quote.get("ask1") not in (None, 0, "", "--")
+            and quote.get("bid1") not in (None, 0, "", "--")
+        )
+        if has_five_levels:
+            self._last_orderbook_snapshot = dict(quote)
+        elif self._last_orderbook_snapshot:
+            merged = dict(self._last_orderbook_snapshot)
+            for key, value in quote.items():
+                if value not in (None, "", "--"):
+                    merged[key] = value
+            quote = merged
         if hasattr(self, "_tab_watchlist_widget") and self._tab_watchlist_widget is not None:
             self._tab_watchlist_widget.update_orderbook(dict(quote))
         if hasattr(self, "_tab_intraday_widget") and self._tab_intraday_widget is not None:
@@ -3244,19 +3260,38 @@ class KLineChartWorkspace(QWidget):
         self.orderbook_label.setText(display_text)
 
     def _set_orderbook_status(self, text: str, source: str = ""):
+        self._orderbook_status_text = text or self._orderbook_status_text or "五档盘口"
+        if source:
+            self._orderbook_status_source = source
+            if source in ("live", "db", "none"):
+                self._orderbook_status_ts = time.monotonic()
+        self._refresh_orderbook_status_age()
+
+    def _refresh_orderbook_status_age(self) -> None:
+        text = self._orderbook_status_text or "五档盘口"
+        source = self._orderbook_status_source
+        if source in ("live", "db") and self._orderbook_status_ts > 0:
+            age_s = int(max(0.0, time.monotonic() - self._orderbook_status_ts))
+            display_text = f"{text} ({age_s}s)"
+        else:
+            display_text = text
         if hasattr(self, "orderbook_panel") and self.orderbook_panel is not None:
-            self.orderbook_panel.set_status(text, source)
+            self.orderbook_panel.set_status(display_text, source)
         if hasattr(self, "orderbook_label") and self.orderbook_label is not None:
-            self.orderbook_label.setText(text)
+            self.orderbook_label.setText(display_text)
+
+    def _on_source_status_timer(self):
+        self._refresh_source_status()
+        self._refresh_orderbook_status_age()
 
     def _start_source_status_timer(self):
         if self._source_status_timer is not None:
             return
         self._source_status_timer = QTimer(self)
         self._source_status_timer.setInterval(5000)
-        self._source_status_timer.timeout.connect(self._refresh_source_status)
+        self._source_status_timer.timeout.connect(self._on_source_status_timer)
         self._source_status_timer.start()
-        self._refresh_source_status()
+        self._on_source_status_timer()
 
     def _refresh_source_status(self):
         """Fix 63: 将 get_source_status() 推到后台线程，避免主线程上调用 provider 对象"""

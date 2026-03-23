@@ -1,0 +1,12 @@
+{
+    "_comment": "复制此文件为 xueqiu_config.json 并填入真实值。此文件不进入 Git 版本控制。",
+    "cookie": "",
+    "portfolio_code": "ZH0000000",
+    "follow_ratio": 0.38,
+    "max_position": 10000,
+    "trade_mode": "paper",
+    "qmt_path": "D:/your_broker/bin.x64/XtItClient.exe",
+    "qmt_userdata_path": "D:/your_broker/userdata_mini",
+    "account_id": "",
+    "password": ""
+}

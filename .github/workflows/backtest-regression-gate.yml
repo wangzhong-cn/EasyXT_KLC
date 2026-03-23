@@ -78,6 +78,15 @@ jobs:
             -v \
             --no-header
 
+      - name: Run optimizer strategy subset (deterministic)
+        run: |
+          python -m pytest \
+            tests/test_portfolio_optimizer.py \
+            tests/test_portfolio_risk_optimizer_check.py \
+            tests/test_optimize_and_rebalance.py \
+            tests/test_optimizer_strategy.py \
+            -q
+
       - name: Annotate failure summary
         if: failure()
         run: |

@@ -31,7 +31,6 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -52,9 +51,9 @@ class PortfolioVaRResult:
     portfolio_cvar95: float
     portfolio_cvar95_pct: float
     # 各标的 VaR 贡献（绝对金额）
-    per_position_var95: Dict[str, float] = field(default_factory=dict)
+    per_position_var95: dict[str, float] = field(default_factory=dict)
     # 组合收益率序列（由各持仓加权合并）
-    portfolio_returns: List[float] = field(default_factory=list)
+    portfolio_returns: list[float] = field(default_factory=list)
     # 序列长度
     n_observations: int = 0
 
@@ -63,7 +62,7 @@ class PortfolioVaRResult:
 class SectorConcentrationResult:
     """行业集中度分析结果。"""
     # 各行业持仓市值占比
-    sector_weights: Dict[str, float] = field(default_factory=dict)
+    sector_weights: dict[str, float] = field(default_factory=dict)
     # HHI（按行业）
     hhi: float = 0.0
     # 前 N 行业集中度（前 3 行业合计占比）
@@ -80,19 +79,29 @@ class SectorConcentrationResult:
 class MultiAccountExposure:
     """多账户敞口聚合结果。"""
     # 各账户净值
-    account_navs: Dict[str, float] = field(default_factory=dict)
+    account_navs: dict[str, float] = field(default_factory=dict)
     # 总净值
     total_nav: float = 0.0
     # 各账户多头持仓市值
-    account_gross_long: Dict[str, float] = field(default_factory=dict)
+    account_gross_long: dict[str, float] = field(default_factory=dict)
     # 全平台合计多头敞口
     platform_gross_long: float = 0.0
     # 全平台合计净敞口占平台总净值比例
     platform_net_exposure_pct: float = 0.0
     # 各账户合并后各标的总持仓（code -> 市值）
-    aggregated_positions: Dict[str, float] = field(default_factory=dict)
+    aggregated_positions: dict[str, float] = field(default_factory=dict)
     # 合并持仓 HHI
     aggregated_hhi: float = 0.0
+
+
+@dataclass
+class OptimalWeightRiskCheck:
+    feasible: bool = True
+    max_single_weight: float = 0.0
+    weight_hhi: float = 0.0
+    max_single_breach: bool = False
+    hhi_breach: bool = False
+    warnings: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +121,7 @@ class PortfolioRiskAnalyzer:
 
     def portfolio_var95(
         self,
-        positions: Dict[str, Dict],
+        positions: dict[str, dict],
         total_nav: float,
         correlation_method: str = "weighted_sum",
     ) -> PortfolioVaRResult:
@@ -136,8 +145,8 @@ class PortfolioRiskAnalyzer:
         if not positions or total_nav <= 0:
             return PortfolioVaRResult(0.0, 0.0, 0.0, 0.0)
 
-        per_position_var: Dict[str, float] = {}
-        weighted_returns_map: Dict[str, List[float]] = {}
+        per_position_var: dict[str, float] = {}
+        weighted_returns_map: dict[str, list[float]] = {}
 
         for symbol, pos in positions.items():
             pos_nav = float(pos.get("nav", 0.0))
@@ -188,8 +197,8 @@ class PortfolioRiskAnalyzer:
 
     def sector_concentration(
         self,
-        positions: Dict[str, float],    # code -> 市值
-        sector_map: Dict[str, str],     # code -> 行业名称
+        positions: dict[str, float],    # code -> 市值
+        sector_map: dict[str, str],     # code -> 行业名称
         top_n: int = 3,
     ) -> SectorConcentrationResult:
         """
@@ -204,7 +213,7 @@ class PortfolioRiskAnalyzer:
         if total <= 0:
             return SectorConcentrationResult()
 
-        sector_nav: Dict[str, float] = {}
+        sector_nav: dict[str, float] = {}
         unknown_nav = 0.0
         for code, mv in positions.items():
             if mv <= 0:
@@ -245,7 +254,7 @@ class PortfolioRiskAnalyzer:
 
     def aggregate_multi_account(
         self,
-        accounts: Dict[str, Dict],
+        accounts: dict[str, dict],
     ) -> MultiAccountExposure:
         """
         聚合多个账户的持仓和净值。
@@ -262,7 +271,7 @@ class PortfolioRiskAnalyzer:
             MultiAccountExposure — 平台层面的净敞口和聚合持仓。
         """
         result = MultiAccountExposure()
-        aggregated: Dict[str, float] = {}
+        aggregated: dict[str, float] = {}
 
         for acct_id, info in accounts.items():
             nav = float(info.get("nav", 0.0))
@@ -295,13 +304,50 @@ class PortfolioRiskAnalyzer:
         return result
 
     # ------------------------------------------------------------------
-    # 4. Beta-to-market 估算（线性回归）
+    # 4. 优化权重风控校验
+    # ------------------------------------------------------------------
+
+    def check_optimal_weights(
+        self,
+        weights: dict[str, float],
+        *,
+        max_single_weight: float = 0.3,
+        max_hhi: float = 0.2,
+    ) -> OptimalWeightRiskCheck:
+        if not weights:
+            return OptimalWeightRiskCheck(feasible=False, warnings=["weights 为空"])
+        positive = {k: max(0.0, float(v)) for k, v in weights.items()}
+        total = sum(positive.values())
+        if total <= 0:
+            return OptimalWeightRiskCheck(feasible=False, warnings=["weights 全部非正"])
+        normalized = {k: v / total for k, v in positive.items()}
+        max_single = max(normalized.values())
+        hhi = sum(v * v for v in normalized.values())
+        check = OptimalWeightRiskCheck(
+            feasible=True,
+            max_single_weight=round(max_single, 6),
+            weight_hhi=round(hhi, 6),
+        )
+        if max_single > max_single_weight:
+            check.max_single_breach = True
+            check.feasible = False
+            check.warnings.append(
+                f"最大单仓超限: {max_single:.2%} > {max_single_weight:.2%}"
+            )
+        if hhi > max_hhi:
+            check.hhi_breach = True
+            check.feasible = False
+            check.warnings.append(f"权重HHI超限: {hhi:.4f} > {max_hhi:.4f}")
+        return check
+
+    # ------------------------------------------------------------------
+    # 5. Beta-to-market 估算（线性回归）
     # ------------------------------------------------------------------
 
     @staticmethod
     def estimate_beta(
-        asset_returns: List[float],
-        market_returns: List[float],
+        asset_returns: list[float],
+        market_returns: list[float],
     ) -> float:
         """
         用最小二乘法估算资产相对市场的 Beta。
@@ -331,7 +377,7 @@ class PortfolioRiskAnalyzer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _calc_var95(returns: List[float]) -> float:
+    def _calc_var95(returns: list[float]) -> float:
         """历史模拟 VaR95（绝对比例，单日）。"""
         if not returns:
             return 0.0
@@ -341,7 +387,7 @@ class PortfolioRiskAnalyzer:
         return abs(min(worst, 0.0))
 
     @staticmethod
-    def _calc_cvar95(returns: List[float]) -> float:
+    def _calc_cvar95(returns: list[float]) -> float:
         """
         条件风险值 CVaR95（Expected Shortfall）：超过 VaR 阈值的平均损失。
         """
@@ -360,7 +406,7 @@ class PortfolioRiskAnalyzer:
     @classmethod
     def quick_var(
         cls,
-        positions: Dict[str, Tuple[float, List[float]]],
+        positions: dict[str, tuple[float, list[float]]],
         total_nav: float,
     ) -> PortfolioVaRResult:
         """

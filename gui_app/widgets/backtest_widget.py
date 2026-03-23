@@ -11,7 +11,8 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional, cast
+from typing import Any, cast
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -84,11 +85,11 @@ except ImportError:
     print("[WARNING] matplotlib未安装，净值曲线将显示为占位符")
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-AdvancedBacktestEngineType: Optional[type[Any]] = None
-DualMovingAverageStrategyType: Optional[type[Any]] = None
-RSIStrategyType: Optional[type[Any]] = None
-MACDStrategyType: Optional[type[Any]] = None
-BacktraderImportStatusGetter: Optional[Callable[[], dict[str, Any]]] = None
+AdvancedBacktestEngineType: type[Any] | None = None
+DualMovingAverageStrategyType: type[Any] | None = None
+RSIStrategyType: type[Any] | None = None
+MACDStrategyType: type[Any] | None = None
+BacktraderImportStatusGetter: Callable[[], dict[str, Any]] | None = None
 
 try:
     engine_module = importlib.import_module("gui_app.backtest.engine")
@@ -131,9 +132,9 @@ except Exception:
     ) -> str:
         return f"[{prefix}] level=WARN mode=unknown available=None message=状态格式化模块不可用"
 
-DataManagerType: Optional[type[Any]] = None
-DataSourceType: Optional[type[Any]] = None
-RiskAnalyzerType: Optional[type[Any]] = None
+DataManagerType: type[Any] | None = None
+DataSourceType: type[Any] | None = None
+RiskAnalyzerType: type[Any] | None = None
 
 try:
     data_manager_module = importlib.import_module("gui_app.backtest.data_manager")
@@ -144,9 +145,9 @@ try:
 except Exception:
     print("⚠️ 回测模块导入失败，请检查模块路径")
 
-GridStrategyType: Optional[type[Any]] = None
-AdaptiveGridStrategyType: Optional[type[Any]] = None
-ATRGridStrategyType: Optional[type[Any]] = None
+GridStrategyType: type[Any] | None = None
+AdaptiveGridStrategyType: type[Any] | None = None
+ATRGridStrategyType: type[Any] | None = None
 
 try:
     grid_module = importlib.import_module("strategies.grid_strategy_511380")
@@ -156,16 +157,24 @@ try:
 except Exception:
     pass
 
-AdvancedBacktestEngine: Optional[type] = AdvancedBacktestEngineType
-DualMovingAverageStrategy: Optional[type] = DualMovingAverageStrategyType
-RSIStrategy: Optional[type] = RSIStrategyType
-MACDStrategy: Optional[type] = MACDStrategyType
-DataManager: Optional[type] = DataManagerType
-DataSource: Optional[type] = DataSourceType
-RiskAnalyzer: Optional[type] = RiskAnalyzerType
-GridStrategy: Optional[type] = GridStrategyType
-AdaptiveGridStrategy: Optional[type] = AdaptiveGridStrategyType
-ATRGridStrategy: Optional[type] = ATRGridStrategyType
+AdvancedBacktestEngine: type | None = AdvancedBacktestEngineType
+DualMovingAverageStrategy: type | None = DualMovingAverageStrategyType
+RSIStrategy: type | None = RSIStrategyType
+MACDStrategy: type | None = MACDStrategyType
+DataManager: type | None = DataManagerType
+DataSource: type | None = DataSourceType
+RiskAnalyzer: type | None = RiskAnalyzerType
+GridStrategy: type | None = GridStrategyType
+AdaptiveGridStrategy: type | None = AdaptiveGridStrategyType
+ATRGridStrategy: type | None = ATRGridStrategyType
+
+PortfolioOptimizerStrategyType: type[Any] | None = None
+try:
+    _opt_strat_module = importlib.import_module("strategies.management.optimizer_strategy")
+    PortfolioOptimizerStrategyType = getattr(_opt_strat_module, "PortfolioOptimizerStrategy", None)
+except Exception:
+    pass
+PortfolioOptimizerStrategy: type | None = PortfolioOptimizerStrategyType
 
 
 class BacktestWorker(QThread):
@@ -882,6 +891,76 @@ class BacktestWorker(QThread):
             )
         return compare_rows
 
+    def run_optimizer_backtest(
+        self,
+        data_map: dict[str, Any],
+        params: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        """用 BacktestEngine + PortfolioOptimizerStrategy 执行组合优化器回测。
+
+        Returns:
+            (portfolio_curve, cost_analysis, weight_records, results, risk_analysis)
+        """
+        from easyxt_backtest.engine import BacktestConfig, BacktestEngine
+        from strategies.management.optimizer_strategy import PortfolioOptimizerStrategy
+
+        codes = list(data_map.keys())
+        strategy_params = params.get("strategy_params") or {}
+        lookback = int(strategy_params.get("lookback", 60))
+        rebalance_every = int(strategy_params.get("rebalance_every", 20))
+        initial_capital = float(params.get("initial_cash", 1_000_000.0))
+        commission_rate = float(params.get("commission", 0.0003))
+
+        strategy = PortfolioOptimizerStrategy(
+            strategy_id="gui_opt",
+            codes=codes,
+            lookback=lookback,
+            rebalance_every=rebalance_every,
+        )
+        engine = BacktestEngine(
+            config=BacktestConfig(
+                initial_capital=initial_capital,
+                commission_rate=commission_rate,
+            ),
+            duckdb_path=":memory:",
+        )
+
+        result = engine.run(
+            strategy=strategy,
+            codes=codes,
+            start_date=str(params.get("start_date", "")),
+            end_date=str(params.get("end_date", "")),
+            period=str(params.get("period", "1d")),
+            adjust=str(params.get("adjust", "none")),
+            preloaded_data=data_map,
+        )
+
+        # 转换 equity_curve → portfolio_curve
+        eq = result.equity_curve
+        portfolio_curve: dict[str, Any] = {
+            "dates": list(eq.index) if not eq.empty else [],
+            "values": [float(v) for v in eq.values] if not eq.empty else [],
+        }
+
+        # 转换 weight_history → weight_records（与 build_multi_asset_portfolio 格式兼容）
+        weight_records: list[dict[str, Any]] = [
+            {"date": snap["datetime"], "weights": snap["weights"]}
+            for snap in result.weight_history
+        ]
+
+        cost_analysis: dict[str, Any] = {
+            "turnover": 0.0,
+            "trade_count": len(result.trades) if not result.trades.empty else 0,
+            "commission_rate": commission_rate,
+            "slippage_bps": 0.0,
+            "estimated_cost": 0.0,
+        }
+
+        metrics: dict[str, Any] = dict(result.metrics)
+        risk_analysis: dict[str, Any] = dict(result.metrics)
+
+        return portfolio_curve, cost_analysis, weight_records, metrics, risk_analysis
+
     def run(self):
         """执行回测"""
         try:
@@ -1007,7 +1086,17 @@ class BacktestWorker(QThread):
             risk_analyzer = cast(Any, RiskAnalyzer)()
             cost_analysis = {}
             weight_records = []
-            if self.backtest_params.get("multi_asset_enabled") and len(data_map) > 1:
+            _strategy_name = self.backtest_params.get("strategy_name", "")
+            if _strategy_name == "组合优化器策略" and data_map:
+                (
+                    portfolio_curve,
+                    cost_analysis,
+                    weight_records,
+                    results,
+                    risk_analysis,
+                ) = self.run_optimizer_backtest(data_map, self.backtest_params)
+                detailed_results = {"portfolio_curve": portfolio_curve, "trades": []}
+            elif self.backtest_params.get("multi_asset_enabled") and len(data_map) > 1:
                 portfolio_bundle = cast(tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]], self.build_multi_asset_portfolio(data_map, self.backtest_params))
                 portfolio_curve, cost_analysis, weight_records = portfolio_bundle
                 portfolio_values = portfolio_curve.get("values", [])
@@ -1694,7 +1783,7 @@ class SparklineWidget(QWidget):
         self.setMinimumHeight(0)
         self.setMaximumHeight(16777215)
 
-    def set_data(self, data: list[float], color: Optional[QColor] = None):
+    def set_data(self, data: list[float], color: QColor | None = None):
         self.data = data or []
         if color is not None:
             self.line_color = color
@@ -1933,7 +2022,7 @@ class BacktestWidget(QWidget):
         self._strategy_scan_thread = None
         self._pending_preview_params = None
         self.strategy_registry = self.build_strategy_registry()
-        self._last_backtest_engine_log: Optional[str] = None
+        self._last_backtest_engine_log: str | None = None
         self.strategy_param_widgets = {}
         self.strategy_scan_records = []
         self.strategy_editor_path = None
@@ -2553,6 +2642,27 @@ class BacktestWidget(QWidget):
                 }
             ],
         }
+        registry["组合优化器策略"] = {
+            "class": PortfolioOptimizerStrategy,
+            "params": [
+                {
+                    "key": "lookback",
+                    "label": "回看周期(天)",
+                    "type": "int",
+                    "min": 20,
+                    "max": 252,
+                    "value": 60,
+                },
+                {
+                    "key": "rebalance_every",
+                    "label": "再平衡间隔(天)",
+                    "type": "int",
+                    "min": 1,
+                    "max": 60,
+                    "value": 20,
+                },
+            ],
+        }
         return registry
 
     @staticmethod
@@ -2615,6 +2725,11 @@ class BacktestWidget(QWidget):
             "ATR网格策略": os.path.abspath(
                 os.path.join(
                     os.path.dirname(__file__), "..", "..", "strategies", "grid_strategy_511380.py"
+                )
+            ),
+            "组合优化器策略": os.path.abspath(
+                os.path.join(
+                    os.path.dirname(__file__), "..", "..", "strategies", "management", "optimizer_strategy.py"
                 )
             ),
         }
@@ -3986,7 +4101,7 @@ class BacktestWidget(QWidget):
             self.set_param_value_for_all("rsi_period", 14)
         self.end_date_edit.setDate(today)
 
-    def update_config_summary(self, params: dict[str, Any], factor_context: Optional[dict[str, Any]] = None):
+    def update_config_summary(self, params: dict[str, Any], factor_context: dict[str, Any] | None = None):
         lines = [
             f"股票代码: {params.get('stock_code')}",
             f"时间范围: {params.get('start_date')} ~ {params.get('end_date')}",
@@ -4808,6 +4923,12 @@ class BacktestWidget(QWidget):
             if strategy_params.get("atr_multiplier", 0) <= 0:
                 QMessageBox.warning(self, "参数错误", "ATR倍数需大于0")
                 return False
+        if strategy_name == "组合优化器策略":
+            lookback = int(strategy_params.get("lookback", 60))
+            rebalance_every = int(strategy_params.get("rebalance_every", 20))
+            if lookback <= rebalance_every:
+                QMessageBox.warning(self, "参数错误", "回看周期必须大于再平衡间隔")
+                return False
         if strategy_name == "101因子工作流策略":
             workflow_path = str(strategy_params.get("workflow_path") or "").strip()
             if not workflow_path:
@@ -5229,7 +5350,7 @@ class BacktestWidget(QWidget):
         self.trades_table.setSortingEnabled(False)
 
         # 准备样式数据
-        row_colors: list[Optional[QColor]] = []
+        row_colors: list[QColor | None] = []
         for trade in trades_data:
             # 根据操作类型确定行颜色
             if len(trade) > 1:

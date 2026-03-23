@@ -36,6 +36,16 @@ class BarData:
 
 
 @dataclass
+class TickData:
+    code: str
+    last: float
+    volume: float
+    bid1: float = 0.0
+    ask1: float = 0.0
+    time: Any = None
+
+
+@dataclass
 class OrderData:
     """订单回报（简化版）。"""
     order_id: str
@@ -118,6 +128,19 @@ class BaseStrategy(ABC):
         订单回报钩子。默认空实现，子类按需 override。
         当订单状态变更（成交/撤单/拒单）时由框架调用。
         """
+
+    def on_tick(self, context: StrategyContext, tick: TickData) -> None:
+        bar = BarData(
+            code=tick.code,
+            period="tick",
+            open=tick.last,
+            high=tick.last,
+            low=tick.last,
+            close=tick.last,
+            volume=tick.volume,
+            time=tick.time,
+        )
+        self.on_bar(context, bar)
 
     def on_risk(self, context: StrategyContext, risk_result: Any) -> None:
         """

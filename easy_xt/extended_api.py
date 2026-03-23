@@ -4,6 +4,7 @@ EasyXT扩展API模块
 包含从随机ID生成到个股权重检查的所有API
 """
 
+import logging
 import math
 import random
 import string
@@ -490,7 +491,6 @@ class ExtendedAPI:
 
                 results[code] = signal
             except Exception as _sig_err:
-                logging.getLogger(__name__).warning("信号计算异常 %s: %s", code, _sig_err)as _sig_err:
                 logging.getLogger(__name__).warning("信号计算异常 %s: %s", code, _sig_err)
                 results[code] = 'hold'
 
@@ -1077,3 +1077,247 @@ class ExtendedAPI:
                 }
 
         return suggestions
+
+    # ==================== 20. 组合优化再平衡 ====================
+
+    def optimize_and_rebalance(
+        self,
+        account_id: str,
+        returns: "pd.DataFrame",
+        optimizer_config: "Any | None" = None,
+        max_single_weight: float = 0.3,
+        max_hhi: float = 0.2,
+        dry_run: bool = False,
+    ) -> tuple["Any", "Any", dict[str, list[int]]]:
+        """优化权重 → 风控校验 → 再平衡，三步原子调用。
+
+        Args:
+            account_id:        账户 ID。
+            returns:           历史收益率 DataFrame（行=日期，列=股票代码）。
+            optimizer_config:  :class:`core.portfolio_optimizer.PortfolioOptimizeConfig`，
+                               None 时使用默认配置（risk_parity, max_weight=0.3）。
+            max_single_weight: 单仓上限，用于风控校验（默认 0.3）。
+            max_hhi:           HHI 集中度上限，用于风控校验（默认 0.2）。
+            dry_run:           为 True 时只返回优化/风控结果，不实际下单。
+
+        Returns:
+            (OptimizeResult, OptimalWeightRiskCheck, order_results)
+            当 dry_run=True 或风控不通过时，order_results 为空 dict。
+        """
+        from core.portfolio_optimizer import PortfolioOptimizer
+        from core.portfolio_risk import PortfolioRiskAnalyzer
+
+        optimizer = PortfolioOptimizer(optimizer_config)
+        opt_result = optimizer.optimize_result(returns)
+
+        analyzer = PortfolioRiskAnalyzer()
+        risk_check = analyzer.check_optimal_weights(
+            opt_result.weights,
+            max_single_weight=max_single_weight,
+            max_hhi=max_hhi,
+        )
+
+        order_results: dict[str, list[int]] = {}
+        _log = logging.getLogger(__name__)
+
+        if not opt_result.feasible:
+            _log.warning(
+                "[optimize_and_rebalance] 优化器不可行，禁止下单。"
+                " account=%s method=%s",
+                account_id,
+                getattr(optimizer_config, "method", "default"),
+            )
+        elif not risk_check.feasible:
+            _log.warning(
+                "[optimize_and_rebalance] 风控校验未通过，禁止下单。"
+                " account=%s warnings=%s",
+                account_id,
+                risk_check.warnings,
+            )
+        elif dry_run:
+            _log.info(
+                "[optimize_and_rebalance] dry_run=True，跳过下单。"
+                " account=%s",
+                account_id,
+            )
+        else:
+            order_results = self.rebalance_portfolio(account_id, opt_result.weights)
+
+        return opt_result, risk_check, order_results
+
+    def execute_twap(
+        self,
+        account_id: str,
+        code: str,
+        side: str,
+        total_volume: int,
+        slices: int = 5,
+        interval_sec: float = 1.0,
+        price: float = 0.0,
+        price_type: str = "market",
+        min_lot: int = 100,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        from .execution_algorithms import TwapPlan
+
+        result: dict[str, Any] = {
+            "account_id": account_id,
+            "code": code,
+            "side": side,
+            "total_volume": int(total_volume),
+            "slices": int(slices),
+            "planned_volumes": [],
+            "order_ids": [],
+            "submitted_volumes": [],
+            "feasible": False,
+            "message": "",
+        }
+        if not self._connected_trade:
+            result["message"] = "交易服务未连接"
+            return result
+        side_norm = str(side or "").strip().lower()
+        if side_norm not in ("buy", "sell"):
+            result["message"] = "side 仅支持 buy/sell"
+            return result
+        plan = TwapPlan(total_volume=max(int(total_volume), 0), slices=max(int(slices), 1), min_lot=max(int(min_lot), 1))
+        volumes = plan.build()
+        result["planned_volumes"] = volumes
+        if not volumes:
+            result["message"] = "切片后无有效下单数量"
+            return result
+        result["feasible"] = True
+        if dry_run:
+            result["message"] = "dry_run=True"
+            return result
+
+        _log = logging.getLogger(__name__)
+        for idx, vol in enumerate(volumes):
+            if side_norm == "buy":
+                order_id = self.trade_api.buy(
+                    account_id=account_id,
+                    code=code,
+                    volume=int(vol),
+                    price=float(price),
+                    price_type=price_type,
+                )
+            else:
+                order_id = self.trade_api.sell(
+                    account_id=account_id,
+                    code=code,
+                    volume=int(vol),
+                    price=float(price),
+                    price_type=price_type,
+                )
+            if order_id:
+                oid: Any = getattr(order_id, "order_id", order_id)
+                result["order_ids"].append(oid)
+                result["submitted_volumes"].append(int(vol))
+            else:
+                _log.warning(
+                    "[execute_twap] 子单失败 account=%s code=%s side=%s slice=%s volume=%s",
+                    account_id,
+                    code,
+                    side_norm,
+                    idx,
+                    vol,
+                )
+            if idx < len(volumes) - 1 and interval_sec > 0:
+                time.sleep(float(interval_sec))
+        result["message"] = "ok"
+        return result
+
+    def execute_vwap(
+        self,
+        account_id: str,
+        code: str,
+        side: str,
+        total_volume: int,
+        volume_profile: list[float] | None = None,
+        interval_sec: float = 1.0,
+        price: float = 0.0,
+        price_type: str = "market",
+        min_lot: int = 100,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        from .execution_algorithms import TwapPlan, VwapPlan
+
+        result: dict[str, Any] = {
+            "account_id": account_id,
+            "code": code,
+            "side": side,
+            "total_volume": int(total_volume),
+            "planned_volumes": [],
+            "order_ids": [],
+            "submitted_volumes": [],
+            "feasible": False,
+            "fallback_to_twap": False,
+            "message": "",
+        }
+        if not self._connected_trade:
+            result["message"] = "交易服务未连接"
+            return result
+        side_norm = str(side or "").strip().lower()
+        if side_norm not in ("buy", "sell"):
+            result["message"] = "side 仅支持 buy/sell"
+            return result
+        profile = volume_profile or []
+        if profile:
+            volumes = VwapPlan(
+                total_volume=max(int(total_volume), 0),
+                profile=profile,
+                min_lot=max(int(min_lot), 1),
+            ).build()
+        else:
+            volumes = []
+        if not volumes:
+            fallback_slices = max(len(profile), 5)
+            volumes = TwapPlan(
+                total_volume=max(int(total_volume), 0),
+                slices=fallback_slices,
+                min_lot=max(int(min_lot), 1),
+            ).build()
+            result["fallback_to_twap"] = True
+        result["planned_volumes"] = volumes
+        if not volumes:
+            result["message"] = "切片后无有效下单数量"
+            return result
+        result["feasible"] = True
+        if dry_run:
+            result["message"] = "dry_run=True"
+            return result
+
+        _log = logging.getLogger(__name__)
+        for idx, vol in enumerate(volumes):
+            if side_norm == "buy":
+                order_id = self.trade_api.buy(
+                    account_id=account_id,
+                    code=code,
+                    volume=int(vol),
+                    price=float(price),
+                    price_type=price_type,
+                )
+            else:
+                order_id = self.trade_api.sell(
+                    account_id=account_id,
+                    code=code,
+                    volume=int(vol),
+                    price=float(price),
+                    price_type=price_type,
+                )
+            if order_id:
+                oid: Any = getattr(order_id, "order_id", order_id)
+                result["order_ids"].append(oid)
+                result["submitted_volumes"].append(int(vol))
+            else:
+                _log.warning(
+                    "[execute_vwap] 子单失败 account=%s code=%s side=%s slice=%s volume=%s",
+                    account_id,
+                    code,
+                    side_norm,
+                    idx,
+                    vol,
+                )
+            if idx < len(volumes) - 1 and interval_sec > 0:
+                time.sleep(float(interval_sec))
+        result["message"] = "ok"
+        return result

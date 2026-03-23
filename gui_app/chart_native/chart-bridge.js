@@ -165,15 +165,23 @@ const ChartBridge = (function () {
     // ── Dispatch ──────────────────────────────────────────────────────────────
 
     function _dispatch(msg) {
-        const method = msg.method;
-        const params = msg.params || {};
+        let method = msg.method;
+        let params = msg.params || {};
+        let chartId = 'main';
+        let paneId = null;
+        if (method === 'chart.rpc' && params && Number(params.v) === 1) {
+            method = params.method || '';
+            chartId = params.chart_id || 'main';
+            paneId = params.pane_id || null;
+            params = params.payload || {};
+        }
         const msgId = msg.id;  // 有 id 表示需要响应
 
         let result = null;
         let error = null;
 
         try {
-            result = _handleMethod(method, params);
+            result = _handleMethod(method, params, chartId, paneId);
         } catch (e) {
             console.error('[ChartBridge] method error:', method, e);
             error = { code: -32603, message: String(e) };
@@ -188,7 +196,7 @@ const ChartBridge = (function () {
         }
     }
 
-    function _handleMethod(method, p) {
+    function _handleMethod(method, p, chartId, paneId) {
         switch (method) {
 
             case 'chart.setData':
@@ -308,7 +316,7 @@ const ChartBridge = (function () {
             }
 
             default:
-                console.log('[ChartBridge] unknown method:', method);
+                console.log('[ChartBridge] unknown method:', method, 'chartId=', chartId, 'paneId=', paneId);
         }
         return null;
     }
@@ -451,6 +459,12 @@ const ChartBridge = (function () {
 
     function _emit(event, params) {
         if (_ws && _ws.readyState === WebSocket.OPEN) {
+            if (!params || typeof params !== 'object') {
+                params = {};
+            }
+            if (params.chart_id === undefined) {
+                params.chart_id = 'main';
+            }
             _wsSend(JSON.stringify({ jsonrpc: '2.0', method: event, params }));
         }
     }

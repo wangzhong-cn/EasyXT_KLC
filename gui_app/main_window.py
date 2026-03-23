@@ -9,7 +9,6 @@ import importlib
 import json
 import logging
 import os
-import socket
 import signal
 import subprocess
 import sys
@@ -1794,6 +1793,12 @@ class MainWindow(QMainWindow):
         dev_mode = str(os.environ.get("EASYXT_DEV_MODE", "") or "").lower() in ("1", "true", "yes")
         auth_mode = "dev_bypass" if (not api_token and dev_mode) else ("enabled" if api_token else "blocked")
         service_running = bool(self.service_process and self.service_process.state() != QProcess.NotRunning)
+        service_external_manager = bool(getattr(self, "_service_external_manager", False))
+        pipeline_connected = status.get("connected")
+        effective_service_running = service_running or service_external_manager or (pipeline_connected is True)
+        api_port = int(str(os.environ.get("EASYXT_API_PORT", "8080") or "8080"))
+        ws_symbol = str(status.get("symbol") or "000001.SZ")
+        ws_url = f"ws://127.0.0.1:{api_port}/ws/market/{ws_symbol}"
         return {
             "auth_mode": auth_mode,
             "api_token_set": bool(api_token),
@@ -1802,14 +1807,18 @@ class MainWindow(QMainWindow):
             "qmt_online": bool(qmt.get("online_on")),
             "qmt_available": qmt.get("qmt_available"),
             "qmt_error": qmt.get("error") or "",
-            "pipeline_connected": status.get("connected"),
+            "pipeline_connected": pipeline_connected,
             "pipeline_reason": status.get("reason") or "",
             "pipeline_symbol": status.get("symbol") or "",
             "pipeline_source": status.get("source") or "",
             "pipeline_last_quote": status.get("quote_ts") or "",
             "pipeline_degraded": status.get("degraded"),
             "service_running": service_running,
-            "service_external_manager": bool(getattr(self, "_service_external_manager", False)),
+            "service_external_manager": service_external_manager,
+            "effective_service_running": effective_service_running,
+            "api_port": api_port,
+            "api_health_ok": self._is_api_health_ok(api_port),
+            "ws_url": ws_url,
         }
 
     def _build_realtime_fix_suggestion(self, info: dict[str, object]) -> tuple[str, str, str]:
@@ -1819,6 +1828,8 @@ class MainWindow(QMainWindow):
         connected = info.get("pipeline_connected")
         reason = str(info.get("pipeline_reason") or "")
         app_cmd = "& C:/Users/wangzhong/miniconda3/envs/myenv/python.exe d:/EasyXT_KLC/gui_app/main_window.py"
+        if connected is True and reason == "quote_ok":
+            return "实时链路修复建议", "链路正常（quote_ok），无需修复", "N/A"
         if auth_mode == "blocked":
             cmd = (
                 "$env:EASYXT_API_TOKEN=\"dev-local-token\"; "
@@ -1850,6 +1861,15 @@ class MainWindow(QMainWindow):
                 f"{app_cmd}"
             )
             return "实时链路修复建议", "实时API已启动但未收到首笔行情", cmd
+        if connected is False and reason.startswith("ws_conn_error"):
+            cmd = (
+                "$env:EASYXT_API_PORT=\"8080\"; "
+                "$env:EASYXT_USE_WS_QUOTE=\"1\"; "
+                "$env:EASYXT_RT_XTDATA_ONLY=\"0\"; "
+                "$env:EASYXT_DEV_MODE=\"1\"; "
+                f"{app_cmd}"
+            )
+            return "实时链路修复建议", "WS握手失败，优先修复端口/路由一致性", cmd
         cmd = (
             "$env:EASYXT_DEV_MODE=\"1\"; "
             "$env:EASYXT_USE_WS_QUOTE=\"1\"; "
@@ -1872,6 +1892,10 @@ class MainWindow(QMainWindow):
             f"ws_quote_enabled: {info.get('ws_quote_enabled')}\n"
             f"qmt_available: {info.get('qmt_available')}\n"
             f"service_running: {info.get('service_running')}\n"
+            f"effective_service_running: {info.get('effective_service_running')}\n"
+            f"api_port: {info.get('api_port')}\n"
+            f"api_health_ok: {info.get('api_health_ok')}\n"
+            f"ws_url: {info.get('ws_url')}\n"
             "\n"
             f"建议: {reason}\n"
             f"命令: {command}"
@@ -1932,23 +1956,23 @@ class MainWindow(QMainWindow):
         actions.append("触发连接探针检查")
         return actions
 
-    def _is_local_port_available(self, port: int) -> bool:
+    def _is_api_health_ok(self, port: int) -> bool:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind(("127.0.0.1", int(port)))
-            return True
+            url = f"http://127.0.0.1:{int(port)}/health"
+            with request.urlopen(url, timeout=0.6) as resp:
+                if int(getattr(resp, "status", 0)) != 200:
+                    return False
+                body = resp.read(1024).decode("utf-8", errors="ignore")
+                return ("ok" in body.lower()) or ("status" in body.lower())
         except Exception:
             return False
 
     def _select_realtime_api_port(self) -> int:
         current = int(str(os.environ.get("EASYXT_API_PORT", "8080") or "8080"))
-        if current in (8080, 8000):
-            if self._is_local_port_available(current):
-                return current
-            alt = 8000 if current == 8080 else 8080
-            if self._is_local_port_available(alt):
-                return alt
+        candidates = [current] + [p for p in (8080, 8000) if p != current]
+        for p in candidates:
+            if self._is_api_health_ok(p):
+                return p
         return current
 
     def _kick_chart_realtime_workers(self) -> None:
@@ -1971,11 +1995,15 @@ class MainWindow(QMainWindow):
     def on_realtime_pipeline_status_clicked(self, event):
         _ = event
         pre_info = self._build_realtime_selfcheck_snapshot()
-        actions = self._apply_realtime_autofix(pre_info)
+        if pre_info.get("pipeline_connected") is True and str(pre_info.get("pipeline_reason") or "") == "quote_ok":
+            actions: list[str] = ["链路已正常，跳过自动修复"]
+        else:
+            actions = self._apply_realtime_autofix(pre_info)
         detail, command = self._build_realtime_probe_detail_with_fix()
         if actions:
             detail = "已执行自动修复:\n- " + "\n- ".join(actions) + "\n\n" + detail
-        QApplication.clipboard().setText(command)
+        if command and command != "N/A":
+            QApplication.clipboard().setText(command)
         QMessageBox.information(self, "实时链路探针详情", detail)
 
     def on_service_diag_status_clicked(self, event):

@@ -277,13 +277,21 @@ const KlineBridge = (function () {
     function _dispatch(msg) {
         var method = msg.method;
         var params = msg.params || {};
+        var chartId = 'main';
+        var paneId = null;
+        if (method === 'chart.rpc' && params && Number(params.v) === 1) {
+            method = params.method || '';
+            chartId = params.chart_id || 'main';
+            paneId = params.pane_id || null;
+            params = params.payload || {};
+        }
         var msgId  = msg.id;
 
         var result = null;
         var error  = null;
 
         try {
-            result = _handleMethod(method, params);
+            result = _handleMethod(method, params, chartId, paneId);
         } catch (e) {
             console.error('[KlineBridge] method error:', method, e);
             error = { code: -32603, message: String(e) };
@@ -298,7 +306,7 @@ const KlineBridge = (function () {
         }
     }
 
-    function _handleMethod(method, p) {
+    function _handleMethod(method, p, chartId, paneId) {
         if (!_chart) {
             console.warn('[KlineBridge] chart not ready, dropped:', method);
             return null;
@@ -469,7 +477,7 @@ const KlineBridge = (function () {
             }
 
             default:
-                console.log('[KlineBridge] unknown method:', method);
+                console.log('[KlineBridge] unknown method:', method, 'chartId=', chartId, 'paneId=', paneId);
         }
         return null;
     }
@@ -835,6 +843,12 @@ const KlineBridge = (function () {
 
     function _emit(event, params) {
         if (_ws && _ws.readyState === WebSocket.OPEN) {
+            if (!params || typeof params !== 'object') {
+                params = {};
+            }
+            if (params.chart_id === undefined) {
+                params.chart_id = 'main';
+            }
             _wsSend(JSON.stringify({ jsonrpc: '2.0', method: event, params: params }));
         }
     }

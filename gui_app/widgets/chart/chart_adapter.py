@@ -26,8 +26,10 @@ import logging
 import os
 import shutil
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 
 import pandas as pd
 
@@ -91,6 +93,33 @@ class NativeLwcChartAdapter:
         self._webview = None          # QWebEngineView
         self._initialized: bool = False
         self._fallback: LwcPythonChartAdapter | None = None
+        self._rpc_seq: int = 0
+
+    def _notify_v1(
+        self,
+        method: str,
+        payload: dict,
+        *,
+        chart_id: str = "main",
+        pane_id: str | None = None,
+        source: str = "python",
+    ) -> None:
+        if not self._bridge:
+            return
+        self._rpc_seq += 1
+        envelope: dict[str, object] = {
+            "v": 1,
+            "type": "chart.rpc",
+            "chart_id": chart_id or "main",
+            "method": method,
+            "payload": payload or {},
+            "seq": self._rpc_seq,
+            "ts_ms": int(time.time() * 1000),
+            "source": source,
+        }
+        if pane_id:
+            envelope["pane_id"] = pane_id
+        self._bridge.notify("chart.rpc", envelope)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -588,20 +617,20 @@ class KLineChartAdapter(NativeLwcChartAdapter):
 </body>
 </html>"""
 
-    def notify_orderbook(self, quote: dict) -> None:
+    def notify_orderbook(self, quote: dict, *, chart_id: str = "main", pane_id: str = "orderbook") -> None:
         """推送五档行情数据至 HTML 桥（保留接口，实际侧边栏由 Qt 面板承载）。"""
         if self._initialized and self._bridge:
-            self._bridge.notify("orderbook.update", quote)
+            self._notify_v1("orderbook.update", quote, chart_id=chart_id, pane_id=pane_id)
 
-    def notify_trades_tick(self, tick: dict) -> None:
+    def notify_trades_tick(self, tick: dict, *, chart_id: str = "main", pane_id: str = "trades") -> None:
         """推送单笔成交明细至 HTML 桥（保留接口，实际侧边栏由 Qt 面板承载）。"""
         if self._initialized and self._bridge:
-            self._bridge.notify("trades.addTick", tick)
+            self._notify_v1("trades.addTick", tick, chart_id=chart_id, pane_id=pane_id)
 
-    def notify_stats(self, stats: dict) -> None:
+    def notify_stats(self, stats: dict, *, chart_id: str = "main", pane_id: str = "stats") -> None:
         """推送关键数据至 HTML 桥（保留接口，实际侧边栏由 Qt 面板承载）。"""
         if self._initialized and self._bridge:
-            self._bridge.notify("stats.update", stats)
+            self._notify_v1("stats.update", stats, chart_id=chart_id, pane_id=pane_id)
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
