@@ -64,6 +64,7 @@ from gui_app.widgets.chart import (
     create_chart_adapter,
 )
 from gui_app.widgets.chart.pipeline_guard import validate_pipeline_bar_for_period
+from gui_app.widgets.orderbook_panel import OrderbookPanel
 from gui_app.widgets.realtime_settings_dialog import RealtimeSettingsDialog
 from gui_app.widgets.watchlist import WatchlistWidget
 
@@ -175,11 +176,8 @@ class _RealtimeQuoteWorker(QThread):
         try:
             import easy_xt
 
-            # 若 broker 单例尚未初始化完成，快速返回避免阻塞 Worker（㊶修复）
-            if easy_xt.xtquant_broker is None:
-                return None
-
-            broker = easy_xt.xtquant_broker
+            # 按需懒加载 broker 单例（预热已就绪则直接复用，否则首次调用自动初始化）
+            broker = easy_xt.get_xtquant_broker()
             full_tick = broker.get_full_tick([symbol]) or {}
             tick = full_tick.get(symbol) or next(iter(full_tick.values()), None)
             if not isinstance(tick, dict):
@@ -500,7 +498,8 @@ class KLineChartWorkspace(QWidget):
         self._ws_error_emit_threshold: int = int(os.environ.get("EASYXT_WS_ERROR_ALERT_THRESHOLD", "3"))
         self._last_realtime_probe_line: Optional[str] = None
         self._orderbook_sink: Optional[RealtimeDuckDBSink] = None
-        self.orderbook_panel: Optional[WatchlistWidget] = None
+        self.orderbook_panel: Optional[Any] = None  # OrderbookPanel in KLC path; WatchlistWidget in LWC path
+        self._kline_side_watchlist: Optional[WatchlistWidget] = None
         self._tab_watchlist_widget: Optional[WatchlistWidget] = None
         self._tab_intraday_widget: Optional[Any] = None
         self._source_status_timer: Optional[QTimer] = None
@@ -1949,12 +1948,20 @@ class KLineChartWorkspace(QWidget):
             webview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             webview.setMinimumHeight(0)
             webview.setMinimumWidth(0)
-            self.orderbook_panel = WatchlistWidget(state_key="side_watchlist", enable_fullscreen=True)
-            self.orderbook_panel.symbol_selected.connect(self.load_symbol)
+            # 右侧面板：上方五档盘口 + 下方行情监控列表
+            self.orderbook_panel = OrderbookPanel()
+            self._kline_side_watchlist = WatchlistWidget(state_key="side_watchlist", enable_fullscreen=True)
+            self._kline_side_watchlist.symbol_selected.connect(self.load_symbol)
+            right_panel = QWidget()
+            right_layout = QVBoxLayout(right_panel)
+            right_layout.setContentsMargins(0, 0, 0, 0)
+            right_layout.setSpacing(2)
+            right_layout.addWidget(self.orderbook_panel, stretch=2)
+            right_layout.addWidget(self._kline_side_watchlist, stretch=3)
             splitter = QSplitter(Qt.Horizontal)
             splitter.setChildrenCollapsible(True)
             splitter.addWidget(webview)
-            splitter.addWidget(self.orderbook_panel)
+            splitter.addWidget(right_panel)
             splitter.setStretchFactor(0, 6)
             splitter.setStretchFactor(1, 2)
             splitter.setSizes([900, 260])
@@ -2921,8 +2928,8 @@ class KLineChartWorkspace(QWidget):
 
         ask_prices = raw.get("askPrice") or raw.get("ask_price") or []
         bid_prices = raw.get("bidPrice") or raw.get("bid_price") or []
-        ask_vols = raw.get("askVol") or raw.get("ask_volume") or []
-        bid_vols = raw.get("bidVol") or raw.get("bid_volume") or []
+        ask_vols = raw.get("askVol") or raw.get("ask_vol") or raw.get("ask_volume") or []
+        bid_vols = raw.get("bidVol") or raw.get("bid_vol") or raw.get("bid_volume") or []
         for i in range(5):
             level = i + 1
             if i < len(ask_prices):
@@ -2962,6 +2969,8 @@ class KLineChartWorkspace(QWidget):
             self._tab_intraday_widget.update_quote(dict(quote))
         if hasattr(self, "orderbook_panel") and self.orderbook_panel is not None:
             self.orderbook_panel.update_orderbook(quote)
+        if hasattr(self, "_kline_side_watchlist") and self._kline_side_watchlist is not None:
+            self._kline_side_watchlist.update_orderbook(quote)
             return
         if not hasattr(self, "orderbook_label") or self.orderbook_label is None:
             return
