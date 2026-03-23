@@ -33,11 +33,13 @@ from PyQt5.QtWidgets import (
     QDateEdit,
     QDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMenu,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QTabWidget,
@@ -67,6 +69,172 @@ from gui_app.widgets.chart.pipeline_guard import validate_pipeline_bar_for_perio
 from gui_app.widgets.orderbook_panel import OrderbookPanel
 from gui_app.widgets.realtime_settings_dialog import RealtimeSettingsDialog
 from gui_app.widgets.watchlist import WatchlistWidget
+
+
+class _KlcStatsPanel(QFrame):
+    """KLineChart 右侧「关键数据」面板（Qt 原生，支持左右拉伸）。"""
+
+    _FIELDS = [
+        ("open", "开盘"), ("high", "最高"),
+        ("low", "最低"), ("close", "收盘"),
+        ("chg_pct", "涨幅%"), ("volume", "成交量"),
+        ("amount", "成交额"), ("turnover", "换手率"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("QFrame { background: #111318; border-top: 1px solid #2B2F36; }")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        hdr = QLabel("关键数据")
+        hdr.setStyleSheet("background:#1a1c24;color:#888;font-size:10px;padding:2px 6px;")
+        outer.addWidget(hdr)
+
+        grid_w = QWidget()
+        grid_w.setStyleSheet("background:#111318;")
+        grid = QGridLayout(grid_w)
+        grid.setContentsMargins(2, 2, 2, 2)
+        grid.setSpacing(1)
+
+        self._labels: dict[str, QLabel] = {}
+        for i, (key, lbl_text) in enumerate(self._FIELDS):
+            row, col = divmod(i, 2)
+            cell = QWidget()
+            cell.setStyleSheet("background:#111318;")
+            cell_lay = QVBoxLayout(cell)
+            cell_lay.setContentsMargins(4, 2, 4, 2)
+            cell_lay.setSpacing(0)
+            k_lbl = QLabel(lbl_text)
+            k_lbl.setStyleSheet("color:#555;font-size:10px;")
+            v_lbl = QLabel("--")
+            v_lbl.setObjectName(f"st_{key}")
+            v_lbl.setStyleSheet("color:#d8d9db;font-size:11px;")
+            cell_lay.addWidget(k_lbl)
+            cell_lay.addWidget(v_lbl)
+            grid.addWidget(cell, row, col)
+            self._labels[key] = v_lbl
+
+        outer.addWidget(grid_w)
+        outer.addStretch()
+
+    def update_stats(self, stats: dict) -> None:
+        up = "#26a69a"
+        dn = "#ef5350"
+        base = "#d8d9db"
+
+        def _fp(v):
+            f = float(v)
+            return f"{f:.2f}" if f >= 100 else f"{f:.3f}"
+
+        def _fvol(v):
+            n = float(v)
+            return f"{n / 10000:.1f}万" if n >= 10000 else str(int(n))
+
+        def _famt(v):
+            n = float(v)
+            if n >= 1e8:
+                return f"{n / 1e8:.2f}亿"
+            if n >= 1e4:
+                return f"{n / 1e4:.0f}万"
+            return str(int(n))
+
+        fmts = {
+            "open": _fp, "high": _fp, "low": _fp, "close": _fp,
+            "chg_pct": lambda v: f"{float(v):+.2f}%",
+            "volume": _fvol, "amount": _famt,
+            "turnover": lambda v: f"{float(v):.2f}%",
+        }
+        for key, widget in self._labels.items():
+            val = stats.get(key)
+            if val is None:
+                continue
+            try:
+                text = fmts[key](val) if key in fmts else str(val)
+                widget.setText(text)
+                if key == "chg_pct":
+                    pct = float(val)
+                    color = up if pct > 0 else dn if pct < 0 else base
+                    widget.setStyleSheet(
+                        f"color:{color};font-size:11px;font-weight:bold;"
+                    )
+            except Exception:
+                pass
+
+
+class _KlcTradesPanel(QFrame):
+    """KLineChart 右侧「成交明细」面板（Qt 原生，支持左右拉伸）。"""
+
+    _MAX_ROWS = 60
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("QFrame { background: #111318; border-top: 1px solid #2B2F36; }")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        hdr = QLabel("成交明细")
+        hdr.setStyleSheet("background:#1a1c24;color:#888;font-size:10px;padding:2px 6px;")
+        outer.addWidget(hdr)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea{border:none;background:#111318;}")
+        self._container = QWidget()
+        self._container.setStyleSheet("background:#111318;")
+        self._vbox = QVBoxLayout(self._container)
+        self._vbox.setContentsMargins(0, 0, 0, 0)
+        self._vbox.setSpacing(0)
+        self._vbox.addStretch()
+        scroll.setWidget(self._container)
+        outer.addWidget(scroll, 1)
+
+        self._rows: list[QWidget] = []
+
+    def add_tick(self, tick: dict) -> None:
+        price = tick.get("price")
+        ts = str(tick.get("time") or tick.get("tick_time") or "")
+        ts = ts[-8:] if len(ts) > 8 else ts
+        ask1 = tick.get("ask1")
+        bid1 = tick.get("bid1")
+        direction = tick.get("direction") or ""
+        if not direction and ask1 is not None and bid1 is not None and price is not None:
+            try:
+                p = float(price)
+                direction = "B" if p >= float(ask1) else ("S" if p <= float(bid1) else "")
+            except Exception:
+                pass
+        price_str = f"{float(price):.3f}" if price is not None else "--"
+        color = "#26a69a" if direction == "B" else "#ef5350" if direction == "S" else "#d8d9db"
+
+        row_w = QWidget()
+        row_w.setFixedHeight(16)
+        row_lay = QHBoxLayout(row_w)
+        row_lay.setContentsMargins(4, 0, 4, 0)
+        row_lay.setSpacing(0)
+
+        t_lbl = QLabel(ts)
+        t_lbl.setStyleSheet("color:#555;font-size:10px;")
+        t_lbl.setFixedWidth(52)
+
+        p_lbl = QLabel(price_str)
+        p_lbl.setStyleSheet(f"color:{color};font-size:10px;")
+        p_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        row_lay.addWidget(t_lbl)
+        row_lay.addWidget(p_lbl, 1)
+
+        # Insert newest tick at top (before the stretch at index len(self._rows))
+        self._vbox.insertWidget(0, row_w)
+        self._rows.append(row_w)
+
+        while len(self._rows) > self._MAX_ROWS:
+            old = self._rows.pop(0)
+            self._vbox.removeWidget(old)
+            old.deleteLater()
 
 
 class _RealtimeQuoteWorker(QThread):
@@ -362,7 +530,12 @@ class _WsMarketQuoteWorker(QThread):
             except Exception as exc:
                 if not self._should_stop.is_set():
                     failure_count += 1
-                    self.error_occurred.emit(self.symbol, f"ws_conn_error:{type(exc).__name__}")
+                    exc_tag = type(exc).__name__
+                    # websockets.InvalidStatus 携带 HTTP 状态码，追加到 reason 便于诊断
+                    http_code = getattr(getattr(exc, "response", None), "status_code", None)
+                    if http_code is not None:
+                        exc_tag = f"{exc_tag}:{http_code}"
+                    self.error_occurred.emit(self.symbol, f"ws_conn_error:{exc_tag}")
             finally:
                 self._connected.clear()  # 断连时立即清除，让轮询接管
             if not self._should_stop.is_set():
@@ -497,6 +670,8 @@ class KLineChartWorkspace(QWidget):
         self._ws_error_consecutive: int = 0
         self._ws_error_emit_threshold: int = int(os.environ.get("EASYXT_WS_ERROR_ALERT_THRESHOLD", "3"))
         self._last_realtime_probe_line: Optional[str] = None
+        self._xtdata_probe_enabled: bool = os.environ.get("EASYXT_ENABLE_XTDATA_QUOTE_PROBE", "0") in ("1", "true", "True")
+        self._last_enrich_orderbook_ts: float = 0.0  # Fix-B: WS 五档补齐防抖时间戳
         self._orderbook_sink: Optional[RealtimeDuckDBSink] = None
         self.orderbook_panel: Optional[Any] = None  # OrderbookPanel in KLC path; WatchlistWidget in LWC path
         self._kline_side_watchlist: Optional[WatchlistWidget] = None
@@ -954,6 +1129,8 @@ class KLineChartWorkspace(QWidget):
             self._tab_watchlist_widget.set_current_symbol(symbol)
         if self._tab_intraday_widget is not None:
             self._tab_intraday_widget.set_symbol(symbol)
+        # 标的切换时立即从 DB 加载历史盘口快照（收盘/无行情时五档先有数据，早于 chart pipeline）
+        self._load_orderbook_snapshot_from_db(reason="symbol_change")
         # 打开标的时立即触发后台自动同步（增量补充历史数据）
         self._start_auto_data_sync(symbol)
         if self.toolbox_panel:
@@ -1948,23 +2125,32 @@ class KLineChartWorkspace(QWidget):
             webview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             webview.setMinimumHeight(0)
             webview.setMinimumWidth(0)
-            # 右侧面板：上方五档盘口 + 下方行情监控列表
+            # 右侧面板：五档/成交明细/关键数据已整合进 HTML 侧边栏；Qt 侧仅保留多股票监控列表
             self.orderbook_panel = OrderbookPanel()
+            self._klc_stats_panel = _KlcStatsPanel()
+            self._klc_trades_panel = _KlcTradesPanel()
             self._kline_side_watchlist = WatchlistWidget(state_key="side_watchlist", enable_fullscreen=True)
             self._kline_side_watchlist.symbol_selected.connect(self.load_symbol)
+            self._kline_side_watchlist.setMinimumWidth(0)
+            # 右侧面板：五档盘口 → 关键数据 → 成交明细（从上到下）
             right_panel = QWidget()
+            right_panel.setMinimumWidth(0)
             right_layout = QVBoxLayout(right_panel)
             right_layout.setContentsMargins(0, 0, 0, 0)
-            right_layout.setSpacing(2)
-            right_layout.addWidget(self.orderbook_panel, stretch=2)
-            right_layout.addWidget(self._kline_side_watchlist, stretch=3)
+            right_layout.setSpacing(0)
+            right_layout.addWidget(self.orderbook_panel, stretch=3)
+            right_layout.addWidget(self._klc_stats_panel, stretch=2)
+            right_layout.addWidget(self._klc_trades_panel, stretch=3)
+            # 三栏水平分割器：左侧监控 | 中央图表 | 右侧盘口
             splitter = QSplitter(Qt.Horizontal)
             splitter.setChildrenCollapsible(True)
-            splitter.addWidget(webview)
-            splitter.addWidget(right_panel)
-            splitter.setStretchFactor(0, 6)
-            splitter.setStretchFactor(1, 2)
-            splitter.setSizes([900, 260])
+            splitter.addWidget(self._kline_side_watchlist)  # index 0: 左侧（可向左关闭）
+            splitter.addWidget(webview)                      # index 1: 中央图表
+            splitter.addWidget(right_panel)                  # index 2: 右侧（可向右关闭）
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 6)
+            splitter.setStretchFactor(2, 2)
+            splitter.setSizes([160, 900, 230])
             container = QWidget()
             container_layout = QVBoxLayout(container)
             container_layout.setContentsMargins(0, 0, 0, 0)
@@ -2598,7 +2784,7 @@ class KLineChartWorkspace(QWidget):
         self._emit_realtime_probe(connected=False, reason=message or "realtime_api_error")
         loaded = self._load_orderbook_snapshot_from_db(reason="realtime_api_error")
         if not loaded:
-            self._set_orderbook_status(f"实时行情不可用: {message}")
+            self._set_orderbook_status(f"实时行情不可用: {message}", source="none")
 
     def _poll_realtime_quote(self):
         if (self.chart is None and self.chart_adapter is None) or self.interface is None:
@@ -2647,6 +2833,26 @@ class KLineChartWorkspace(QWidget):
             self.realtime_pipeline.configure(symbol=symbol, period=period, last_data=self.last_data)
             self._last_configure_key = cfg_key
         self.realtime_pipeline.enqueue_quote(quote)
+        # Fix-B: WS tick 缺少五档时，异步补齐（防抖 5s，避免频繁调用 xtdata.get_full_tick）
+        if (
+            self._xtdata_probe_enabled
+            and quote.get("ask1") in (None, 0, "", "--")
+            and (time.monotonic() - self._last_enrich_orderbook_ts) > 5.0
+        ):
+            self._last_enrich_orderbook_ts = time.monotonic()
+            _sym = symbol
+            _q = dict(quote)
+            thread_manager.run(self._bg_enrich_orderbook, args=(_q, _sym), name="bg_enrich_orderbook")
+        # Qt 右侧面板：成交明细推送（每 tick 一次）
+        _trades_panel = getattr(self, "_klc_trades_panel", None)
+        if _trades_panel is not None:
+            _trades_panel.add_tick({
+                "price":     quote.get("price"),
+                "time":      quote_ts,
+                "ask1":      quote.get("ask1"),
+                "bid1":      quote.get("bid1"),
+                "direction": quote.get("direction") or "",
+            })
         if self.last_data is None or self.last_data.empty:
             # Fix 58: force-flush 也推到后台线程，与 _bg_flush_pipeline 保持一致
             if not self._flush_in_progress:
@@ -2689,6 +2895,8 @@ class KLineChartWorkspace(QWidget):
             elif self.chart is not None:
                 self.chart.set(self.last_data)
             self._request_subchart_update(self.last_data, full_set=True)
+            # 历史数据加载完成：从 DB 拉取盘口快照，确保收盘/离线时五档仍有数据
+            self._load_orderbook_snapshot_from_db(reason="init")
         elif action == "update" and isinstance(bar, dict):
             current_period = self.period_combo.currentText() if self.period_combo is not None else "1d"
             ok_bar, guard_reason = validate_pipeline_bar_for_period(bar, current_period)
@@ -2733,6 +2941,44 @@ class KLineChartWorkspace(QWidget):
             self._emit_realtime_probe(
                 connected=True, reason=reason, quote_ts=quote_ts, degraded=self._degraded_mode
             )
+        # Qt 右侧面板：关键数据推送（每次 pipeline flush 后更新）
+        _stats_panel = getattr(self, "_klc_stats_panel", None)
+        if _stats_panel is not None and self.last_data is not None and not self.last_data.empty:
+            try:
+                lb = self.last_data.iloc[-1]
+                _close_raw = lb.get("close")
+                close = float(_close_raw) if _close_raw not in (None, "") and _close_raw == _close_raw else 0
+                _prev_raw = self.last_data.iloc[-2].get("close") if len(self.last_data) >= 2 else None
+                prev_close = (
+                    float(_prev_raw) if _prev_raw not in (None, "") and _prev_raw == _prev_raw else close
+                )
+                chg_pct = (close - prev_close) / prev_close * 100 if prev_close else 0.0
+
+                def _safe(v):
+                    """把 NaN/None 转为 None，让 update_stats 跳过该字段。"""
+                    if v is None or v == "":
+                        return None
+                    try:
+                        f = float(v)
+                        return None if f != f else f  # f != f 当且仅当 f 是 NaN
+                    except Exception:
+                        return None
+
+                _stats_panel.update_stats({
+                    "open":    _safe(lb.get("open")),
+                    "high":    _safe(lb.get("high")),
+                    "low":     _safe(lb.get("low")),
+                    "close":   close if close else None,
+                    "chg_pct": round(chg_pct, 4),
+                    "volume":  _safe(lb.get("volume")),
+                    "amount":  _safe(lb.get("amount")),
+                })
+            except Exception:
+                pass
+        has_five_levels = quote.get("ask1") not in (None, 0, "", "--") and quote.get("bid1") not in (None, 0, "", "--")
+        if has_five_levels:
+            quote_ts_now = pd.Timestamp.now().strftime("%H:%M:%S")
+            self._set_orderbook_status(f"实时 {quote_ts_now}", source="live")
         self._update_orderbook(quote)
 
     def _on_quote_error(self, symbol: str, reason: str):
@@ -2741,6 +2987,16 @@ class KLineChartWorkspace(QWidget):
             self._ws_error_consecutive += 1
             if self._ws_error_consecutive < max(1, self._ws_error_emit_threshold):
                 return
+            # 达到阈值后：输出结构化诊断，方便区分「端口错误/路由不存在/服务未就绪」
+            port = int(os.environ.get("EASYXT_API_PORT", "8000"))
+            ws_url = f"ws://127.0.0.1:{port}/ws/market/{symbol}"
+            self._logger.warning(
+                f"WS行情握手持续失败 [{reason_text}] "
+                f"port={port} url={ws_url} "
+                f"consecutive={self._ws_error_consecutive} — "
+                "InvalidStatus=路由不存在或服务返回非101; "
+                "ConnectionRefused=服务未启动; 检查 EASYXT_API_PORT 与服务端路由注册"
+            )
         self._emit_realtime_probe(connected=False, reason=reason_text)
         self._load_orderbook_snapshot_from_db(reason=reason_text)
 
@@ -2987,9 +3243,9 @@ class KLineChartWorkspace(QWidget):
         display_text = "五档: " + " ".join(asks + bids)
         self.orderbook_label.setText(display_text)
 
-    def _set_orderbook_status(self, text: str):
+    def _set_orderbook_status(self, text: str, source: str = ""):
         if hasattr(self, "orderbook_panel") and self.orderbook_panel is not None:
-            self.orderbook_panel.set_status(text)
+            self.orderbook_panel.set_status(text, source)
         if hasattr(self, "orderbook_label") and self.orderbook_label is not None:
             self.orderbook_label.setText(text)
 
@@ -3086,7 +3342,39 @@ class KLineChartWorkspace(QWidget):
     def _apply_orderbook_snapshot(self, snapshot: dict, suffix: str):
         """主线程: 应用盘口快照到 UI"""
         self._update_orderbook(snapshot)
-        self._set_orderbook_status(f"五档盘口[回放]{suffix}")
+        self._set_orderbook_status(f"五档盘口[历史快照]{suffix}", source="db")
+
+    def _bg_enrich_orderbook(self, quote: dict, symbol: str):
+        """Fix-B 后台线程: WS tick 缺少五档时直接调 xtdata.get_full_tick 补齐，安全回调主线程"""
+        try:
+            from xtquant import xtdata
+            full_tick = xtdata.get_full_tick([symbol]) or {}
+            tick = full_tick.get(symbol) or next(iter(full_tick.values()), None)
+            if not isinstance(tick, dict):
+                return
+            enriched = dict(quote)
+            ask_prices = tick.get("askPrice") or tick.get("ask_price") or []
+            bid_prices = tick.get("bidPrice") or tick.get("bid_price") or []
+            ask_vols = tick.get("askVol") or tick.get("ask_volume") or []
+            bid_vols = tick.get("bidVol") or tick.get("bid_volume") or []
+            for i in range(5):
+                lvl = i + 1
+                if i < len(ask_prices):
+                    enriched[f"ask{lvl}"] = ask_prices[i]
+                if i < len(ask_vols):
+                    enriched[f"ask{lvl}_vol"] = ask_vols[i]
+                if i < len(bid_prices):
+                    enriched[f"bid{lvl}"] = bid_prices[i]
+                if i < len(bid_vols):
+                    enriched[f"bid{lvl}_vol"] = bid_vols[i]
+            if enriched.get("ask1") not in (None, 0, "", "--"):
+                ts = pd.Timestamp.now().strftime("%H:%M:%S")
+                QTimer.singleShot(0, lambda q=enriched, t=ts: (
+                    self._update_orderbook(q),
+                    self._set_orderbook_status(f"实时 {t}", source="live"),
+                ))
+        except Exception:
+            pass
 
     def _format_orderbook_level(self, side: str, level: int, price: Any, volume: Any) -> str:
         price_text = "--" if price in (None, "", 0) else f"{float(price):.2f}"
@@ -3853,7 +4141,7 @@ class KLineChartWorkspace(QWidget):
         """主线程：应用后台查询到的盘口快照"""
         self._update_orderbook(snapshot)
         suffix = f" ({reason})" if reason else ""
-        self._set_orderbook_status(f"五档盘口[回放]{suffix}")
+        self._set_orderbook_status(f"五档盘口[历史快照]{suffix}", source="db")
 
     def _request_full_range_data(
         self, symbol: str, period: str, adjust: str, initial_loaded: bool = False

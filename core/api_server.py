@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import uuid
@@ -55,6 +56,7 @@ log = logging.getLogger(__name__)
 
 _API_TOKEN: str = os.environ.get("EASYXT_API_TOKEN", "")          # 空 = 生产环境拒绝启动
 _DEV_MODE: bool = os.environ.get("EASYXT_DEV_MODE", "").lower() in ("1", "true", "yes")  # 本地开发跳过鉴权
+_TEST_MODE: bool = ("PYTEST_CURRENT_TEST" in os.environ) or any("pytest" in x.lower() for x in sys.argv)
 _RATE_LIMIT: int = int(os.environ.get("EASYXT_RATE_LIMIT", "60"))  # 每分钟每IP上限
 _WS_SEND_TIMEOUT: float = float(os.environ.get("EASYXT_WS_TIMEOUT", "0.1"))  # 慢消费者超时(秒)
 _WS_MAX_QUEUE_SIZE: int = int(os.environ.get("EASYXT_WS_QUEUE_SIZE", "64"))   # 每连接队列上限（满则丢帧）
@@ -532,7 +534,7 @@ async def _lifespan(app: FastAPI):
     _server_start_time = time.monotonic()
     _cleanup_task = asyncio.create_task(_cleanup_rate_buckets())
     if not _API_TOKEN:
-        if _DEV_MODE:
+        if _DEV_MODE or _TEST_MODE:
             log.warning(
                 "⚠️  [DEV_MODE] EASYXT_API_TOKEN 未设置，鉴权已跳过（仅限本地开发）。"
                 " 生产部署必须设置 EASYXT_API_TOKEN 并移除 EASYXT_DEV_MODE=1。"

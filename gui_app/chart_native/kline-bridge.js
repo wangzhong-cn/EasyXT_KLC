@@ -70,6 +70,10 @@ const KlineBridge = (function () {
     // 买卖信号标记 overlay ids（setMarkers 批量清理用）
     let _markerIds = [];
 
+    // 侧边栏：成交明细行缓存（用于超出上限时清理旧行）
+    let _tradesRows = [];
+    const _MAX_TRADES = 60;
+
     // 画线类型 → KLineChart overlay 名称
     const OVERLAY_TYPE_MAP = {
         // ── 水平线族 ──
@@ -437,6 +441,20 @@ const KlineBridge = (function () {
 
             // ── 截图 ──────────────────────────────────────────────────────────
 
+            // ── 侧边栏：五档行情 / 成交明细 / 关键数据 ─────────────────────────────
+
+            case 'orderbook.update':
+                _updateOrderbook(p);
+                break;
+
+            case 'trades.addTick':
+                _addTradesTick(p);
+                break;
+
+            case 'stats.update':
+                _updateStats(p);
+                break;
+
             case 'chart.takeScreenshot': {
                 try {
                     if (_chart.getConvertPictureUrl) {
@@ -653,6 +671,101 @@ const KlineBridge = (function () {
         }
     }
 
+    // ── Sidebar: 五档行情 ─────────────────────────────────────────────────────
+
+    function _updateOrderbook(p) {
+        var priceEl = document.getElementById('ob-price');
+        if (priceEl && p.price != null) {
+            priceEl.textContent = _fmtPrice(p.price);
+            var pct = parseFloat(p.chg_pct);
+            priceEl.className = isNaN(pct) ? '' : pct > 0 ? 'up' : pct < 0 ? 'dn' : '';
+        }
+        var maxVol = 1;
+        for (var i = 1; i <= 5; i++) {
+            maxVol = Math.max(maxVol, p['ask' + i + '_vol'] || 0, p['bid' + i + '_vol'] || 0);
+        }
+        for (var lv = 1; lv <= 5; lv++) {
+            _setObRow('a', lv, p['ask' + lv], p['ask' + lv + '_vol'], maxVol);
+            _setObRow('b', lv, p['bid' + lv], p['bid' + lv + '_vol'], maxVol);
+        }
+        var spEl = document.getElementById('ob-spread');
+        if (spEl && p.ask1 != null && p.bid1 != null) {
+            var sp = parseFloat(p.ask1) - parseFloat(p.bid1);
+            spEl.textContent = '价差 ' + (isNaN(sp) ? '--' : _fmtPrice(sp));
+        }
+    }
+
+    function _setObRow(side, lv, price, vol, maxVol) {
+        var pfx = 'ob-' + side + lv;
+        var pEl = document.getElementById(pfx + '-p');
+        var vEl = document.getElementById(pfx + '-v');
+        var bEl = document.getElementById(pfx + '-b');
+        if (pEl) pEl.textContent = price != null ? _fmtPrice(price) : '--';
+        if (vEl) vEl.textContent = vol   != null ? _fmtVol(vol)     : '--';
+        if (bEl) bEl.style.width = (maxVol > 0 && vol != null) ? (Number(vol) / maxVol * 100).toFixed(1) + '%' : '0%';
+    }
+
+    // ── Sidebar: 成交明细 ─────────────────────────────────────────────────────
+
+    function _addTradesTick(p) {
+        var list = document.getElementById('tr-list');
+        if (!list) return;
+        var price = p.price != null ? _fmtPrice(p.price) : '--';
+        var vol   = '--';
+        var ts    = String(p.tick_time || p.time || '');
+        if (ts.length > 8) ts = ts.slice(-8);
+        // 根据价格与买一/卖一关系推断方向
+        var dir = p.direction || '';
+        if (!dir && p.ask1 != null && p.bid1 != null && p.price != null) {
+            dir = parseFloat(p.price) >= parseFloat(p.ask1) ? 'B'
+                : parseFloat(p.price) <= parseFloat(p.bid1) ? 'S' : '';
+        }
+        var cls = dir === 'B' ? 'up' : dir === 'S' ? 'dn' : '';
+        var row = document.createElement('div');
+        row.className = 'tr';
+        row.innerHTML = '<span class="tt">' + ts + '</span>'
+            + '<span class="tp ' + cls + '">' + price + '</span>'
+            + '<span class="tv">' + vol + '</span>';
+        if (list.firstChild) list.insertBefore(row, list.firstChild);
+        else list.appendChild(row);
+        _tradesRows.push(row);
+        while (_tradesRows.length > _MAX_TRADES) {
+            var old = _tradesRows.shift();
+            if (old.parentNode) old.parentNode.removeChild(old);
+        }
+    }
+
+    // ── Sidebar: 关键数据 ─────────────────────────────────────────────────────
+
+    function _updateStats(p) {
+        var fmtMap = {
+            open: _fmtPrice, high: _fmtPrice, low: _fmtPrice, close: _fmtPrice,
+        };
+        ['open', 'high', 'low', 'close'].forEach(function (k) {
+            var el = document.getElementById('st-' + k);
+            if (el && p[k] != null) {
+                el.textContent = _fmtPrice(p[k]);
+                el.className = 'st-v';
+            }
+        });
+        var chgEl = document.getElementById('st-chg_pct');
+        if (chgEl && p.chg_pct != null) {
+            var pct = parseFloat(p.chg_pct);
+            chgEl.textContent = (pct > 0 ? '+' : '') + pct.toFixed(2) + '%';
+            chgEl.className = 'st-v ' + (pct > 0 ? 'up' : pct < 0 ? 'dn' : '');
+        }
+        var volEl = document.getElementById('st-volume');
+        if (volEl && p.volume != null) { volEl.textContent = _fmtVol(p.volume); volEl.className = 'st-v'; }
+        var amtEl = document.getElementById('st-amount');
+        if (amtEl && p.amount != null) {
+            var a = Number(p.amount);
+            amtEl.textContent = a >= 1e8 ? (a / 1e8).toFixed(2) + '亿' : a >= 1e4 ? (a / 1e4).toFixed(0) + '万' : String(Math.round(a));
+            amtEl.className = 'st-v';
+        }
+        var trEl = document.getElementById('st-turnover');
+        if (trEl && p.turnover != null) { trEl.textContent = parseFloat(p.turnover).toFixed(2) + '%'; trEl.className = 'st-v'; }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /**
@@ -693,6 +806,20 @@ const KlineBridge = (function () {
     /** 毫秒 → Unix 秒 */
     function _msToSec(ms) {
         return (ms === null || ms === undefined) ? null : Math.floor(Number(ms) / 1000);
+    }
+
+    /** 量能格式化：≥1万 → 'X.X万'，否则整数 */
+    function _fmtVol(v) {
+        var n = Number(v);
+        if (isNaN(n) || n === 0) return '--';
+        return n >= 10000 ? (n / 10000).toFixed(1) + '万' : String(Math.round(n));
+    }
+
+    /** 价格格式化：≥100 保留2位，否则3位 */
+    function _fmtPrice(v) {
+        var f = parseFloat(v);
+        if (isNaN(f)) return '--';
+        return f >= 100 ? f.toFixed(2) : f.toFixed(3);
     }
 
     /** lineStyle 数字（LWC 约定）→ KLineChart 线型字符串 */

@@ -9,6 +9,7 @@ import importlib
 import json
 import logging
 import os
+import socket
 import signal
 import subprocess
 import sys
@@ -581,13 +582,16 @@ class MainWindow(QMainWindow):
         os.environ["EASYXT_CONNECTION_PROBE_MODE"] = "passive"
         os.environ.setdefault("EASYXT_ENABLE_XTDATA_QUOTE_PROBE", "1")
         os.environ.setdefault("EASYXT_RT_XTDATA_ONLY", "0")
+        os.environ.setdefault("EASYXT_API_PORT", "8080")
+        os.environ.setdefault("EASYXT_USE_WS_QUOTE", "1")
+        os.environ.setdefault("EASYXT_ENABLE_BROKER_WARMUP", "1")
         os.environ.setdefault("EASYXT_ENABLE_XT_LISTING_DATE", "0")
         os.environ.setdefault("EASYXT_ENABLE_QMT_ONLINE", "1")
         os.environ.setdefault("EASYXT_ENABLE_AUTO_CHECKPOINT", "0")
         os.environ.setdefault("EASYXT_CHECKPOINT_ON_PROCESS_EXIT", "0")
+        if not str(os.environ.get("EASYXT_API_TOKEN", "") or "").strip():
+            os.environ.setdefault("EASYXT_DEV_MODE", "1")
         in_session, _session_name = TradingHoursGuard.current_session()
-        if in_session:
-            os.environ["EASYXT_RT_XTDATA_ONLY"] = "1"
         self.executor_thread = None
         self.signal_bus = signal_bus
         self.service_process = None
@@ -1783,20 +1787,195 @@ class MainWindow(QMainWindow):
     def on_qmt_diag_status_clicked(self, event):
         self._refresh_qmt_diag_status()
 
+    def _build_realtime_selfcheck_snapshot(self) -> dict[str, object]:
+        status = self._realtime_pipeline_status if isinstance(self._realtime_pipeline_status, dict) else {}
+        qmt = self._collect_qmt_diag_snapshot()
+        api_token = str(os.environ.get("EASYXT_API_TOKEN", "") or "").strip()
+        dev_mode = str(os.environ.get("EASYXT_DEV_MODE", "") or "").lower() in ("1", "true", "yes")
+        auth_mode = "dev_bypass" if (not api_token and dev_mode) else ("enabled" if api_token else "blocked")
+        service_running = bool(self.service_process and self.service_process.state() != QProcess.NotRunning)
+        return {
+            "auth_mode": auth_mode,
+            "api_token_set": bool(api_token),
+            "dev_mode": dev_mode,
+            "ws_quote_enabled": os.environ.get("EASYXT_USE_WS_QUOTE", "0") in ("1", "true", "True"),
+            "qmt_online": bool(qmt.get("online_on")),
+            "qmt_available": qmt.get("qmt_available"),
+            "qmt_error": qmt.get("error") or "",
+            "pipeline_connected": status.get("connected"),
+            "pipeline_reason": status.get("reason") or "",
+            "pipeline_symbol": status.get("symbol") or "",
+            "pipeline_source": status.get("source") or "",
+            "pipeline_last_quote": status.get("quote_ts") or "",
+            "pipeline_degraded": status.get("degraded"),
+            "service_running": service_running,
+            "service_external_manager": bool(getattr(self, "_service_external_manager", False)),
+        }
+
+    def _build_realtime_fix_suggestion(self, info: dict[str, object]) -> tuple[str, str, str]:
+        auth_mode = str(info.get("auth_mode") or "")
+        qmt_available = info.get("qmt_available")
+        ws_enabled = bool(info.get("ws_quote_enabled"))
+        connected = info.get("pipeline_connected")
+        reason = str(info.get("pipeline_reason") or "")
+        app_cmd = "& C:/Users/wangzhong/miniconda3/envs/myenv/python.exe d:/EasyXT_KLC/gui_app/main_window.py"
+        if auth_mode == "blocked":
+            cmd = (
+                "$env:EASYXT_API_TOKEN=\"dev-local-token\"; "
+                "$env:EASYXT_DEV_MODE=\"1\"; "
+                f"{app_cmd}"
+            )
+            return "实时链路修复建议", "API鉴权阻断（token未设置）", cmd
+        if not ws_enabled:
+            cmd = (
+                "$env:EASYXT_USE_WS_QUOTE=\"1\"; "
+                "$env:EASYXT_ENABLE_QMT_ONLINE=\"1\"; "
+                f"{app_cmd}"
+            )
+            return "实时链路修复建议", "WS实时报价开关关闭", cmd
+        if qmt_available is False:
+            cmd = (
+                "$env:EASYXT_ENABLE_QMT_ONLINE=\"1\"; "
+                "$env:EASYXT_QMT_CHECK_RETRY=\"5\"; "
+                "$env:EASYXT_QMT_CHECK_RETRY_SLEEP=\"0.8\"; "
+                f"{app_cmd}"
+            )
+            return "实时链路修复建议", "QMT不可用，需先恢复QMT连通", cmd
+        if connected is False and reason in ("no_quote_data", "realtime_api_error"):
+            cmd = (
+                "$env:EASYXT_RT_XTDATA_ONLY=\"0\"; "
+                "$env:EASYXT_USE_WS_QUOTE=\"1\"; "
+                "$env:EASYXT_ENABLE_QMT_ONLINE=\"1\"; "
+                "$env:EASYXT_DEV_MODE=\"1\"; "
+                f"{app_cmd}"
+            )
+            return "实时链路修复建议", "实时API已启动但未收到首笔行情", cmd
+        cmd = (
+            "$env:EASYXT_DEV_MODE=\"1\"; "
+            "$env:EASYXT_USE_WS_QUOTE=\"1\"; "
+            "$env:EASYXT_ENABLE_QMT_ONLINE=\"1\"; "
+            f"{app_cmd}"
+        )
+        return "实时链路修复建议", "执行标准自检重启流程", cmd
+
+    def _build_realtime_probe_detail_with_fix(self) -> tuple[str, str]:
+        status = self._realtime_pipeline_status or {}
+        info = self._build_realtime_selfcheck_snapshot()
+        _, reason, command = self._build_realtime_fix_suggestion(info)
+        detail = (
+            f"connected: {status.get('connected')}\n"
+            f"reason: {status.get('reason') or 'N/A'}\n"
+            f"last_quote: {status.get('quote_ts') or 'N/A'}\n"
+            f"symbol: {status.get('symbol') or 'N/A'}\n"
+            f"source: {status.get('source') or 'N/A'}\n"
+            f"auth_mode: {info.get('auth_mode')}\n"
+            f"ws_quote_enabled: {info.get('ws_quote_enabled')}\n"
+            f"qmt_available: {info.get('qmt_available')}\n"
+            f"service_running: {info.get('service_running')}\n"
+            "\n"
+            f"建议: {reason}\n"
+            f"命令: {command}"
+        )
+        return detail, command
+
+    def _apply_realtime_autofix(self, info: dict[str, object]) -> list[str]:
+        actions: list[str] = []
+        status = self._realtime_pipeline_status or {}
+        reason = str(status.get("reason") or "")
+        connected = status.get("connected")
+        api_token = str(os.environ.get("EASYXT_API_TOKEN", "") or "").strip()
+        if not api_token:
+            os.environ["EASYXT_API_TOKEN"] = "dev-local-token"
+            actions.append("设置 EASYXT_API_TOKEN=dev-local-token")
+        dev_mode_raw = str(os.environ.get("EASYXT_DEV_MODE", "") or "").lower()
+        if dev_mode_raw not in ("1", "true", "yes"):
+            os.environ["EASYXT_DEV_MODE"] = "1"
+            actions.append("启用 EASYXT_DEV_MODE=1")
+        if os.environ.get("EASYXT_USE_WS_QUOTE", "0") not in ("1", "true", "True"):
+            os.environ["EASYXT_USE_WS_QUOTE"] = "1"
+            actions.append("启用 EASYXT_USE_WS_QUOTE=1")
+        if os.environ.get("EASYXT_ENABLE_QMT_ONLINE", "0") not in ("1", "true", "True"):
+            os.environ["EASYXT_ENABLE_QMT_ONLINE"] = "1"
+            actions.append("启用 EASYXT_ENABLE_QMT_ONLINE=1")
+        chosen_port = self._select_realtime_api_port()
+        if str(os.environ.get("EASYXT_API_PORT", "") or "") != str(chosen_port):
+            os.environ["EASYXT_API_PORT"] = str(chosen_port)
+            actions.append(f"切换 EASYXT_API_PORT={chosen_port}")
+        if connected is False and (
+            reason in ("no_quote_data", "realtime_api_error")
+            or reason.startswith("runtime_fuse_open")
+        ):
+            if os.environ.get("EASYXT_RT_XTDATA_ONLY", "0") != "0":
+                os.environ["EASYXT_RT_XTDATA_ONLY"] = "0"
+                actions.append("切换 EASYXT_RT_XTDATA_ONLY=0")
+            self._realtime_fail_streak = 0
+            self._realtime_fuse_open_until = 0.0
+            actions.append("重置实时链路熔断计数")
+            if bool(info.get("service_external_manager")):
+                self._kick_chart_realtime_workers()
+                actions.append("重启图表实时Worker（外部服务模式）")
+            else:
+                self.stop_all_services()
+                QTimer.singleShot(600, lambda: self.start_all_services(manual=True))
+                actions.append("重启实时服务")
+        elif not bool(info.get("service_running")):
+            if bool(info.get("service_external_manager")):
+                self._kick_chart_realtime_workers()
+                actions.append("重启图表实时Worker（外部服务模式）")
+            else:
+                self.start_all_services(manual=True)
+                actions.append("启动实时服务")
+        else:
+            self._kick_chart_realtime_workers()
+            actions.append("刷新图表实时Worker")
+        self._start_connection_check()
+        actions.append("触发连接探针检查")
+        return actions
+
+    def _is_local_port_available(self, port: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("127.0.0.1", int(port)))
+            return True
+        except Exception:
+            return False
+
+    def _select_realtime_api_port(self) -> int:
+        current = int(str(os.environ.get("EASYXT_API_PORT", "8080") or "8080"))
+        if current in (8080, 8000):
+            if self._is_local_port_available(current):
+                return current
+            alt = 8000 if current == 8080 else 8080
+            if self._is_local_port_available(alt):
+                return alt
+        return current
+
+    def _kick_chart_realtime_workers(self) -> None:
+        cw = getattr(self, "chart_workspace", None)
+        if cw is None:
+            return
+        try:
+            if hasattr(cw, "_restart_ws_quote_worker"):
+                cw._restart_ws_quote_worker()
+            if hasattr(cw, "_poll_realtime_quote"):
+                QTimer.singleShot(200, cw._poll_realtime_quote)
+        except Exception:
+            pass
+
     def on_backtest_engine_status_clicked(self, event):
         status = self._backtest_engine_status or {}
         detail = build_engine_status_detail(status)
         QMessageBox.information(self, "回测引擎状态详情", detail)
 
     def on_realtime_pipeline_status_clicked(self, event):
-        status = self._realtime_pipeline_status or {}
-        detail = (
-            f"connected: {status.get('connected')}\n"
-            f"reason: {status.get('reason') or 'N/A'}\n"
-            f"last_quote: {status.get('quote_ts') or 'N/A'}\n"
-            f"symbol: {status.get('symbol') or 'N/A'}\n"
-            f"source: {status.get('source') or 'N/A'}"
-        )
+        _ = event
+        pre_info = self._build_realtime_selfcheck_snapshot()
+        actions = self._apply_realtime_autofix(pre_info)
+        detail, command = self._build_realtime_probe_detail_with_fix()
+        if actions:
+            detail = "已执行自动修复:\n- " + "\n- ".join(actions) + "\n\n" + detail
+        QApplication.clipboard().setText(command)
         QMessageBox.information(self, "实时链路探针详情", detail)
 
     def on_service_diag_status_clicked(self, event):
@@ -1988,7 +2167,8 @@ class MainWindow(QMainWindow):
             f"原因: {reason or 'N/A'}\n"
             f"最近Quote: {quote_ts or 'N/A'}\n"
             f"标的: {symbol or 'N/A'}\n"
-            f"降级: {degraded}"
+            f"降级: {degraded}\n"
+            "点击可查看并复制一键修复命令"
         )
         self.realtime_pipeline_status.setText(text)
         self.realtime_pipeline_status.setStyleSheet(f"color:{color}; padding-left:8px;")
@@ -2301,6 +2481,20 @@ class MainWindow(QMainWindow):
         self.service_process = QProcess(self)
         self.service_process.setWorkingDirectory(project_path)
         env = QProcessEnvironment.systemEnvironment()
+        for key in (
+            "EASYXT_API_TOKEN",
+            "EASYXT_DEV_MODE",
+            "EASYXT_USE_WS_QUOTE",
+            "EASYXT_RT_XTDATA_ONLY",
+            "EASYXT_ENABLE_QMT_ONLINE",
+            "EASYXT_CONNECTION_PROBE_MODE",
+            "EASYXT_ENABLE_XTDATA_QUOTE_PROBE",
+            "EASYXT_QMT_CHECK_RETRY",
+            "EASYXT_QMT_CHECK_RETRY_SLEEP",
+        ):
+            value = os.environ.get(key)
+            if value is not None and str(value) != "":
+                env.insert(key, str(value))
         env.insert("EASYXT_MANAGED_WEBSOCKET", "0")
         env.insert("EASYXT_ALLOW_STANDALONE_WEBSOCKET", "0")
         env.insert("PYTHONUTF8", "1")

@@ -544,7 +544,7 @@ class KLineChartAdapter(NativeLwcChartAdapter):
             log.warning("KLineChartAdapter: klinecharts.min.js 缺失: %s", lib)
 
     def _build_html(self, port: int) -> str:
-        """生成 KLineChart 图表页面 HTML（相对路径相对于 chart_native/）。"""
+        """生成 KLineChart 专业图表页面 HTML（纯图表区，侧边栏由 Qt 面板承载）。"""
         return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -553,10 +553,8 @@ class KLineChartAdapter(NativeLwcChartAdapter):
   <title>EasyXT KLineChart</title>
   <style>
     html, body {{
-      margin: 0; padding: 0;
-      width: 100%; height: 100%;
-      background: #0c0d0f;
-      overflow: hidden;
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background: #0c0d0f; overflow: hidden;
     }}
     #chart {{ width: 100%; height: 100%; }}
     #easyxt-labels {{
@@ -570,8 +568,7 @@ class KLineChartAdapter(NativeLwcChartAdapter):
       position: absolute; top: 50%; left: 50%;
       transform: translate(-50%, -50%);
       font-family: sans-serif; font-size: 48px; font-weight: bold;
-      color: rgba(255,255,255,0.04);
-      pointer-events: none; z-index: 5;
+      color: rgba(255,255,255,0.04); pointer-events: none; z-index: 5;
       white-space: nowrap; user-select: none;
     }}
   </style>
@@ -586,11 +583,25 @@ class KLineChartAdapter(NativeLwcChartAdapter):
   <script src="./lib/klinecharts.min.js"></script>
   <script src="./kline-bridge.js"></script>
   <script>
-    // KLineChartAdapter 注入 WS 端口
     KlineBridge.init(document.getElementById('chart'), {port});
   </script>
 </body>
 </html>"""
+
+    def notify_orderbook(self, quote: dict) -> None:
+        """推送五档行情数据至 HTML 桥（保留接口，实际侧边栏由 Qt 面板承载）。"""
+        if self._initialized and self._bridge:
+            self._bridge.notify("orderbook.update", quote)
+
+    def notify_trades_tick(self, tick: dict) -> None:
+        """推送单笔成交明细至 HTML 桥（保留接口，实际侧边栏由 Qt 面板承载）。"""
+        if self._initialized and self._bridge:
+            self._bridge.notify("trades.addTick", tick)
+
+    def notify_stats(self, stats: dict) -> None:
+        """推送关键数据至 HTML 桥（保留接口，实际侧边栏由 Qt 面板承载）。"""
+        if self._initialized and self._bridge:
+            self._bridge.notify("stats.update", stats)
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────

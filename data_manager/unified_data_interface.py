@@ -3545,7 +3545,8 @@ class UnifiedDataInterface:
                 # 如果是日线，只保留日期部分
                 if period == "1d":
                     if "date" not in df.columns:
-                        df["date"] = df["time"].apply(lambda x: x.split(" ")[0])
+                        # parsed_time.dt.strftime 对 NaT 返回 NaN(float)，需做类型防护
+                        df["date"] = df["time"].apply(lambda x: x.split(" ")[0] if isinstance(x, str) else "")
                     df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
                     df["datetime"] = pd.to_datetime(df["date"], errors="coerce")
                 elif period in ("1w", "1M"):
