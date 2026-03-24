@@ -13,10 +13,10 @@ from __future__ import annotations
 import logging
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -25,7 +25,13 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from strategies.base_strategy import BarData, BaseStrategy, OrderData, StrategyContext
+from strategies.base_strategy import (  # noqa: E402
+    BarData,
+    BaseStrategy,
+    OrderData,
+    StrategyContext,
+    TickData,
+)
 
 log = logging.getLogger(__name__)
 
@@ -39,13 +45,22 @@ log = logging.getLogger(__name__)
 class BacktestConfig:
     """回测参数配置。"""
 
-    initial_capital: float = 1_000_000.0   # 初始资金（元）
-    commission_rate: float = 0.0003         # 手续费率（双向，万三）
-    stamp_duty: float = 0.001               # 印花税（仅卖出）
-    slippage_pct: float = 0.0002            # 滑点（按成交价的比例）
-    min_trade_unit: int = 100               # 最小交易单位（股）
-    fill_on: str = "next_open"              # 成交时机：next_open | current_close
-    allow_short: bool = False               # A 股默认不允许做空
+    initial_capital: float = 1_000_000.0  # 初始资金（元）
+    commission_rate: float = 0.0003  # 手续费率（双向，万三）
+    stamp_duty: float = 0.001  # 印花税（仅卖出）
+    slippage_pct: float = 0.0002  # 滑点（按成交价的比例）
+    min_trade_unit: int = 100  # 最小交易单位（股）
+    fill_on: str = "next_open"  # 成交时机：next_open | current_close
+    allow_short: bool = False  # A 股默认不允许做空
+    # ── Tick 模式专用 ──
+    tick_latency_ticks: int = 0  # tick 延迟（tick 数）
+    tick_slippage_bps: float = 0.0  # tick 滑点（基点）
+    tick_use_orderbook: bool = False  # 是否使用五档行情模拟成交
+    tick_participation_rate: float = 1.0  # 参与率（部分成交）
+    tick_orderbook_levels: int = 1  # 使用的盘口档位数
+    tick_max_wait_ticks: int = 0  # 最大等待 tick 数（0=不超时）
+    tick_cancel_retry_max: int = 0  # 撤单重试次数
+    tick_cancel_retry_price_bps: float = 0.0  # 重试价格调整（基点）
 
 
 # ---------------------------------------------------------------------------
@@ -57,12 +72,18 @@ class BacktestConfig:
 class BacktestResult:
     """回测输出结果。"""
 
-    equity_curve: pd.Series                 # DatetimeIndex → 净值
-    trades: pd.DataFrame                    # 成交记录表
-    metrics: Dict[str, Any]                 # 绩效指标字典
+    equity_curve: pd.Series  # DatetimeIndex → 净值
+    trades: pd.DataFrame  # 成交记录表
+    metrics: dict[str, Any]  # 绩效指标字典
     final_equity: float
     initial_capital: float
     strategy_id: str
+    weight_history: list[dict[str, Any]] = None  # type: ignore[assignment]
+    """持仓权重快照列表，每次再平衡后填充。格式：[{"datetime": pd.Timestamp, "weights": {code: float}}, ...]"""
+
+    def __post_init__(self) -> None:
+        if self.weight_history is None:
+            self.weight_history = []
 
 
 # ---------------------------------------------------------------------------
@@ -129,9 +150,7 @@ class _Executor:
             order_id 字符串（空字符串表示委托被过滤）
         """
         # A 股最小交易单位约束
-        volume_int = (
-            int(volume // self._config.min_trade_unit) * self._config.min_trade_unit
-        )
+        volume_int = int(volume // self._config.min_trade_unit) * self._config.min_trade_unit
         if volume_int <= 0:
             return ""
         order_id = uuid.uuid4().hex[:8]
@@ -170,10 +189,10 @@ class BacktestEngine:
 
     def __init__(
         self,
-        config: Optional[BacktestConfig] = None,
-        duckdb_path: Optional[str] = None,
-        risk_engine: Optional[Any] = None,
-        audit_trail: Optional[Any] = None,
+        config: BacktestConfig | None = None,
+        duckdb_path: str | None = None,
+        risk_engine: Any | None = None,
+        audit_trail: Any | None = None,
     ) -> None:
         self.config = config or BacktestConfig()
         self.duckdb_path = duckdb_path
@@ -188,12 +207,13 @@ class BacktestEngine:
     def run(
         self,
         strategy: BaseStrategy,
-        codes: List[str],
+        codes: list[str],
         start_date: str,
         end_date: str,
         period: str = "1d",
         adjust: str = "qfq",
-        factors_to_load: Optional[List[str]] = None,
+        factors_to_load: list[str] | None = None,
+        preloaded_data: dict[str, pd.DataFrame] | None = None,
     ) -> BacktestResult:
         """运行回测，返回 :class:`BacktestResult`。
 
@@ -203,19 +223,25 @@ class BacktestEngine:
                 引擎会优先从 DuckDB ``factor_values`` 表读取；若该标的/因子缺失，
                 则现算并自动持久化，供下次复用。
                 为 None 时不加载任何因子。
+            preloaded_data: 预加载数据（tick 模式必需），形如 ``{code: DataFrame}``。
+                DataFrame 需有 DatetimeIndex，列含 ``price``/``volume``，
+                可选 ``ask1``/``bid1``/``ask1_vol``/``bid1_vol`` 等盘口列。
         """
-        data = self._load_data(codes, start_date, end_date, period, adjust)
+        if period == "tick" and preloaded_data is not None:
+            return self._run_tick(strategy, codes, preloaded_data)
+
+        data = (
+            self._load_data(codes, start_date, end_date, period, adjust)
+            if preloaded_data is None
+            else preloaded_data
+        )
         if not data:
-            raise ValueError(
-                f"无法加载数据: codes={codes} {start_date}~{end_date} period={period}"
-            )
+            raise ValueError(f"无法加载数据: codes={codes} {start_date}~{end_date} period={period}")
 
         # ── 预加载因子时间序列（索引对齐后转为 {code: {factor: Series}}） ──
-        factor_series: Dict[str, Dict[str, "pd.Series"]] = {}
+        factor_series: dict[str, dict[str, pd.Series]] = {}
         if factors_to_load:
-            factor_series = self._load_factors(
-                codes, start_date, end_date, factors_to_load
-            )
+            factor_series = self._load_factors(codes, start_date, end_date, factors_to_load)
 
         # ── 构建统一时间轴 ─────────────────────────────────────────────
         events: list[tuple[pd.Timestamp, str, dict]] = []
@@ -226,12 +252,13 @@ class BacktestEngine:
 
         # ── 运行时状态 ─────────────────────────────────────────────────
         cash: float = self.config.initial_capital
-        positions: Dict[str, _Position] = {}
-        latest_prices: Dict[str, float] = {}
+        positions: dict[str, _Position] = {}
+        latest_prices: dict[str, float] = {}
         equity_points: list[tuple[pd.Timestamp, float]] = []
         trades_list: list[dict] = []
-        pending_fill_queue: list[dict] = []   # 等待下一 bar 成交
+        pending_fill_queue: list[dict] = []  # 等待下一 bar 成交
         returns_history: list[float] = []
+        weight_history: list[dict] = []  # 权重快照列表
 
         def _nav() -> float:
             return cash + sum(
@@ -240,16 +267,16 @@ class BacktestEngine:
                 if p.quantity > 0
             )
 
-        def _pos_values() -> Dict[str, float]:
+        def _pos_values() -> dict[str, float]:
             return {
                 c: p.market_value(latest_prices.get(c, p.avg_cost))
                 for c, p in positions.items()
                 if p.quantity > 0
             }
 
-        def _factor_snapshot(ts: pd.Timestamp) -> Dict[str, Dict[str, float]]:
+        def _factor_snapshot(ts: pd.Timestamp) -> dict[str, dict[str, float]]:
             """将当前 bar 时间点的因子值切片为 {code: {factor: float}} 字典。"""
-            snapshot: Dict[str, Dict[str, float]] = {}
+            snapshot: dict[str, dict[str, float]] = {}
             for code, factors in factor_series.items():
                 snapshot[code] = {}
                 for fname, series in factors.items():
@@ -261,7 +288,7 @@ class BacktestEngine:
                         snapshot[code][fname] = float("nan")
             return snapshot
 
-        def _build_ctx(executor: _Executor, ts: Optional[pd.Timestamp] = None) -> StrategyContext:
+        def _build_ctx(executor: _Executor, ts: pd.Timestamp | None = None) -> StrategyContext:
             return StrategyContext(
                 strategy_id=strategy.strategy_id,
                 account_id="backtest",
@@ -283,9 +310,10 @@ class BacktestEngine:
 
         # ── 主循环 ─────────────────────────────────────────────────────
         for ts, bar_group_iter in groupby(events, key=lambda x: x[0]):
-            bar_by_code: Dict[str, dict] = {be[1]: be[2] for be in bar_group_iter}
+            bar_by_code: dict[str, dict] = {be[1]: be[2] for be in bar_group_iter}
 
             # STEP 1 — 以本 bar 开盘价成交上一 bar 挂出的订单 ──────────
+            _trades_before_fill = len(trades_list)
             still_pending: list[dict] = []
             for order in pending_fill_queue:
                 code = order["code"]
@@ -293,9 +321,7 @@ class BacktestEngine:
                 if bar is None:
                     still_pending.append(order)
                     continue
-                self._fill_order(
-                    order, bar, cash, positions, trades_list, ts
-                )
+                self._fill_order(order, bar, cash, positions, trades_list, ts)
                 cash = order.get("_cash_after", cash)
                 # notify strategy of fill
                 od = OrderData(
@@ -318,7 +344,7 @@ class BacktestEngine:
                 # AuditTrail
                 if self._audit_trail is not None and order["status"] == "filled":
                     try:
-                        sig_id = order.get("signal_id") or uuid.uuid4().hex
+                        _sig_id = order.get("signal_id") or uuid.uuid4().hex
                         self._audit_trail.record_signal(
                             strategy_id=f"bt:{strategy.strategy_id}",
                             code=code,
@@ -339,6 +365,13 @@ class BacktestEngine:
 
             nav = _nav()
             equity_points.append((ts, nav))
+
+            # 有成交发生时记录权重快照
+            if len(trades_list) > _trades_before_fill and nav > 0:
+                pos_vals = _pos_values()
+                snap_w = {c: v / nav for c, v in pos_vals.items() if v > 0}
+                if snap_w:
+                    weight_history.append({"datetime": ts, "weights": snap_w})
 
             if len(equity_points) >= 2:
                 prev_nav = equity_points[-2][1]
@@ -450,7 +483,11 @@ class BacktestEngine:
         # ── 组合风险分析（可选） ────────────────────────────────────────
         if self._risk_engine is not None:
             self._enrich_with_portfolio_risk(
-                metrics, equity_series, positions, latest_prices, final_equity,
+                metrics,
+                equity_series,
+                positions,
+                latest_prices,
+                final_equity,
             )
             # R4: 将风控事件统计持久化至 DuckDB risk_events 表
             self._persist_risk_events_to_duckdb(
@@ -465,7 +502,499 @@ class BacktestEngine:
             final_equity=final_equity,
             initial_capital=self.config.initial_capital,
             strategy_id=strategy.strategy_id,
+            weight_history=weight_history,
         )
+
+    # ------------------------------------------------------------------
+    # Tick 模式
+    # ------------------------------------------------------------------
+
+    def _run_tick(
+        self,
+        strategy: BaseStrategy,
+        codes: list[str],
+        preloaded_data: dict[str, pd.DataFrame],
+    ) -> BacktestResult:
+        """Tick 模式回测：逐笔驱动策略，支持延迟、盘口、参与率等。"""
+        cfg = self.config
+
+        # ── 构建 tick 事件流 ──────────────────────────────────────────
+        tick_events: list[tuple[pd.Timestamp, str, dict]] = []
+        for code, df in preloaded_data.items():
+            if code not in codes:
+                continue
+            for ts, row in df.iterrows():
+                tick_events.append((pd.Timestamp(ts), code, row.to_dict()))
+        tick_events.sort(key=lambda x: x[0])
+
+        # ── 运行时状态 ───────────────────────────────────────────────
+        cash: float = cfg.initial_capital
+        positions: dict[str, _Position] = {}
+        latest_prices: dict[str, float] = {}
+        equity_points: list[tuple[pd.Timestamp, float]] = []
+        trades_list: list[dict] = []
+        pending_queue: list[dict] = []
+        tick_index = 0
+
+        def _nav() -> float:
+            return cash + sum(
+                p.market_value(latest_prices.get(c, p.avg_cost))
+                for c, p in positions.items()
+                if p.quantity > 0
+            )
+
+        def _pos_values() -> dict[str, float]:
+            return {
+                c: p.market_value(latest_prices.get(c, p.avg_cost))
+                for c, p in positions.items()
+                if p.quantity > 0
+            }
+
+        def _build_ctx(executor: _Executor) -> StrategyContext:
+            return StrategyContext(
+                strategy_id=strategy.strategy_id,
+                account_id="backtest",
+                positions=_pos_values(),
+                nav=_nav(),
+                params={},
+                executor=executor,
+                risk_engine=self._risk_engine,
+                audit_trail=self._audit_trail,
+                factor_snapshot={},
+            )
+
+        # ── on_init ──────────────────────────────────────────────────
+        _init_exec = _Executor(cfg)
+        try:
+            strategy.on_init(_build_ctx(_init_exec))
+        except Exception:
+            self._logger.exception("strategy.on_init 异常 [%s]", strategy.strategy_id)
+
+        # ── 主循环 ───────────────────────────────────────────────────
+        for ts, code, tick_dict in tick_events:
+            tick_index += 1
+            price = float(tick_dict.get("price") or tick_dict.get("lastPrice") or 0.0)
+            tick_vol = float(tick_dict.get("volume") or tick_dict.get("lastVolume") or 0.0)
+
+            if price > 0:
+                latest_prices[code] = price
+
+            # 本 tick 盘口流动性消耗跟踪（用于 orderbook 模式）
+            liquidity_consumed: dict[str, float] = {}
+
+            # STEP 1 — 尝试成交 pending 队列 ──────────────────────────
+            still_pending: list[dict] = []
+            for order in pending_queue:
+                if order["code"] != code:
+                    still_pending.append(order)
+                    continue
+
+                placed_tick = order.get("_tick_index", 0)
+                latency = cfg.tick_latency_ticks
+                waited = tick_index - placed_tick
+
+                # 超时撤单
+                if cfg.tick_max_wait_ticks > 0 and waited > cfg.tick_max_wait_ticks:
+                    retry_count = order.get("_retry_count", 0)
+                    if retry_count < cfg.tick_cancel_retry_max:
+                        order["_retry_count"] = retry_count + 1
+                        adj = order["price"] * cfg.tick_cancel_retry_price_bps / 10_000
+                        if order["direction"] == "buy":
+                            order["price"] += adj
+                        else:
+                            order["price"] -= adj
+                        order["_tick_index"] = tick_index
+                        still_pending.append(order)
+                        od = OrderData(
+                            order_id=order["order_id"],
+                            signal_id=order.get("signal_id", ""),
+                            code=code,
+                            direction=order["direction"],
+                            volume=order["volume"],
+                            price=order["price"],
+                            status="cancelled",
+                            filled_volume=0,
+                            filled_price=0.0,
+                            error_msg="timeout",
+                        )
+                        _re_exec = _Executor(cfg)
+                        try:
+                            strategy.on_order(_build_ctx(_re_exec), od)
+                        except Exception:
+                            pass
+                        continue
+                    else:
+                        order["status"] = "cancelled"
+                        order["error_msg"] = "timeout"
+                        od = OrderData(
+                            order_id=order["order_id"],
+                            signal_id=order.get("signal_id", ""),
+                            code=code,
+                            direction=order["direction"],
+                            volume=order["volume"],
+                            price=order["price"],
+                            status="cancelled",
+                            filled_volume=0,
+                            filled_price=0.0,
+                            error_msg="timeout",
+                        )
+                        _re_exec = _Executor(cfg)
+                        try:
+                            strategy.on_order(_build_ctx(_re_exec), od)
+                        except Exception:
+                            pass
+                        continue
+
+                # 延迟未到（waited <= latency 表示还需等待）
+                if waited <= latency:
+                    still_pending.append(order)
+                    continue
+
+                # 尝试成交（支持部分成交）
+                remaining = order.get("_remaining_volume", int(order["volume"]))
+                fill_result = self._fill_tick_order(
+                    order,
+                    tick_dict,
+                    cash,
+                    positions,
+                    trades_list,
+                    ts,
+                    cfg,
+                    remaining_volume=remaining,
+                    liquidity_consumed=liquidity_consumed,
+                )
+                cash = order.get("_cash_after", cash)
+
+                if fill_result > 0:
+                    # 有成交（部分或全部）
+                    filled_vol = fill_result
+                    order["_remaining_volume"] = remaining - filled_vol
+                    if order["_remaining_volume"] <= 0:
+                        order["status"] = "filled"
+                    else:
+                        order["status"] = "partial"
+
+                    od = OrderData(
+                        order_id=order["order_id"],
+                        signal_id=order.get("signal_id", ""),
+                        code=code,
+                        direction=order["direction"],
+                        volume=order["volume"],
+                        price=order.get("price", 0.0),
+                        status=order["status"],
+                        filled_volume=order.get("_total_filled", filled_vol),
+                        filled_price=order.get("filled_price", 0.0),
+                        error_msg="",
+                    )
+                    _notify_exec = _Executor(cfg)
+                    try:
+                        strategy.on_order(_build_ctx(_notify_exec), od)
+                    except Exception:
+                        self._logger.exception("strategy.on_order 异常")
+                    if self._audit_trail is not None and order["status"] == "filled":
+                        try:
+                            self._audit_trail.record_signal(
+                                strategy_id=f"bt:{strategy.strategy_id}",
+                                code=code,
+                                direction=order["direction"],
+                                price_hint=order.get("filled_price"),
+                                volume_hint=filled_vol,
+                            )
+                        except Exception:
+                            pass
+                    if order["_remaining_volume"] > 0:
+                        still_pending.append(order)
+                elif fill_result < 0:
+                    # 终态（rejected）
+                    od = OrderData(
+                        order_id=order["order_id"],
+                        signal_id=order.get("signal_id", ""),
+                        code=code,
+                        direction=order["direction"],
+                        volume=order["volume"],
+                        price=order.get("price", 0.0),
+                        status=order.get("status", "rejected"),
+                        filled_volume=order.get("_total_filled", 0),
+                        filled_price=order.get("filled_price", 0.0),
+                        error_msg=order.get("error_msg", ""),
+                    )
+                    _notify_exec = _Executor(cfg)
+                    try:
+                        strategy.on_order(_build_ctx(_notify_exec), od)
+                    except Exception:
+                        pass
+                else:
+                    # 未成交，继续等待
+                    still_pending.append(order)
+
+            pending_queue = still_pending
+
+            # STEP 2 — 更新净值 ───────────────────────────────────────
+            nav = _nav()
+            equity_points.append((ts, nav))
+
+            # STEP 3 — 驱动策略 on_tick ──────────────────────────────
+            tick_data = TickData(
+                code=code,
+                last=price,
+                volume=tick_vol,
+                time=ts,
+                ask1=float(tick_dict.get("ask1") or tick_dict.get("askPrice1") or 0.0),
+                bid1=float(tick_dict.get("bid1") or tick_dict.get("bidPrice1") or 0.0),
+                ask1_vol=float(tick_dict.get("ask1_vol") or tick_dict.get("askVol1") or 0.0),
+                bid1_vol=float(tick_dict.get("bid1_vol") or tick_dict.get("bidVol1") or 0.0),
+                ask2=float(tick_dict.get("ask2") or 0.0),
+                ask3=float(tick_dict.get("ask3") or 0.0),
+                ask2_vol=float(tick_dict.get("ask2_vol") or 0.0),
+                ask3_vol=float(tick_dict.get("ask3_vol") or 0.0),
+            )
+            tick_exec = _Executor(cfg)
+            ctx_tick = _build_ctx(tick_exec)
+            try:
+                strategy.on_tick(ctx_tick, tick_data)
+            except Exception:
+                self._logger.exception("strategy.on_tick 异常 code=%s", code)
+
+            # STEP 4 — 风控 + 加入 pending 队列 ──────────────────────
+            for order in tick_exec._submitted_orders:
+                blocked = False
+                if self._risk_engine is not None:
+                    try:
+                        rr = self._risk_engine.check_pre_trade(
+                            account_id="backtest",
+                            code=order["code"],
+                            volume=float(order["volume"]),
+                            price=float(order.get("price") or price),
+                            direction=order["direction"],
+                            positions=_pos_values(),
+                            nav=nav,
+                            returns=None,
+                            strategy_id=strategy.strategy_id,
+                        )
+                        if rr.blocked:
+                            order["status"] = "rejected"
+                            order["error_msg"] = f"risk:{rr.action.value}"
+                            blocked = True
+                            _re_exec = _Executor(cfg)
+                            try:
+                                strategy.on_risk(_build_ctx(_re_exec), rr)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                if not blocked:
+                    order["_tick_index"] = tick_index
+                    order["_retry_count"] = 0
+                    order["_remaining_volume"] = int(order["volume"])
+                    order["_total_filled"] = 0
+                    pending_queue.append(order)
+
+        # ── on_stop ──────────────────────────────────────────────────
+        _stop_exec = _Executor(cfg)
+        try:
+            strategy.on_stop(_build_ctx(_stop_exec))
+        except Exception:
+            self._logger.exception("strategy.on_stop 异常 [%s]", strategy.strategy_id)
+
+        # ── 组装 BacktestResult ──────────────────────────────────────
+        final_equity = cash + sum(
+            p.market_value(latest_prices.get(c, p.avg_cost))
+            for c, p in positions.items()
+            if p.quantity > 0
+        )
+        equity_series = pd.Series(
+            [e for _, e in equity_points],
+            index=pd.DatetimeIndex([t for t, _ in equity_points]),
+            name="equity",
+            dtype=float,
+        )
+        trades_df = pd.DataFrame(trades_list) if trades_list else pd.DataFrame()
+
+        from easyxt_backtest.performance import calc_all_metrics
+
+        metrics = calc_all_metrics(equity_series, trades_df, cfg.initial_capital)
+
+        return BacktestResult(
+            equity_curve=equity_series,
+            trades=trades_df,
+            metrics=metrics,
+            final_equity=final_equity,
+            initial_capital=cfg.initial_capital,
+            strategy_id=strategy.strategy_id,
+        )
+
+    def _fill_tick_order(
+        self,
+        order: dict,
+        tick_dict: dict,
+        cash: float,
+        positions: dict[str, _Position],
+        trades_list: list,
+        ts: pd.Timestamp,
+        cfg: BacktestConfig,
+        remaining_volume: int = 0,
+        liquidity_consumed: dict[str, float] | None = None,
+    ) -> int:
+        """尝试在当前 tick 成交 order。
+
+        Returns:
+            >0: 本次成交数量
+            0: 未成交（继续等待）
+            -1: 终态（rejected）
+        """
+        code = order["code"]
+        direction = order["direction"]
+        order_price = float(order.get("price") or 0.0)
+        price = float(tick_dict.get("price") or tick_dict.get("lastPrice") or 0.0)
+        tick_vol = float(tick_dict.get("volume") or tick_dict.get("lastVolume") or 0.0)
+
+        if price <= 0:
+            return 0
+
+        if remaining_volume <= 0:
+            remaining_volume = int(order["volume"])
+
+        # ── 参与率限制 ──────────────────────────────────────────────
+        max_fill = remaining_volume
+        if cfg.tick_participation_rate < 1.0 and tick_vol > 0:
+            max_fill = min(remaining_volume, int(tick_vol * cfg.tick_participation_rate))
+            if max_fill <= 0:
+                return 0
+
+        # ── 盘口成交模拟 ────────────────────────────────────────────
+        if cfg.tick_use_orderbook:
+            ask1 = float(tick_dict.get("ask1") or tick_dict.get("askPrice1") or 0.0)
+            bid1 = float(tick_dict.get("bid1") or tick_dict.get("bidPrice1") or 0.0)
+
+            if direction == "buy":
+                if order_price < ask1 or ask1 <= 0:
+                    return 0
+                liq_prefix = "ask"
+            else:
+                if order_price > bid1 or bid1 <= 0:
+                    return 0
+                liq_prefix = "bid"
+
+            # 汇总多档流动性（受 order_price 价格过滤）
+            lvl_key = f"{liq_prefix}1"
+            consumed = liquidity_consumed.get(lvl_key, 0.0) if liquidity_consumed else 0.0
+            total_liq = 0.0
+            for lvl in range(1, cfg.tick_orderbook_levels + 1):
+                px_key = f"{liq_prefix}{lvl}" if lvl > 1 else f"{liq_prefix}1"
+                vol_key = f"{liq_prefix}{lvl}_vol" if lvl > 1 else f"{liq_prefix}1_vol"
+                lvl_px = float(tick_dict.get(px_key) or tick_dict.get(f"{liq_prefix}Price{lvl}") or 0.0)
+                lvl_vol = float(tick_dict.get(vol_key) or tick_dict.get(f"{liq_prefix}Vol{lvl}") or 0.0)
+                if lvl_px <= 0:
+                    continue
+                # 买单：只统计 ≤ order_price 的档位；卖单：只统计 ≥ order_price 的档位
+                if direction == "buy" and lvl_px > order_price:
+                    continue
+                if direction == "sell" and lvl_px < order_price:
+                    continue
+                total_liq += lvl_vol
+
+            if total_liq > 0:
+                avail_liq = max(total_liq - consumed, 0.0)
+                if avail_liq <= 0:
+                    return 0
+                if cfg.tick_participation_rate < 1.0:
+                    max_fill = min(max_fill, int(avail_liq * cfg.tick_participation_rate))
+                else:
+                    max_fill = min(max_fill, int(avail_liq))
+                if max_fill <= 0:
+                    return 0
+            # total_liq == 0 时无盘口量数据，不限制流动性（_weighted_fill_price 内部处理）
+            fill_price = self._weighted_fill_price(
+                tick_dict, direction, max_fill, cfg.tick_orderbook_levels
+            )
+
+            # 更新流动性消耗
+            if liquidity_consumed is not None:
+                liquidity_consumed[lvl_key] = consumed + max_fill
+        else:
+            slippage = price * cfg.tick_slippage_bps / 10_000
+            fill_price = price + slippage if direction == "buy" else price - slippage
+            fill_price = max(fill_price, 0.01)
+
+        # ── 资金/持仓检查 ───────────────────────────────────────────
+        trade_value = fill_price * max_fill
+        commission = trade_value * cfg.commission_rate
+
+        if direction == "buy":
+            total_cost = trade_value + commission
+            if cash < total_cost:
+                order["status"] = "rejected"
+                order["error_msg"] = "insufficient_cash"
+                order["_cash_after"] = cash
+                return -1
+            cash -= total_cost
+            if code not in positions:
+                positions[code] = _Position(code)
+            positions[code].buy(max_fill, fill_price)
+        else:
+            pos = positions.get(code)
+            avail = pos.quantity if pos else 0
+            actual_vol = min(max_fill, avail)
+            if actual_vol <= 0:
+                order["status"] = "rejected"
+                order["error_msg"] = "no_position"
+                order["_cash_after"] = cash
+                return -1
+            stamp = trade_value * cfg.stamp_duty
+            proceeds = fill_price * actual_vol - commission - stamp
+            cash += proceeds
+            positions[code].sell(actual_vol)
+            max_fill = actual_vol
+
+        order["filled_price"] = fill_price
+        order["filled_volume"] = max_fill
+        order["_cash_after"] = cash
+        order["_total_filled"] = order.get("_total_filled", 0) + max_fill
+
+        trades_list.append(
+            {
+                "datetime": ts,
+                "code": code,
+                "direction": direction,
+                "volume": max_fill,
+                "price": fill_price,
+                "order_price": order_price,
+                "commission": commission,
+                "stamp": 0.0 if direction == "buy" else trade_value * cfg.stamp_duty,
+            }
+        )
+        return max_fill
+
+    @staticmethod
+    def _weighted_fill_price(
+        tick_dict: dict,
+        direction: str,
+        volume: int,
+        levels: int,
+    ) -> float:
+        """多档盘口加权成交价。"""
+        prefix = "ask" if direction == "buy" else "bid"
+        total_cost = 0.0
+        remaining = volume
+        for lvl in range(1, levels + 1):
+            px_key = f"{prefix}{lvl}" if lvl > 1 else f"{prefix}1"
+            vol_key = f"{prefix}{lvl}_vol" if lvl > 1 else f"{prefix}1_vol"
+            px = float(tick_dict.get(px_key) or tick_dict.get(f"{prefix}Price{lvl}") or 0.0)
+            vol = float(tick_dict.get(vol_key) or tick_dict.get(f"{prefix}Vol{lvl}") or 0.0)
+            if px <= 0:
+                continue
+            # 无量数据时假设无限流动性
+            fill = remaining if vol <= 0 else min(remaining, int(vol))
+            if fill <= 0:
+                continue
+            total_cost += px * fill
+            remaining -= fill
+            if remaining <= 0:
+                break
+        filled = volume - remaining
+        if filled <= 0:
+            return float(tick_dict.get("price") or tick_dict.get("lastPrice") or 0.0)
+        return total_cost / filled
 
     # ------------------------------------------------------------------
     # 内部辅助
@@ -476,7 +1005,7 @@ class BacktestEngine:
         order: dict,
         bar: dict,
         cash: float,
-        positions: Dict[str, _Position],
+        positions: dict[str, _Position],
         trades_list: list,
         ts: pd.Timestamp,
     ) -> None:
@@ -547,10 +1076,10 @@ class BacktestEngine:
 
     def _enrich_with_portfolio_risk(
         self,
-        metrics: Dict[str, Any],
+        metrics: dict[str, Any],
         equity_series: pd.Series,
-        positions: Dict[str, "_Position"],
-        latest_prices: Dict[str, float],
+        positions: dict[str, _Position],
+        latest_prices: dict[str, float],
         final_equity: float,
     ) -> None:
         """在 metrics 中追加 PortfolioRiskAnalyzer 结果（best-effort）。"""
@@ -565,7 +1094,7 @@ class BacktestEngine:
         daily_returns = equity_series.pct_change().dropna().tolist()
 
         # 各标的组合数据
-        portfolio: Dict[str, Dict[str, Any]] = {}
+        portfolio: dict[str, dict[str, Any]] = {}
         for code, pos in positions.items():
             if pos.quantity <= 0:
                 continue
@@ -588,7 +1117,7 @@ class BacktestEngine:
     def _persist_risk_events_to_duckdb(
         self,
         strategy_id: str,
-        risk_stats: Dict[str, Any],
+        risk_stats: dict[str, Any],
     ) -> None:
         """R4: 将回测结束后的风控事件统计写入 DuckDB ``risk_events`` 表。
 
@@ -607,8 +1136,9 @@ class BacktestEngine:
         if not risk_stats or not self.duckdb_path:
             return
         try:
-            import duckdb
             from datetime import datetime
+
+            import duckdb
 
             run_ts = datetime.utcnow().isoformat(timespec="seconds")
             rows: list[tuple] = []
@@ -631,9 +1161,7 @@ class BacktestEngine:
                         count       INTEGER
                     )
                 """)
-                conn.executemany(
-                    "INSERT INTO risk_events VALUES (?, ?, ?, ?, ?)", rows
-                )
+                conn.executemany("INSERT INTO risk_events VALUES (?, ?, ?, ?, ?)", rows)
                 conn.commit()
                 self._logger.debug(
                     "R4: 写入 risk_events %d 行 (strategy=%s)", len(rows), strategy_id
@@ -645,17 +1173,19 @@ class BacktestEngine:
 
     def _load_data(
         self,
-        codes: List[str],
+        codes: list[str],
         start_date: str,
         end_date: str,
         period: str,
         adjust: str,
-    ) -> Dict[str, pd.DataFrame]:
+    ) -> dict[str, pd.DataFrame]:
         """通过 UnifiedDataInterface 加载数据（本地 DuckDB 优先，在线兜底）。"""
         try:
             from data_manager.unified_data_interface import UnifiedDataInterface
         except ImportError:
-            self._logger.error("无法导入 UnifiedDataInterface，请确认 data_manager 包在 sys.path 中")
+            self._logger.error(
+                "无法导入 UnifiedDataInterface，请确认 data_manager 包在 sys.path 中"
+            )
             return {}
 
         ui = UnifiedDataInterface(duckdb_path=self.duckdb_path, silent_init=True)
@@ -664,7 +1194,7 @@ class BacktestEngine:
         except Exception:
             self._logger.exception("回测数据连接失败")
 
-        result: Dict[str, pd.DataFrame] = {}
+        result: dict[str, pd.DataFrame] = {}
         for code in codes:
             try:
                 df = ui.get_stock_data(
@@ -698,11 +1228,11 @@ class BacktestEngine:
 
     def _load_factors(
         self,
-        codes: List[str],
+        codes: list[str],
         start_date: str,
         end_date: str,
-        factor_names: List[str],
-    ) -> Dict[str, Dict[str, "pd.Series"]]:
+        factor_names: list[str],
+    ) -> dict[str, dict[str, pd.Series]]:
         """预加载指定因子的历史时间序列，返回 ``{code: {factor_name: pd.Series}}``。
 
         优先从 DuckDB ``factor_values`` 表读取；若缺失则通过
@@ -711,7 +1241,7 @@ class BacktestEngine:
 
         任何单个因子/股票的失败不会中断整体回测——该值置为空 Series 并记录警告。
         """
-        result: Dict[str, Dict[str, pd.Series]] = {code: {} for code in codes}
+        result: dict[str, dict[str, pd.Series]] = {code: {} for code in codes}
 
         try:
             from data_manager.unified_data_interface import UnifiedDataInterface
@@ -741,9 +1271,7 @@ class BacktestEngine:
                     series = ui.load_factor(code, fname, start_date, end_date)
                     if series is None or series.empty:
                         # 缓存未命中：现算并持久化
-                        count = ui.compute_and_save_factor(
-                            fname, code, start_date, end_date
-                        )
+                        count = ui.compute_and_save_factor(fname, code, start_date, end_date)
                         if count > 0:
                             series = ui.load_factor(code, fname, start_date, end_date)
                         else:

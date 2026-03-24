@@ -2,7 +2,7 @@
 策略基类（Phase 1）
 
 所有实盘/回测策略继承 :class:`BaseStrategy`，实现统一的生命周期钩子：
-  on_init → on_bar → on_order → on_risk → on_stop
+  on_init → on_bar / on_tick → on_order → on_risk → on_stop
 
 调用方（回测引擎/实盘调度器）负责构造 :class:`StrategyContext` 并在合适时机驱动各钩子。
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -25,26 +25,47 @@ log = logging.getLogger(__name__)
 @dataclass
 class BarData:
     """单根 K 线数据。"""
+
     code: str
-    period: str          # "1d" | "60m" | "1m" …
+    period: str  # "1d" | "60m" | "1m" …
     open: float
     high: float
     low: float
     close: float
     volume: float
-    time: Any            # datetime / timestamp
+    time: Any  # datetime / timestamp
+
+
+@dataclass
+class TickData:
+    """逐笔行情数据（tick 级）。"""
+
+    code: str
+    last: float  # 最新价
+    volume: float  # tick 成交量
+    time: Any  # datetime / timestamp
+    # 可选五档行情
+    ask1: float = 0.0
+    bid1: float = 0.0
+    ask1_vol: float = 0.0
+    bid1_vol: float = 0.0
+    ask2: float = 0.0
+    ask3: float = 0.0
+    ask2_vol: float = 0.0
+    ask3_vol: float = 0.0
 
 
 @dataclass
 class OrderData:
     """订单回报（简化版）。"""
+
     order_id: str
     signal_id: str
     code: str
-    direction: str       # "buy" | "sell"
+    direction: str  # "buy" | "sell"
     volume: float
     price: float
-    status: str          # "submitted" | "filled" | "cancelled" | "rejected"
+    status: str  # "submitted" | "filled" | "cancelled" | "rejected"
     filled_volume: float = 0.0
     filled_price: float = 0.0
     error_msg: str = ""
@@ -65,15 +86,16 @@ class StrategyContext:
     策略可通过 ``context.factor_snapshot.get(code, {}).get("momentum_20d", 0.0)``
     访问当前 bar 的因子值，无需重复计算。
     """
+
     strategy_id: str
     account_id: str
-    positions: Dict[str, float] = field(default_factory=dict)   # code -> market_value
+    positions: dict[str, float] = field(default_factory=dict)  # code -> market_value
     nav: float = 0.0
-    params: Dict[str, Any] = field(default_factory=dict)
-    executor: Optional[Any] = None       # 订单执行器（实盘 / 仿真）
-    risk_engine: Optional[Any] = None    # RiskEngine 实例
-    audit_trail: Optional[Any] = None    # AuditTrail 实例
-    factor_snapshot: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
+    executor: Any | None = None  # 订单执行器（实盘 / 仿真）
+    risk_engine: Any | None = None  # RiskEngine 实例
+    audit_trail: Any | None = None  # AuditTrail 实例
+    factor_snapshot: dict[str, dict[str, float]] = field(default_factory=dict)
     # code → {factor_name → float}；由回测引擎 / 实盘调度器在每个 bar 前填充
 
 
@@ -117,6 +139,12 @@ class BaseStrategy(ABC):
         """
         订单回报钩子。默认空实现，子类按需 override。
         当订单状态变更（成交/撤单/拒单）时由框架调用。
+        """
+
+    def on_tick(self, context: StrategyContext, tick: TickData) -> None:
+        """
+        逐笔行情钩子。tick 模式下每笔 tick 到达时调用。
+        默认空实现，子类按需 override。
         """
 
     def on_risk(self, context: StrategyContext, risk_result: Any) -> None:
@@ -172,14 +200,29 @@ class BaseStrategy(ABC):
         try:
             self.on_bar(context, bar)
         except Exception:
-            self.logger.exception("策略 %s on_bar 异常 @ %s %s", self.strategy_id, bar.code, bar.time)
+            self.logger.exception(
+                "策略 %s on_bar 异常 @ %s %s", self.strategy_id, bar.code, bar.time
+            )
+
+    def _handle_tick(self, context: StrategyContext, tick: TickData) -> None:
+        """框架调用：驱动 tick 行情。"""
+        if not self._running:
+            return
+        try:
+            self.on_tick(context, tick)
+        except Exception:
+            self.logger.exception(
+                "策略 %s on_tick 异常 @ %s %s", self.strategy_id, tick.code, tick.time
+            )
 
     def _handle_order(self, context: StrategyContext, order: OrderData) -> None:
         """框架调用：分发订单回报。"""
         try:
             self.on_order(context, order)
         except Exception:
-            self.logger.exception("策略 %s on_order 异常 order_id=%s", self.strategy_id, order.order_id)
+            self.logger.exception(
+                "策略 %s on_order 异常 order_id=%s", self.strategy_id, order.order_id
+            )
 
     # ------------------------------------------------------------------
     # Helper: submit order via context executor with risk pre-check
@@ -193,8 +236,8 @@ class BaseStrategy(ABC):
         price: float,
         direction: str,
         signal_id: str = "",
-        returns: Optional[List[float]] = None,
-    ) -> Optional[str]:
+        returns: list[float] | None = None,
+    ) -> str | None:
         """
         提交委托（依赖底层的 TradeAPI 执行前置风控拦截及审计写入）。
 
