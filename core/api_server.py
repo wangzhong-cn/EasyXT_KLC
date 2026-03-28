@@ -54,17 +54,27 @@ log = logging.getLogger(__name__)
 # 配置（环境变量驱动）
 # ---------------------------------------------------------------------------
 
-_API_TOKEN: str = os.environ.get("EASYXT_API_TOKEN", "")          # 空 = 生产环境拒绝启动
-_DEV_MODE: bool = os.environ.get("EASYXT_DEV_MODE", "").lower() in ("1", "true", "yes")  # 本地开发跳过鉴权
-_TEST_MODE: bool = ("PYTEST_CURRENT_TEST" in os.environ) or any("pytest" in x.lower() for x in sys.argv)
+_API_TOKEN: str = os.environ.get("EASYXT_API_TOKEN", "")  # 空 = 生产环境拒绝启动
+_DEV_MODE: bool = os.environ.get("EASYXT_DEV_MODE", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)  # 本地开发跳过鉴权
+_TEST_MODE: bool = ("PYTEST_CURRENT_TEST" in os.environ) or any(
+    "pytest" in x.lower() for x in sys.argv
+)
 _RATE_LIMIT: int = int(os.environ.get("EASYXT_RATE_LIMIT", "60"))  # 每分钟每IP上限
 _WS_SEND_TIMEOUT: float = float(os.environ.get("EASYXT_WS_TIMEOUT", "0.1"))  # 慢消费者超时(秒)
-_WS_MAX_QUEUE_SIZE: int = int(os.environ.get("EASYXT_WS_QUEUE_SIZE", "64"))   # 每连接队列上限（满则丢帧）
+_WS_MAX_QUEUE_SIZE: int = int(
+    os.environ.get("EASYXT_WS_QUEUE_SIZE", "64")
+)  # 每连接队列上限（满则丢帧）
 
 # 丢帧率告警阈值（可通过环境变量覆盖）
 _DROP_RATE_WARN: float = float(os.environ.get("EASYXT_DROP_RATE_WARN", "0.01"))  # 1%  → warning
 _DROP_RATE_CRIT: float = float(os.environ.get("EASYXT_DROP_RATE_CRIT", "0.05"))  # 5%  → critical
-_DROP_RATE_MIN_SAMPLES: int = int(os.environ.get("EASYXT_DROP_RATE_MIN_SAMPLES", "20"))  # 1m 窗口最小样本量（不足时不判定告警）
+_DROP_RATE_MIN_SAMPLES: int = int(
+    os.environ.get("EASYXT_DROP_RATE_MIN_SAMPLES", "20")
+)  # 1m 窗口最小样本量（不足时不判定告警）
 
 # 构建版本信息（CI 注入，本地开发时为 "dev"）
 _BUILD_VERSION: str = os.environ.get("EASYXT_BUILD_VERSION", "dev")
@@ -74,14 +84,18 @@ _COMMIT_SHA: str = os.environ.get("EASYXT_COMMIT_SHA", "unknown")
 # Prometheus 指标定义（prometheus_client 可选；不可用时 /metrics 降级为 JSON）
 # ---------------------------------------------------------------------------
 
+
 def _init_prometheus() -> tuple[bool, Any, Any, Any, Any, Any, Any, Any]:
     """初始化 Prometheus 指标对象。返回 (enabled, registry, counter_rl, g_drop, g_drop1m, g_strat, g_queue, g_uptime)。"""
     try:
         from prometheus_client import CollectorRegistry, Counter, Gauge  # noqa: PLC0415
+
         reg = CollectorRegistry(auto_describe=False)
         c_rl = Counter("easyxt_rate_limit_hits_total", "累计限流命中次数", registry=reg)
         g_drop = Gauge("easyxt_ws_drop_rate", "WebSocket 全生命周期丢帧率", registry=reg)
-        g_drop1m = Gauge("easyxt_ws_drop_rate_1m", "WebSocket 最近60s丢帧率（-1=样本不足）", registry=reg)
+        g_drop1m = Gauge(
+            "easyxt_ws_drop_rate_1m", "WebSocket 最近60s丢帧率（-1=样本不足）", registry=reg
+        )
         g_strat = Gauge("easyxt_strategies_running", "当前运行中策略数", registry=reg)
         g_queue = Gauge("easyxt_ws_queue_total_len", "所有WS连接队列积压帧总数", registry=reg)
         g_up = Gauge("easyxt_uptime_seconds", "服务运行时长（秒）", registry=reg)
@@ -106,12 +120,12 @@ def _init_prometheus() -> tuple[bool, Any, Any, Any, Any, Any, Any, Any]:
 # ---------------------------------------------------------------------------
 
 _rate_buckets: dict[str, deque] = {}
-_rate_limit_lock = threading.Lock()   # 保护 _rate_buckets 和 _rate_limit_hits 的并发访问
-_rate_limit_hits: int = 0             # 限流命中累计计数（仅增不减，供监控采集）
+_rate_limit_lock = threading.Lock()  # 保护 _rate_buckets 和 _rate_limit_hits 的并发访问
+_rate_limit_hits: int = 0  # 限流命中累计计数（仅增不减，供监控采集）
 _cleanup_stats: dict[str, Any] = {
-    "last_run_epoch": None,   # 最近一次清理任务运行的 epoch(s)，None 表示尚未运行
+    "last_run_epoch": None,  # 最近一次清理任务运行的 epoch(s)，None 表示尚未运行
     "last_removed_count": 0,  # 最近一次清理删除的 IP 桶数量
-    "error_count": 0,         # 清理任务累计异常次数（任务活着但反复报错时可见）
+    "error_count": 0,  # 清理任务累计异常次数（任务活着但反复报错时可见）
 }
 _datasource_health_lock = threading.Lock()
 _datasource_health_interface: Any = None
@@ -141,6 +155,7 @@ def _get_datasource_health_interface() -> Any:
     with _datasource_health_lock:
         if _datasource_health_interface is None:
             from data_manager.unified_data_interface import UnifiedDataInterface
+
             duckdb_path = os.environ.get("EASYXT_DUCKDB_PATH", "") or None
             _datasource_health_interface = UnifiedDataInterface(
                 duckdb_path=duckdb_path,
@@ -158,7 +173,8 @@ async def _cleanup_rate_buckets() -> None:
         try:
             with _rate_limit_lock:
                 stale = [
-                    ip for ip, bucket in _rate_buckets.items()
+                    ip
+                    for ip, bucket in _rate_buckets.items()
                     if not bucket or now - bucket[-1] > 300.0
                 ]
                 for ip in stale:
@@ -198,6 +214,7 @@ async def _verify_auth_and_rate(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效或缺失的 X-API-Token",
         )
+
 
 # ---------------------------------------------------------------------------
 # 统一错误响应格式
@@ -245,15 +262,15 @@ class _MarketBroadcaster:
     _LATENCY_WINDOW = 100
     # 时间窗口丢帧率：统计最近 _WINDOW_SECS 秒内的事件
     _WINDOW_SECS: int = 60
-    _EVENT_WINDOW_MAX: int = 10_000   # 最多保留条目数（100 次/秒 × ~100 s）
+    _EVENT_WINDOW_MAX: int = 10_000  # 最多保留条目数（100 次/秒 × ~100 s）
 
     def __init__(self) -> None:
         self._channels: dict[str, set[WebSocket]] = {}
-        self._seq: dict[str, int] = {}             # per-symbol 单调递增序号
+        self._seq: dict[str, int] = {}  # per-symbol 单调递增序号
         self._queues: dict[WebSocket, asyncio.Queue] = {}
         self._drain_tasks: dict[WebSocket, asyncio.Task] = {}
-        self._drop_counts: dict[str, int] = {}     # per-symbol 丢帧累计
-        self._total_attempted: int = 0                 # 全生命周期 put_nowait 调用总次数（含成功与丢帧）
+        self._drop_counts: dict[str, int] = {}  # per-symbol 丢帧累计
+        self._total_attempted: int = 0  # 全生命周期 put_nowait 调用总次数（含成功与丢帧）
         # publish_latency 滑动窗口（单位 ms，仅统计有订阅者时的 broadcast 耗时）
         self._latency_window: deque = deque(maxlen=self._LATENCY_WINDOW)
         # 时间窗口事件：每次有效 broadcast 追加 (monotonic_ts, attempted, dropped)
@@ -272,22 +289,20 @@ class _MarketBroadcaster:
         try:
             while True:
                 msg = await queue.get()
-                if msg is None:   # sentinel：正常关闭
+                if msg is None:  # sentinel：正常关闭
                     break
                 try:
                     send_task = asyncio.ensure_future(ws.send_text(msg))
-                    done, pending = await asyncio.wait(
-                        {send_task}, timeout=_WS_SEND_TIMEOUT
-                    )
+                    done, pending = await asyncio.wait({send_task}, timeout=_WS_SEND_TIMEOUT)
                     if pending:
                         send_task.cancel()
                         await asyncio.gather(send_task, return_exceptions=True)
-                        break   # 慢消费者：超时后退出 drain
+                        break  # 慢消费者：超时后退出 drain
                     else:
                         send_task.result()  # 传播发送异常
                 except Exception as exc:
                     log.debug("WS 发送失败 symbol=%s error=%s", symbol, exc)
-                    break         # 连接已死，退出 drain
+                    break  # 连接已死，退出 drain
         except asyncio.CancelledError:
             pass
         finally:
@@ -366,11 +381,11 @@ class _MarketBroadcaster:
         """
         cutoff = time.monotonic() - self._WINDOW_SECS
         attempted_w = sum(a for ts, a, _ in self._event_window if ts >= cutoff)
-        dropped_w   = sum(d for ts, _, d in self._event_window if ts >= cutoff)
+        dropped_w = sum(d for ts, _, d in self._event_window if ts >= cutoff)
         if attempted_w == 0:
             return 0.0
         if attempted_w < _DROP_RATE_MIN_SAMPLES:
-            return -1.0   # 哨兵值：表示样本量不足，不应计入告警判断
+            return -1.0  # 哨兵值：表示样本量不足，不应计入告警判断
         return round(dropped_w / attempted_w, 4)
 
     @property
@@ -387,7 +402,7 @@ class _MarketBroadcaster:
         阈值可通过 EASYXT_DROP_RATE_WARN / EASYXT_DROP_RATE_CRIT 环境变量覆盖。
         """
         dr1m = self.drop_rate_1m
-        if dr1m < 0:              # 哨兵值：样本量不足
+        if dr1m < 0:  # 哨兵值：样本量不足
             return "ok_low_sample"
         if dr1m >= _DROP_RATE_CRIT:
             return "critical"
@@ -428,7 +443,7 @@ class _MarketBroadcaster:
             if queue is None:
                 continue
             attempts += 1
-            self._total_attempted += 1   # 全生命周期计数
+            self._total_attempted += 1  # 全生命周期计数
             try:
                 queue.put_nowait(msg)
             except asyncio.QueueFull:
@@ -475,31 +490,14 @@ def ingest_tick_from_thread(symbol: str, tick_data: dict) -> None:
         from xtquant import xtdata
         xtdata.subscribe_quote("000001.SZ", period="tick", callback=on_tick)
     """
-    if _server_loop is None or _server_loop.is_closed():
-        return
-    asyncio.run_coroutine_threadsafe(
-        broadcaster.broadcast(symbol, tick_data), _server_loop
+    # 调试日志：追踪 ingest_tick 数据来源
+    log.warning(
+        f"[DIAG] ingest_tick_from_thread symbol={symbol} price={tick_data.get('price')} source={tick_data.get('source', 'unknown')}"
     )
 
-
-# ---------------------------------------------------------------------------
-# 模拟行情推送后台任务（实盘时用 ingest_tick_from_thread 替代）
-# ---------------------------------------------------------------------------
-
-_mock_tick_tasks: dict[str, asyncio.Task] = {}
-
-
-async def _mock_tick_loop(symbol: str) -> None:
-    """开发/测试用：每秒推送随机价格，无需 QMT 连接。"""
-    import random
-    base = 10.0
-    while True:
-        await broadcaster.broadcast(symbol, {
-            "symbol": symbol,
-            "price": round(base + random.uniform(-0.5, 0.5), 3),  # noqa: S311  # mock only
-            "source": "mock",
-        })
-        await asyncio.sleep(1.0)
+    if _server_loop is None or _server_loop.is_closed():
+        return
+    asyncio.run_coroutine_threadsafe(broadcaster.broadcast(symbol, tick_data), _server_loop)
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +511,7 @@ class StrategyStatusPatch(BaseModel):
 
 class SubscribeRequest(BaseModel):
     symbol: str
-    period: str = "tick"   # "tick" | "1m" | "5m" | "1d"
+    period: str = "tick"  # "tick" | "1m" | "5m" | "1d"
 
 
 class AccountRegisterBody(BaseModel):
@@ -554,9 +552,6 @@ async def _lifespan(app: FastAPI):
     )
     yield
     _cleanup_task.cancel()
-    for task in _mock_tick_tasks.values():
-        task.cancel()
-    _mock_tick_tasks.clear()
     _server_loop = None
     log.info("EasyXT 中台服务关闭")
 
@@ -594,6 +589,7 @@ async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONR
         },
     )
 
+
 # ---------------------------------------------------------------------------
 # 健康检查
 # ---------------------------------------------------------------------------
@@ -603,14 +599,13 @@ async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONR
 def health_check() -> dict:
     """服务健康检查（无需鉴权，适用于负载均衡探针）。"""
     uptime = (
-        round(time.monotonic() - _server_start_time, 1)
-        if _server_start_time is not None
-        else None
+        round(time.monotonic() - _server_start_time, 1) if _server_start_time is not None else None
     )
 
     # --- registry 子检查 ---
     try:
         from strategies.registry import strategy_registry
+
         running_count = len(strategy_registry.list_running())
         registry_status = "ok"
     except Exception:
@@ -629,6 +624,7 @@ def health_check() -> dict:
     # --- db 子检查（轻量探针；失败仅标记 unavailable，不影响整体状态） ---
     try:
         from data_manager.duckdb_connection_pool import get_db_manager
+
         get_db_manager()
         db_status = "ok"
     except Exception:
@@ -641,19 +637,23 @@ def health_check() -> dict:
         "status": agg_status,
         "checks": {
             "registry": {"status": registry_status, "strategies_running": running_count},
-            "ws": {"status": "ok", "symbols": ws_symbols, "cleanup": ws_cleanup,
-                   "drop_counts": broadcaster.drop_counts(),
-                   "drop_rate": broadcaster.drop_rate,
-                   "drop_rate_1m": broadcaster.drop_rate_1m,
-                   "drop_alert": broadcaster.drop_alert_level,
-                   "drop_alert_thresholds": {
-                       "warn": _DROP_RATE_WARN,
-                       "crit": _DROP_RATE_CRIT,
-                       "min_samples": _DROP_RATE_MIN_SAMPLES,
-                   },
-                   "queue_len": total_queue_len,
-                   "publish_latency_ms": broadcaster.avg_publish_latency_ms,
-                   "publish_latency_max_ms": broadcaster.max_publish_latency_ms},
+            "ws": {
+                "status": "ok",
+                "symbols": ws_symbols,
+                "cleanup": ws_cleanup,
+                "drop_counts": broadcaster.drop_counts(),
+                "drop_rate": broadcaster.drop_rate,
+                "drop_rate_1m": broadcaster.drop_rate_1m,
+                "drop_alert": broadcaster.drop_alert_level,
+                "drop_alert_thresholds": {
+                    "warn": _DROP_RATE_WARN,
+                    "crit": _DROP_RATE_CRIT,
+                    "min_samples": _DROP_RATE_MIN_SAMPLES,
+                },
+                "queue_len": total_queue_len,
+                "publish_latency_ms": broadcaster.avg_publish_latency_ms,
+                "publish_latency_max_ms": broadcaster.max_publish_latency_ms,
+            },
             "db": {"status": db_status},
         },
         # 以下平铺字段保持向后兼容（与旧版调用方/探针保持契约）
@@ -685,10 +685,22 @@ def datasource_health_check() -> dict[str, Any]:
         payload["checks"]["data_quality_incident"] = iface.get_data_quality_incident_counts()
         payload["checks"]["step6_validation"] = iface.get_step6_validation_metrics()
         dl_abs_warn = int(os.environ.get("EASYXT_QUARANTINE_DEADLETTER_WARN", "100") or 100)
-        dl_ratio_warn = float(os.environ.get("EASYXT_QUARANTINE_DEADLETTER_RATIO_WARN", "0.01") or 0.01)
+        dl_ratio_warn = float(
+            os.environ.get("EASYXT_QUARANTINE_DEADLETTER_RATIO_WARN", "0.01") or 0.01
+        )
         step6_sample_rate = float(os.environ.get("EASYXT_STEP6_VALIDATE_SAMPLE_RATE", "1.0") or 1.0)
-        canary_shadow_write = str(os.environ.get("EASYXT_CANARY_SHADOW_WRITE", "0")).lower() in ("1", "true", "yes", "on")
-        canary_shadow_only = str(os.environ.get("EASYXT_CANARY_SHADOW_ONLY", "1")).lower() in ("1", "true", "yes", "on")
+        canary_shadow_write = str(os.environ.get("EASYXT_CANARY_SHADOW_WRITE", "0")).lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        canary_shadow_only = str(os.environ.get("EASYXT_CANARY_SHADOW_ONLY", "1")).lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         payload["checks"]["thresholds"] = {
             "dead_letter_abs_warn": dl_abs_warn,
             "dead_letter_ratio_warn": dl_ratio_warn,
@@ -735,8 +747,7 @@ def sla_health_check(report_date: str = "") -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/v1/strategies/", tags=["策略管理"],
-         dependencies=[Depends(_verify_auth_and_rate)])
+@app.get("/api/v1/strategies/", tags=["策略管理"], dependencies=[Depends(_verify_auth_and_rate)])
 def list_strategies(status_filter: str = "") -> list[dict]:
     """
     枚举所有已注册策略。
@@ -751,8 +762,11 @@ def list_strategies(status_filter: str = "") -> list[dict]:
     return items
 
 
-@app.get("/api/v1/strategies/{strategy_id}", tags=["策略管理"],
-         dependencies=[Depends(_verify_auth_and_rate)])
+@app.get(
+    "/api/v1/strategies/{strategy_id}",
+    tags=["策略管理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
 def get_strategy(strategy_id: str) -> dict:
     """获取单个策略详情。"""
     from strategies.registry import strategy_registry
@@ -774,8 +788,11 @@ def get_strategy(strategy_id: str) -> dict:
     }
 
 
-@app.patch("/api/v1/strategies/{strategy_id}/status", tags=["策略管理"],
-           dependencies=[Depends(_verify_auth_and_rate)])
+@app.patch(
+    "/api/v1/strategies/{strategy_id}/status",
+    tags=["策略管理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
 def patch_strategy_status(strategy_id: str, body: StrategyStatusPatch) -> dict:
     """
     更新策略状态（状态机约束，非法转换返回 409）。
@@ -812,8 +829,9 @@ def patch_strategy_status(strategy_id: str, body: StrategyStatusPatch) -> dict:
     return {"strategy_id": strategy_id, "status": body.status, "updated": True}
 
 
-@app.post("/api/v1/strategies/snapshot", tags=["策略管理"],
-          dependencies=[Depends(_verify_auth_and_rate)])
+@app.post(
+    "/api/v1/strategies/snapshot", tags=["策略管理"], dependencies=[Depends(_verify_auth_and_rate)]
+)
 def snapshot_all_strategies() -> dict:
     """触发全量策略参数快照写入 DuckDB（每次追加新记录）。"""
     from strategies.registry import strategy_registry
@@ -827,8 +845,9 @@ def snapshot_all_strategies() -> dict:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/v1/market/snapshot/{symbol}", tags=["行情"],
-         dependencies=[Depends(_verify_auth_and_rate)])
+@app.get(
+    "/api/v1/market/snapshot/{symbol}", tags=["行情"], dependencies=[Depends(_verify_auth_and_rate)]
+)
 def get_market_snapshot(symbol: str) -> dict:
     """
     获取标的最新行情快照。
@@ -837,6 +856,7 @@ def get_market_snapshot(symbol: str) -> dict:
     """
     try:
         from data_manager import unified_data_interface
+
         get_latest_tick = getattr(unified_data_interface, "get_latest_tick", None)
         tick = get_latest_tick(symbol) if callable(get_latest_tick) else None
         if tick is not None:
@@ -857,28 +877,32 @@ def get_market_snapshot(symbol: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/v1/accounts/", tags=["账户管理"],
-         dependencies=[Depends(_verify_auth_and_rate)])
+@app.get("/api/v1/accounts/", tags=["账户管理"], dependencies=[Depends(_verify_auth_and_rate)])
 def list_accounts_api() -> list[dict]:
     """枚举所有已注册账户。"""
     from core.account_registry import account_registry
+
     return account_registry.list_accounts()
 
 
-@app.post("/api/v1/accounts/", tags=["账户管理"],
-          dependencies=[Depends(_verify_auth_and_rate)])
+@app.post("/api/v1/accounts/", tags=["账户管理"], dependencies=[Depends(_verify_auth_and_rate)])
 def register_account_api(body: AccountRegisterBody) -> dict:
     """注册或更新账户（account_id 存在则合并更新）。"""
     from core.account_registry import account_registry
+
     payload = body.model_dump()
     return account_registry.register_account(payload)
 
 
-@app.get("/api/v1/accounts/{account_id}", tags=["账户管理"],
-         dependencies=[Depends(_verify_auth_and_rate)])
+@app.get(
+    "/api/v1/accounts/{account_id}",
+    tags=["账户管理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
 def get_account_api(account_id: str) -> dict:
     """获取单个账户详情。"""
     from core.account_registry import account_registry
+
     data = account_registry.get_account(account_id)
     if data is None:
         raise HTTPException(
@@ -888,11 +912,15 @@ def get_account_api(account_id: str) -> dict:
     return data
 
 
-@app.delete("/api/v1/accounts/{account_id}", tags=["账户管理"],
-            dependencies=[Depends(_verify_auth_and_rate)])
+@app.delete(
+    "/api/v1/accounts/{account_id}",
+    tags=["账户管理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
 def delete_account_api(account_id: str) -> dict:
     """注销账户（幂等：不存在时返回 404）。"""
     from core.account_registry import account_registry
+
     deleted = account_registry.delete_account(account_id)
     if not deleted:
         raise HTTPException(
@@ -907,41 +935,47 @@ def delete_account_api(account_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/v1/market/subscribe", tags=["行情"],
-          dependencies=[Depends(_verify_auth_and_rate)])
+@app.post("/api/v1/market/subscribe", tags=["行情"], dependencies=[Depends(_verify_auth_and_rate)])
 def subscribe_symbol(req: SubscribeRequest) -> dict:
     """
     订阅标的实时行情（通过 QMT xtdata）。
 
-    QMT 不可用时优雅降级，返回 source=mock。
+    QMT 不可用时返回 source=error（禁止 mock 降级）。
     重复订阅同一标的安全幂等。
     """
     try:
         from core.qmt_feed import qmt_feed
+
         result = qmt_feed.subscribe(req.symbol, req.period)
     except Exception as exc:
         result = {"subscribed": False, "source": "error", "message": str(exc)}
     return {"symbol": req.symbol, "period": req.period, **result}
 
 
-@app.delete("/api/v1/market/subscribe/{symbol}", tags=["行情"],
-            dependencies=[Depends(_verify_auth_and_rate)])
+@app.delete(
+    "/api/v1/market/subscribe/{symbol}",
+    tags=["行情"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
 def unsubscribe_symbol(symbol: str) -> dict:
     """取消订阅指定标的实时行情。"""
     try:
         from core.qmt_feed import qmt_feed
+
         result = qmt_feed.unsubscribe(symbol)
     except Exception as exc:
         result = {"unsubscribed": False, "message": str(exc)}
     return {"symbol": symbol, **result}
 
 
-@app.get("/api/v1/market/subscriptions", tags=["行情"],
-         dependencies=[Depends(_verify_auth_and_rate)])
+@app.get(
+    "/api/v1/market/subscriptions", tags=["行情"], dependencies=[Depends(_verify_auth_and_rate)]
+)
 def list_subscriptions() -> dict:
     """列出当前所有 QMT 实时行情订阅及统计信息。"""
     try:
         from core.qmt_feed import qmt_feed
+
         subs = qmt_feed.all_subscriptions()
         stats = qmt_feed.stats()
     except Exception:
@@ -967,7 +1001,7 @@ async def ws_market(
     鉴权：通过 ?token=<api_token> 查询参数（EASYXT_API_TOKEN 为空时不校验）。
     数据格式：{"symbol": ..., "price": ..., "event_ts_ms": <ms>, "seq": <int>, "source": ...}
     客户端去重键：symbol + seq
-    接入 QMT 后用 ingest_tick_from_thread() 替代 mock 推送。
+    数据通过 ingest_tick_from_thread() 从 QMT 实时推送（无 mock）。
     """
     if _API_TOKEN and token != _API_TOKEN:
         await websocket.close(code=4001, reason="Unauthorized")
@@ -977,14 +1011,15 @@ async def ws_market(
     await broadcaster.asubscribe(symbol, websocket)
     log.info("WS 订阅 symbol=%s 当前订阅数=%d", symbol, broadcaster.subscriber_count(symbol))
 
-    # QMT 未订阅该标的时启动 mock 推送（开发/测试降级）
+    # 自动通过 QMT 订阅该标的实时行情（禁止 mock 降级）
     try:
         from core.qmt_feed import qmt_feed as _qf
-        _qmt_active = _qf.is_subscribed(symbol)
-    except ImportError:
-        _qmt_active = False
-    if not _qmt_active and (symbol not in _mock_tick_tasks or _mock_tick_tasks[symbol].done()):
-        _mock_tick_tasks[symbol] = asyncio.create_task(_mock_tick_loop(symbol))
+
+        if not _qf.is_subscribed(symbol):
+            _qf.subscribe(symbol, period="tick")
+            log.info("WS 触发自动订阅 symbol=%s via qmt_feed", symbol)
+    except Exception as exc:
+        log.warning("WS 自动订阅失败 symbol=%s: %s", symbol, exc)
 
     try:
         while True:
@@ -1003,8 +1038,11 @@ async def ws_market(
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/v1/data/financial/{stock_code}", tags=["数据查询"],
-         dependencies=[Depends(_verify_auth_and_rate)])
+@app.get(
+    "/api/v1/data/financial/{stock_code}",
+    tags=["数据查询"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
 def get_financial_data(
     stock_code: str,
     start_date: str = "",
@@ -1065,8 +1103,11 @@ def get_financial_data(
     return payload
 
 
-@app.post("/api/v1/data/financial/{stock_code}/refresh", tags=["数据查询"],
-          dependencies=[Depends(_verify_auth_and_rate)])
+@app.post(
+    "/api/v1/data/financial/{stock_code}/refresh",
+    tags=["数据查询"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
 def refresh_financial_data(
     stock_code: str,
     start_date: str = "",
@@ -1114,11 +1155,15 @@ def refresh_financial_data(
 
         # 若 QMT 未写入任何数据，降级到 Tushare
         ts_result: dict[str, Any] = {"success": False, "skip_reason": "not_attempted"}
-        qmt_wrote = qmt_result.get("success") and (
-            int(qmt_result.get("income_count", 0))
-            + int(qmt_result.get("balance_count", 0))
-            + int(qmt_result.get("cashflow_count", 0))
-        ) > 0
+        qmt_wrote = (
+            qmt_result.get("success")
+            and (
+                int(qmt_result.get("income_count", 0))
+                + int(qmt_result.get("balance_count", 0))
+                + int(qmt_result.get("cashflow_count", 0))
+            )
+            > 0
+        )
         if not qmt_wrote:
             ts_result = saver.save_from_tushare(
                 stock_code, start_date=start_date, end_date=end_date
@@ -1162,12 +1207,11 @@ def prometheus_metrics() -> Response:
     """
     # 采集当前值
     uptime_s = (
-        round(time.monotonic() - _server_start_time, 1)
-        if _server_start_time is not None
-        else 0.0
+        round(time.monotonic() - _server_start_time, 1) if _server_start_time is not None else 0.0
     )
     try:
         from strategies.registry import strategy_registry
+
         running_count = len(strategy_registry.list_running())
     except Exception:
         running_count = -1
@@ -1191,6 +1235,7 @@ def prometheus_metrics() -> Response:
         except Exception:
             pass
         from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
         return Response(
             content=generate_latest(_prom_registry),
             media_type=CONTENT_TYPE_LATEST,

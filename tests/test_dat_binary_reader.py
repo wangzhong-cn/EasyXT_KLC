@@ -27,11 +27,15 @@ import pytest
 from data_manager.dat_binary_reader import (
     DATBinaryReader,
     _build_dat_path,
+    _build_tick_dat_paths,
+    _read_tick_dat_numpy,
+    read_tick_dat,
     _symbol_to_market_code,
     _read_dat_numpy,
     read_dat,
     HEADER_SIZE,
     RECORD_SIZE,
+    TICK_RECORD_SIZE,
     UTC8_OFFSET,
 )
 from data_manager.datasource_registry import DataSourceRegistry, DATBinarySource
@@ -470,3 +474,227 @@ class TestDATBinarySourceHealth:
         src = DATBinarySource(reader)
         df = src.get_data("600519.SH", "2023-01-01", "2023-12-31", "1d", "none")
         assert df.empty
+
+
+# ─── 工具函数：构造合法 Tick DAT 文件 ─────────────────────────────────────────
+
+def _make_tick_dat_file(
+    dir_path: Path,
+    date_str: str = "20230103",
+    n_records: int = 3,
+    base_time_ms: int = 1672709400000,  # 2023-01-03 09:30:00 CST (UTC ms)
+    last_price_raw: int = 13500,        # 13.500 yuan × 1000
+    volume: int = 100,                  # 100 lots
+    amount: int = 1350000,              # 1,350,000 yuan
+) -> Path:
+    """在 dir_path/{date_str}.dat 写 N 条合法 tick 记录（144 字节/记录，无文件头）。"""
+    dat_path = dir_path / f"{date_str}.dat"
+    with dat_path.open("wb") as f:
+        for i in range(n_records):
+            ms = base_time_ms + i * 3000  # +3 秒/条
+            # 1×int64 + 34×uint32 = 144 bytes（格式契约：TICK_RECORD_SIZE = 144）
+            f.write(struct.pack(
+                "<q" + "I" * 34,
+                ms,            # time_ms（UTC epoch ms）
+                last_price_raw,  # lastPrice × 1000
+                0,             # stockFlags
+                amount,        # amount（yuan）
+                0,             # _pad1
+                volume,        # volume（lots）
+                13,            # stockStatus (13=连续竞价)
+                0,             # _pad2
+                i + 1,         # tradeNum（累计笔数）
+                0,             # _pad3
+                13400,         # open × 1000
+                13600,         # high × 1000
+                13400,         # low × 1000
+                0,             # _pad4
+                13200,         # lastClose × 1000
+                13520,         # askPrice1 × 1000
+                13530,         # askPrice2 × 1000
+                13540,         # askPrice3 × 1000
+                13550,         # askPrice4 × 1000
+                13560,         # askPrice5 × 1000
+                100,           # askVol1
+                200,           # askVol2
+                300,           # askVol3
+                400,           # askVol4
+                500,           # askVol5
+                13490,         # bidPrice1 × 1000
+                13480,         # bidPrice2 × 1000
+                13470,         # bidPrice3 × 1000
+                13460,         # bidPrice4 × 1000
+                13450,         # bidPrice5 × 1000
+                150,           # bidVol1
+                250,           # bidVol2
+                350,           # bidVol3
+                450,           # bidVol4
+                550,           # bidVol5
+            ))
+    return dat_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Class I: Tick DAT 读取器格式契约与行为测试
+# ══════════════════════════════════════════════════════════════════════════════
+class TestTickDATReader:
+
+    # ── 格式常量契约 ────────────────────────────────────────────────────────────
+
+    def test_tick_record_size_is_144(self):
+        """格式契约：每条记录必须 144 字节（无文件头）"""
+        assert TICK_RECORD_SIZE == 144
+
+    def test_tick_dtype_total_bytes(self):
+        """_TICK_DTYPE.itemsize = 1×int64 + 34×uint32 = 8+136 = 144"""
+        from data_manager.dat_binary_reader import _TICK_DTYPE
+        assert _TICK_DTYPE.itemsize == 144
+
+    # ── _read_tick_dat_numpy 边界情形 ──────────────────────────────────────────
+
+    def test_read_empty_file_returns_empty(self, tmp_path):
+        """空文件（0 字节）→ 返回空 DataFrame"""
+        p = tmp_path / "20230103.dat"
+        p.write_bytes(b"")
+        df = _read_tick_dat_numpy(p)
+        assert df.empty
+
+    def test_read_nonexistent_file_returns_empty(self, tmp_path):
+        """文件不存在 → 返回空 DataFrame（不抛异常）"""
+        p = tmp_path / "ghost.dat"
+        df = _read_tick_dat_numpy(p)
+        assert df.empty
+
+    def test_record_count_matches(self, tmp_path):
+        """写入 N 条记录 → 读出 N 条"""
+        _make_tick_dat_file(tmp_path, n_records=5)
+        df = _read_tick_dat_numpy(tmp_path / "20230103.dat")
+        assert len(df) == 5
+
+    # ── 字段解码正确性 ─────────────────────────────────────────────────────────
+
+    def test_price_divided_by_1000(self, tmp_path):
+        """lastPrice raw=13500 → 读出 13.5 yuan"""
+        _make_tick_dat_file(tmp_path, last_price_raw=13500)
+        df = _read_tick_dat_numpy(tmp_path / "20230103.dat")
+        assert abs(df["lastPrice"].iloc[0] - 13.5) < 1e-6
+
+    def test_volume_is_int64(self, tmp_path):
+        """volume 字段类型应为 int64"""
+        _make_tick_dat_file(tmp_path, volume=200)
+        df = _read_tick_dat_numpy(tmp_path / "20230103.dat")
+        assert df["volume"].dtype == np.int64
+        assert df["volume"].iloc[0] == 200
+
+    def test_amount_is_int64(self, tmp_path):
+        """amount 字段类型应为 int64"""
+        _make_tick_dat_file(tmp_path, amount=5_000_000)
+        df = _read_tick_dat_numpy(tmp_path / "20230103.dat")
+        assert df["amount"].dtype == np.int64
+        assert df["amount"].iloc[0] == 5_000_000
+
+    def test_timestamp_converts_to_beijing(self, tmp_path):
+        """UTC ms 1672709400000 → 北京时间 2023-01-03 09:30:00"""
+        # 1672709400000 ms = 2023-01-03 01:30:00 UTC
+        # + UTC8_OFFSET_MS (+8h) → naive 2023-01-03 09:30:00
+        _make_tick_dat_file(tmp_path, base_time_ms=1672709400000, n_records=1)
+        df = _read_tick_dat_numpy(tmp_path / "20230103.dat")
+        assert df.index[0] == pd.Timestamp("2023-01-03 09:30:00")
+
+    def test_index_name_is_datetime(self, tmp_path):
+        """index.name 应为 'datetime'"""
+        _make_tick_dat_file(tmp_path)
+        df = _read_tick_dat_numpy(tmp_path / "20230103.dat")
+        assert df.index.name == "datetime"
+
+    def test_ask_bid_prices_decoded(self, tmp_path):
+        """卖盘/买盘价格：raw=13520 → 13.52 yuan；raw=13490 → 13.49 yuan"""
+        _make_tick_dat_file(tmp_path, n_records=1)
+        df = _read_tick_dat_numpy(tmp_path / "20230103.dat")
+        assert abs(df["askPrice1"].iloc[0] - 13.52) < 1e-6
+        assert abs(df["bidPrice1"].iloc[0] - 13.49) < 1e-6
+
+    def test_columns_present(self, tmp_path):
+        """所有必需列均存在"""
+        _make_tick_dat_file(tmp_path)
+        df = _read_tick_dat_numpy(tmp_path / "20230103.dat")
+        required = {
+            "lastPrice", "volume", "amount", "open", "high", "low", "lastClose",
+            "askPrice1", "askPrice2", "askPrice3", "askPrice4", "askPrice5",
+            "askVol1",   "askVol2",  "askVol3",  "askVol4",  "askVol5",
+            "bidPrice1", "bidPrice2", "bidPrice3", "bidPrice4", "bidPrice5",
+            "bidVol1",   "bidVol2",  "bidVol3",  "bidVol4",  "bidVol5",
+        }
+        assert required.issubset(set(df.columns))
+
+    # ── _build_tick_dat_paths 路径构建 ─────────────────────────────────────────
+
+    def test_build_tick_paths_returns_sorted(self, tmp_path):
+        """返回按日期升序排列的文件列表"""
+        tick_dir = tmp_path / "SZ" / "0" / "000001"
+        tick_dir.mkdir(parents=True)
+        for d in ["20230105", "20230103", "20230104"]:
+            (tick_dir / f"{d}.dat").write_bytes(b"")
+        paths = _build_tick_dat_paths(tmp_path, "000001.SZ")
+        stems = [p.stem for p in paths]
+        assert stems == sorted(stems)
+
+    def test_build_tick_paths_date_filter(self, tmp_path):
+        """start/end_date 正确过滤日文件"""
+        tick_dir = tmp_path / "SZ" / "0" / "000001"
+        tick_dir.mkdir(parents=True)
+        for d in ["20230101", "20230102", "20230103", "20230104", "20230105"]:
+            (tick_dir / f"{d}.dat").write_bytes(b"")
+        paths = _build_tick_dat_paths(tmp_path, "000001.SZ", "20230102", "20230104")
+        stems = [p.stem for p in paths]
+        assert stems == ["20230102", "20230103", "20230104"]
+
+    def test_build_tick_paths_no_dir_returns_empty(self, tmp_path):
+        """品种目录不存在时返回空列表"""
+        paths = _build_tick_dat_paths(tmp_path, "600519.SH")
+        assert paths == []
+
+    # ── read_tick_dat 多日合并 ────────────────────────────────────────────────
+
+    def test_read_tick_dat_multi_day_concat(self, tmp_path):
+        """read_tick_dat 自动合并多日文件，结果按时间升序"""
+        tick_dir = tmp_path / "SZ" / "0" / "000001"
+        tick_dir.mkdir(parents=True)
+        # 2023-01-03 09:30:00 CST → UTC ms 1672709400000
+        _make_tick_dat_file(tick_dir, date_str="20230103", n_records=3,
+                            base_time_ms=1672709400000)
+        # 2023-01-04 09:30:00 CST → +86400000 ms
+        _make_tick_dat_file(tick_dir, date_str="20230104", n_records=2,
+                            base_time_ms=1672795800000)
+        df = read_tick_dat("000001.SZ", qmt_base=tmp_path)
+        assert len(df) == 5
+        assert df.index.is_monotonic_increasing
+
+    def test_read_tick_dat_no_dir_returns_empty(self, tmp_path):
+        """品种无文件时返回空 DataFrame"""
+        df = read_tick_dat("999999.SZ", qmt_base=tmp_path)
+        assert df.empty
+
+    def test_read_tick_dat_date_range_filters(self, tmp_path):
+        """start_date/end_date 参数正确过滤日文件"""
+        tick_dir = tmp_path / "SZ" / "0" / "000001"
+        tick_dir.mkdir(parents=True)
+        _make_tick_dat_file(tick_dir, date_str="20230103", n_records=2,
+                            base_time_ms=1672709400000)
+        _make_tick_dat_file(tick_dir, date_str="20230104", n_records=2,
+                            base_time_ms=1672795800000)
+        df = read_tick_dat("000001.SZ", start_date="20230104", qmt_base=tmp_path)
+        assert len(df) == 2
+
+    # ── DATBinaryReader.get_tick_data ─────────────────────────────────────────
+
+    def test_dat_binary_reader_get_tick_data(self, tmp_path):
+        """DATBinaryReader.get_tick_data() 正确代理 read_tick_dat"""
+        tick_dir = tmp_path / "SH" / "0" / "600519"
+        tick_dir.mkdir(parents=True)
+        _make_tick_dat_file(tick_dir, date_str="20230103", n_records=2,
+                            base_time_ms=1672709400000)
+        reader = DATBinaryReader(qmt_base=tmp_path)
+        df = reader.get_tick_data("600519.SH", "2023-01-01", "2023-12-31")
+        assert len(df) == 2
+        assert "lastPrice" in df.columns

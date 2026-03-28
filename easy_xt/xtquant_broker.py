@@ -2,26 +2,26 @@ import importlib
 import threading
 from typing import Any, Optional
 
+from core.xtdata_lock import xtdata_call_lock as _xtdata_call_lock  # noqa: F401 — 向后兼容
+from core.xtdata_lock import xtdata_submit as _xtdata_submit
+
 
 class XtQuantBroker:
     def __init__(self):
-        self._call_lock = threading.RLock()
         self._xtdata = None
 
     def _ensure_xtdata(self):
         if self._xtdata is not None:
             return self._xtdata
-        with self._call_lock:
-            if self._xtdata is not None:
-                return self._xtdata
-            self._xtdata = importlib.import_module("xtquant.xtdata")
-            return self._xtdata
+        self._xtdata = importlib.import_module("xtquant.xtdata")
+        return self._xtdata
 
     def call_xtdata(self, method_name: str, *args, **kwargs):
-        with self._call_lock:
+        def _work():
             xtdata = self._ensure_xtdata()
             method = getattr(xtdata, method_name)
             return method(*args, **kwargs)
+        return _xtdata_submit(_work)
 
     def get_full_tick(self, codes: list[str]):
         return self.call_xtdata("get_full_tick", codes)

@@ -153,7 +153,7 @@ class TestCacheManagerSetGet:
         assert result == d
 
     def test_set_and_get_dataframe(self):
-        df = pd.DataFrame({"close": [100.0, 101.0]})
+        df = pd.DataFrame({"label": ["A", "B"], "value": [1, 2]})
         cache_manager.set("data", "df_key", df, level=CacheLevel.MEMORY)
         result = cache_manager.get("data", "df_key", level=CacheLevel.MEMORY)
         pd.testing.assert_frame_equal(result, df)

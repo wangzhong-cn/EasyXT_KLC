@@ -1,6 +1,7 @@
 """高级交易API模块
 提供更丰富的交易功能和回调机制
 """
+
 import datetime
 import os
 import sys
@@ -9,15 +10,17 @@ from threading import Event, Thread
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-_SH = ZoneInfo('Asia/Shanghai')
+_SH = ZoneInfo("Asia/Shanghai")
 
 import pandas as pd
 
 from .config import config
+from core.xtdata_lock import xtdata_submit as _xtdata_submit
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
-xtquant_path = os.path.join(project_root, 'xtquant')
+xtquant_path = os.path.join(project_root, "xtquant")
+
 
 def _find_qmt_python_root(root: str) -> Optional[str]:
     if not root or not os.path.isdir(root):
@@ -46,18 +49,20 @@ def _ensure_xtquant_paths() -> Optional[str]:
             base = value
             if "userdata" in value.lower():
                 base = os.path.dirname(value)
-            candidates.extend([
-                base,
-                os.path.dirname(base),
-                os.path.join(base, "bin"),
-                os.path.join(base, "bin.x64"),
-                os.path.join(base, "python"),
-                os.path.join(base, "python", "Lib", "site-packages"),
-                os.path.join(base, "Lib", "site-packages"),
-                os.path.join(base, "lib"),
-                os.path.join(base, "lib", "site-packages"),
-                os.path.join(base, "xtquant"),
-            ])
+            candidates.extend(
+                [
+                    base,
+                    os.path.dirname(base),
+                    os.path.join(base, "bin"),
+                    os.path.join(base, "bin.x64"),
+                    os.path.join(base, "python"),
+                    os.path.join(base, "python", "Lib", "site-packages"),
+                    os.path.join(base, "Lib", "site-packages"),
+                    os.path.join(base, "lib"),
+                    os.path.join(base, "lib", "site-packages"),
+                    os.path.join(base, "xtquant"),
+                ]
+            )
     found_root = None
     found_xtquant_dir = None
     for path in candidates:
@@ -78,6 +83,7 @@ def _ensure_xtquant_paths() -> Optional[str]:
 _qmt_xtquant_dir = _ensure_xtquant_paths()
 try:
     import xtquant as _xtquant_pkg
+
     if _qmt_xtquant_dir and _qmt_xtquant_dir not in _xtquant_pkg.__path__:
         _xtquant_pkg.__path__.append(_qmt_xtquant_dir)
 except Exception:
@@ -90,7 +96,7 @@ try:
     import xtquant.xtconstant as xt_const
     import xtquant.xttrader as xt_trader
     import xtquant.xttype as xt_type
-    from xtquant import xtdata
+
     print("xtquant高级交易模块导入成功")
 except ImportError as e:
     print(f"[WARNING] xtquant高级交易模块导入失败: {e}")
@@ -187,6 +193,7 @@ class AdvancedCallback:
             except Exception as e:
                 print(f"用户错误回调异常: {e}")
 
+
 class AdvancedTradeAPI:
     """高级交易API类"""
 
@@ -194,20 +201,20 @@ class AdvancedTradeAPI:
         self.trader = None
         self.callback = None
         self.accounts = {}
-        self._session_id = config.get('trade.session_id', 'advanced')
+        self._session_id = config.get("trade.session_id", "advanced")
 
         # 风险管理参数
         self.risk_params = {
-            'max_position_ratio': 0.3,
-            'max_single_order_amount': 10000,
-            'slippage': 0.002
+            "max_position_ratio": 0.3,
+            "max_single_order_amount": 10000,
+            "slippage": 0.002,
         }
 
         # 异步订单管理
         self.async_orders = {}
         self.order_sequence = 0
 
-    def connect(self, userdata_path: str, session_id: str = 'advanced') -> bool:
+    def connect(self, userdata_path: str, session_id: str = "advanced") -> bool:
         """连接交易服务"""
         """连接交易服务"""
         if not xt_trader:
@@ -229,7 +236,11 @@ class AdvancedTradeAPI:
 
             # 创建交易对象
             try:
-                session_int = int(self._session_id) if self._session_id.isdigit() else hash(self._session_id) % 10000
+                session_int = (
+                    int(self._session_id)
+                    if self._session_id.isdigit()
+                    else hash(self._session_id) % 10000
+                )
                 self.trader = xt_trader.XtQuantTrader(userdata_path, session_int, self.callback)
             except Exception as create_error:
                 ErrorHandler.log_error(f"创建高级交易对象失败: {str(create_error)}")
@@ -259,7 +270,7 @@ class AdvancedTradeAPI:
         else:
             print("[WARNING] 回调对象未初始化")
 
-    def add_account(self, account_id: str, account_type: str = 'STOCK') -> bool:
+    def add_account(self, account_id: str, account_type: str = "STOCK") -> bool:
         """添加交易账户"""
         if not self.trader:
             ErrorHandler.log_error("高级交易服务未连接")
@@ -271,7 +282,7 @@ class AdvancedTradeAPI:
                     ErrorHandler.log_error("账户ID为空")
                     return False
                 if account_type is None:
-                    account_type = 'STOCK'
+                    account_type = "STOCK"
                 if isinstance(account_type, int):
                     if xt_const and hasattr(xt_const, "ACCOUNT_TYPE_DICT"):
                         account_type = xt_const.ACCOUNT_TYPE_DICT.get(account_type, account_type)
@@ -296,13 +307,17 @@ class AdvancedTradeAPI:
             ErrorHandler.log_error(f"添加高级交易账户失败: {str(e)}")
             return False
 
-    def set_risk_params(self, max_position_ratio=0.3, max_single_order_amount=10000, slippage=0.002):
+    def set_risk_params(
+        self, max_position_ratio=0.3, max_single_order_amount=10000, slippage=0.002
+    ):
         """设置风险参数"""
-        self.risk_params.update({
-            'max_position_ratio': max_position_ratio,
-            'max_single_order_amount': max_single_order_amount,
-            'slippage': slippage
-        })
+        self.risk_params.update(
+            {
+                "max_position_ratio": max_position_ratio,
+                "max_single_order_amount": max_single_order_amount,
+                "slippage": slippage,
+            }
+        )
         print("风险参数设置完成")
 
     def check_trading_time(self) -> bool:
@@ -318,21 +333,28 @@ class AdvancedTradeAPI:
         reasons = []
 
         # 检查金额限制
-        if amount > self.risk_params['max_single_order_amount']:
-            reasons.append(f"超过单笔最大交易金额限制: {self.risk_params['max_single_order_amount']}")
+        if amount > self.risk_params["max_single_order_amount"]:
+            reasons.append(
+                f"超过单笔最大交易金额限制: {self.risk_params['max_single_order_amount']}"
+            )
 
         # 检查交易时间
         if not self.check_trading_time():
             reasons.append("当前不是交易时间")
 
-        return {
-            'valid': len(reasons) == 0,
-            'reasons': reasons
-        }
+        return {"valid": len(reasons) == 0, "reasons": reasons}
 
-    def sync_order(self, account_id: str, code: str, order_type: str, volume: int,
-                   price: float = 0, price_type: str = 'market',
-                   strategy_name: str = 'EasyXT', order_remark: str = '') -> Optional[int]:
+    def sync_order(
+        self,
+        account_id: str,
+        code: str,
+        order_type: str,
+        volume: int,
+        price: float = 0,
+        price_type: str = "market",
+        strategy_name: str = "EasyXT",
+        order_remark: str = "",
+    ) -> Optional[int]:
         """同步下单"""
         if not self.trader or account_id not in self.accounts:
             ErrorHandler.log_error("高级交易服务未连接或账户未添加")
@@ -344,14 +366,20 @@ class AdvancedTradeAPI:
         # 价格类型映射
         # 为了与xt_trader保持一致，市价单使用LATEST_PRICE
         price_type_map = {
-            'market': xt_const.LATEST_PRICE if xt_const else 5,  # 市价单使用最新价
-            'limit': xt_const.FIX_PRICE if xt_const else 11,      # 限价单使用指定价
-            '市价': xt_const.LATEST_PRICE if xt_const else 5,
-            '限价': xt_const.FIX_PRICE if xt_const else 11
+            "market": xt_const.LATEST_PRICE if xt_const else 5,  # 市价单使用最新价
+            "limit": xt_const.FIX_PRICE if xt_const else 11,  # 限价单使用指定价
+            "市价": xt_const.LATEST_PRICE if xt_const else 5,
+            "限价": xt_const.FIX_PRICE if xt_const else 11,
         }
 
         xt_price_type = price_type_map.get(price_type, xt_const.LATEST_PRICE if xt_const else 5)
-        xt_order_type = xt_const.STOCK_BUY if xt_const and order_type == 'buy' else xt_const.STOCK_SELL if xt_const else 24
+        xt_order_type = (
+            xt_const.STOCK_BUY
+            if xt_const and order_type == "buy"
+            else xt_const.STOCK_SELL
+            if xt_const
+            else 24
+        )
 
         try:
             order_id = self.trader.order_stock(
@@ -362,7 +390,7 @@ class AdvancedTradeAPI:
                 price_type=xt_price_type,
                 price=price,
                 strategy_name=strategy_name,
-                order_remark=order_remark or f'{order_type}_{code}'
+                order_remark=order_remark or f"{order_type}_{code}",
             )
 
             if order_id > 0:
@@ -376,9 +404,17 @@ class AdvancedTradeAPI:
             ErrorHandler.log_error(f"同步下单操作失败: {str(e)}")
             return None
 
-    def async_order(self, account_id: str, code: str, order_type: str, volume: int,
-                    price: float = 0, price_type: str = 'market',
-                    strategy_name: str = 'EasyXT', order_remark: str = '') -> bool:
+    def async_order(
+        self,
+        account_id: str,
+        code: str,
+        order_type: str,
+        volume: int,
+        price: float = 0,
+        price_type: str = "market",
+        strategy_name: str = "EasyXT",
+        order_remark: str = "",
+    ) -> bool:
         """异步下单 - 真正的异步方式，不等待结果，通过回调处理"""
         if not self.trader or account_id not in self.accounts:
             ErrorHandler.log_error("高级交易服务未连接或账户未添加")
@@ -389,14 +425,20 @@ class AdvancedTradeAPI:
 
         # 价格类型映射
         price_type_map = {
-            'market': xt_const.LATEST_PRICE if xt_const else 5,
-            'limit': xt_const.FIX_PRICE if xt_const else 11,
-            '市价': xt_const.LATEST_PRICE if xt_const else 5,
-            '限价': xt_const.FIX_PRICE if xt_const else 11
+            "market": xt_const.LATEST_PRICE if xt_const else 5,
+            "limit": xt_const.FIX_PRICE if xt_const else 11,
+            "市价": xt_const.LATEST_PRICE if xt_const else 5,
+            "限价": xt_const.FIX_PRICE if xt_const else 11,
         }
 
         xt_price_type = price_type_map.get(price_type, xt_const.LATEST_PRICE if xt_const else 5)
-        xt_order_type = xt_const.STOCK_BUY if xt_const and order_type == 'buy' else xt_const.STOCK_SELL if xt_const else 24
+        xt_order_type = (
+            xt_const.STOCK_BUY
+            if xt_const and order_type == "buy"
+            else xt_const.STOCK_SELL
+            if xt_const
+            else 24
+        )
 
         try:
             # 发送下单请求后立即返回，不等待结果
@@ -408,7 +450,7 @@ class AdvancedTradeAPI:
                 price_type=xt_price_type,
                 price=price,
                 strategy_name=strategy_name,
-                order_remark=order_remark or f'{order_type}_{code}'
+                order_remark=order_remark or f"{order_type}_{code}",
             )
 
             # 立即返回True表示请求已发送（不表示执行成功）
@@ -425,13 +467,13 @@ class AdvancedTradeAPI:
         for order in orders:
             order_id = self.sync_order(
                 account_id,
-                order['code'],
-                order['order_type'],
-                order['volume'],
-                order.get('price', 0),
-                order.get('price_type', 'market'),
-                order.get('strategy_name', 'EasyXT'),
-                order.get('order_remark', '')
+                order["code"],
+                order["order_type"],
+                order["volume"],
+                order.get("price", 0),
+                order.get("price_type", "market"),
+                order.get("strategy_name", "EasyXT"),
+                order.get("order_remark", ""),
             )
             results.append(order_id)
             time.sleep(0.1)  # 避免过快下单
@@ -443,35 +485,44 @@ class AdvancedTradeAPI:
         for order in orders:
             success = self.async_order(
                 account_id,
-                order['code'],
-                order['order_type'],
-                order['volume'],
-                order.get('price', 0),
-                order.get('price_type', 'market'),
-                order.get('strategy_name', 'EasyXT'),
-                order.get('order_remark', '')
+                order["code"],
+                order["order_type"],
+                order["volume"],
+                order.get("price", 0),
+                order.get("price_type", "market"),
+                order.get("strategy_name", "EasyXT"),
+                order.get("order_remark", ""),
             )
             results.append(success)
             time.sleep(0.1)  # 避免过快下单
         return results
 
-    def condition_order(self, account_id: str, code: str, condition_type: str,
-                       trigger_price: float, order_type: str, volume: int,
-                       target_price: float = 0) -> bool:
+    def condition_order(
+        self,
+        account_id: str,
+        code: str,
+        condition_type: str,
+        trigger_price: float,
+        order_type: str,
+        volume: int,
+        target_price: float = 0,
+    ) -> bool:
         """条件单（真实实现）
 
         通过后台线程监控价格，当达到触发条件时执行交易
         """
         try:
-            # 使用xtdata.get_full_tick获取实时行情数据，这是EasyXT中使用的方法
-
-            from xtquant import xtdata
-
             # 获取当前价格
             normalized_code = StockCodeUtils.normalize_code(code)
             tick_data = None
             try:
-                tick_data = xtdata.get_full_tick([normalized_code])
+
+                def _get_tick():
+                    import xtquant.xtdata as _xtdata
+
+                    return _xtdata.get_full_tick([normalized_code])
+
+                tick_data = _xtdata_submit(_get_tick)
             except Exception as e:
                 print(f"获取实时行情失败: {str(e)}")
                 tick_data = None
@@ -479,28 +530,42 @@ class AdvancedTradeAPI:
             current_price = 0.0
             if tick_data and normalized_code in tick_data:
                 tick_info = tick_data[normalized_code]
-                if tick_info and 'lastPrice' in tick_info:
-                    current_price = float(tick_info['lastPrice'])
-                elif tick_info and 'price' in tick_info:
-                    current_price = float(tick_info['price'])
+                if tick_info and "lastPrice" in tick_info:
+                    current_price = float(tick_info["lastPrice"])
+                elif tick_info and "price" in tick_info:
+                    current_price = float(tick_info["price"])
 
             # 如果get_full_tick失败，再尝试get_market_data作为备选
             if current_price == 0:
                 try:
-                    current_data = xtdata.get_market_data(
-                        stock_list=[normalized_code],
-                        period='tick',
-                        count=1
-                    )
 
-                    if current_data and isinstance(current_data, dict) and normalized_code in current_data:
+                    def _get_market_data():
+                        import xtquant.xtdata as _xtdata
+
+                        return _xtdata.get_market_data(
+                            stock_list=[normalized_code], period="tick", count=1
+                        )
+
+                    current_data = _xtdata_submit(_get_market_data)
+
+                    if (
+                        current_data
+                        and isinstance(current_data, dict)
+                        and normalized_code in current_data
+                    ):
                         data_array = current_data[normalized_code]
-                        if hasattr(data_array, '__len__') and len(data_array) > 0:
+                        if hasattr(data_array, "__len__") and len(data_array) > 0:
                             first_item = data_array[0]
-                            if hasattr(first_item, 'lastPrice'):
-                                current_price = float(first_item['lastPrice'])
-                            elif hasattr(first_item, '__getitem__') and 'lastPrice' in first_item.dtype.names if hasattr(first_item, 'dtype') and hasattr(first_item.dtype, 'names') else False:
-                                current_price = float(first_item['lastPrice'])
+                            if hasattr(first_item, "lastPrice"):
+                                current_price = float(first_item["lastPrice"])
+                            elif (
+                                hasattr(first_item, "__getitem__")
+                                and "lastPrice" in first_item.dtype.names
+                                if hasattr(first_item, "dtype")
+                                and hasattr(first_item.dtype, "names")
+                                else False
+                            ):
+                                current_price = float(first_item["lastPrice"])
                 except Exception as e:
                     print(f"获取tick数据失败: {str(e)}")
                     current_price = 0
@@ -514,8 +579,17 @@ class AdvancedTradeAPI:
             # 启动条件单监控线程
             thread = Thread(
                 target=self._monitor_condition_order,
-                args=(account_id, code, condition_type, trigger_price, order_type, volume, target_price, current_price),
-                daemon=True
+                args=(
+                    account_id,
+                    code,
+                    condition_type,
+                    trigger_price,
+                    order_type,
+                    volume,
+                    target_price,
+                    current_price,
+                ),
+                daemon=True,
             )
             thread.start()
 
@@ -526,9 +600,17 @@ class AdvancedTradeAPI:
             print(f"条件单设置失败: {str(e)}")
             return False
 
-    def _monitor_condition_order(self, account_id: str, code: str, condition_type: str,
-                                trigger_price: float, order_type: str, volume: int,
-                                target_price: float, initial_price: float):
+    def _monitor_condition_order(
+        self,
+        account_id: str,
+        code: str,
+        condition_type: str,
+        trigger_price: float,
+        order_type: str,
+        volume: int,
+        target_price: float,
+        initial_price: float,
+    ):
         """后台监控条件单
 
         Args:
@@ -543,16 +625,14 @@ class AdvancedTradeAPI:
         """
         import time
 
-        from xtquant import xtdata
-
         code = StockCodeUtils.normalize_code(code)
 
         # 确定触发条件
-        if condition_type == 'stop_loss':
+        if condition_type == "stop_loss":
             # 止损：当价格跌破触发价时卖出
             def trigger_condition(current, trigger):
                 return current <= trigger
-        elif condition_type == 'take_profit':
+        elif condition_type == "take_profit":
             # 止盈：当价格涨过触发价时卖出
             def trigger_condition(current, trigger):
                 return current >= trigger
@@ -568,13 +648,19 @@ class AdvancedTradeAPI:
                 # 使用get_full_tick获取实时价格，这是最可靠的方法
                 current_price = None
                 try:
-                    tick_data = xtdata.get_full_tick([code])
+
+                    def _get_tick():
+                        import xtquant.xtdata as _xtdata
+
+                        return _xtdata.get_full_tick([code])
+
+                    tick_data = _xtdata_submit(_get_tick)
                     if tick_data and code in tick_data:
                         tick_info = tick_data[code]
-                        if tick_info and 'lastPrice' in tick_info:
-                            current_price = float(tick_info['lastPrice'])
-                        elif tick_info and 'price' in tick_info:
-                            current_price = float(tick_info['price'])
+                        if tick_info and "lastPrice" in tick_info:
+                            current_price = float(tick_info["lastPrice"])
+                        elif tick_info and "price" in tick_info:
+                            current_price = float(tick_info["price"])
                 except Exception as e:
                     print(f"获取实时tick数据失败: {str(e)}")
                     current_price = None
@@ -582,20 +668,30 @@ class AdvancedTradeAPI:
                 # 如果get_full_tick失败，尝试get_market_data作为备选
                 if current_price is None or current_price <= 0:
                     try:
-                        current_data = xtdata.get_market_data(
-                            stock_list=[code],
-                            period='tick',
-                            count=1
-                        )
+
+                        def _get_market_data():
+                            import xtquant.xtdata as _xtdata
+
+                            return _xtdata.get_market_data(
+                                stock_list=[code], period="tick", count=1
+                            )
+
+                        current_data = _xtdata_submit(_get_market_data)
 
                         if current_data and isinstance(current_data, dict) and code in current_data:
                             data_array = current_data[code]
-                            if hasattr(data_array, '__len__') and len(data_array) > 0:
+                            if hasattr(data_array, "__len__") and len(data_array) > 0:
                                 first_item = data_array[0]
-                                if hasattr(first_item, 'lastPrice'):
-                                    current_price = float(first_item['lastPrice'])
-                                elif hasattr(first_item, '__getitem__') and 'lastPrice' in first_item.dtype.names if hasattr(first_item, 'dtype') and hasattr(first_item.dtype, 'names') else False:
-                                    current_price = float(first_item['lastPrice'])
+                                if hasattr(first_item, "lastPrice"):
+                                    current_price = float(first_item["lastPrice"])
+                                elif (
+                                    hasattr(first_item, "__getitem__")
+                                    and "lastPrice" in first_item.dtype.names
+                                    if hasattr(first_item, "dtype")
+                                    and hasattr(first_item.dtype, "names")
+                                    else False
+                                ):
+                                    current_price = float(first_item["lastPrice"])
                     except Exception as e:
                         print(f"获取tick数据失败: {str(e)}")
                         current_price = None
@@ -605,13 +701,17 @@ class AdvancedTradeAPI:
 
                     # 检查是否触发条件
                     if trigger_condition(current_price, trigger_price):
-                        print(f"条件单触发: {code}, 当前价格: {current_price}, 触发价: {trigger_price}")
+                        print(
+                            f"条件单触发: {code}, 当前价格: {current_price}, 触发价: {trigger_price}"
+                        )
 
                         # 执行订单 - 使用目标价格或当前价格
                         execution_price = target_price if target_price > 0 else current_price
 
                         # 确保卖出方向
-                        actual_order_type = 'sell' if order_type.lower() in ['sell', '卖出'] else 'sell'
+                        actual_order_type = (
+                            "sell" if order_type.lower() in ["sell", "卖出"] else "sell"
+                        )
 
                         order_id = self.sync_order(
                             account_id=account_id,
@@ -619,7 +719,7 @@ class AdvancedTradeAPI:
                             order_type=actual_order_type,
                             volume=volume,
                             price=execution_price,
-                            price_type='limit' if target_price > 0 else 'market'
+                            price_type="limit" if target_price > 0 else "market",
                         )
 
                         if order_id:
@@ -630,7 +730,9 @@ class AdvancedTradeAPI:
                         # 执行完成后退出监控
                         break
                     else:
-                        print(f"条件未满足: {current_price} 与 {trigger_price} 的关系不满足触发条件")
+                        print(
+                            f"条件未满足: {current_price} 与 {trigger_price} 的关系不满足触发条件"
+                        )
                 else:
                     print(f"无法获取有效实时价格: {current_price}")
 
@@ -657,9 +759,13 @@ class AdvancedTradeAPI:
                 for order in orders:
                     if order.order_id == order_id:
                         # 检查订单状态，如果已成交或已撤销，不能撤单
-                        if hasattr(order, 'order_status'):
-                            if xt_const and order.order_status in [xt_const.ORDER_SUCCEEDED, xt_const.ORDER_CANCELED,
-                                                    xt_const.ORDER_PART_CANCEL, xt_const.ORDER_JUNK]:
+                        if hasattr(order, "order_status"):
+                            if xt_const and order.order_status in [
+                                xt_const.ORDER_SUCCEEDED,
+                                xt_const.ORDER_CANCELED,
+                                xt_const.ORDER_PART_CANCEL,
+                                xt_const.ORDER_JUNK,
+                            ]:
                                 print(f"委托 {order_id} 已成交或已撤销，无法撤单")
                                 return False
 
@@ -697,13 +803,13 @@ class AdvancedTradeAPI:
             asset = self.trader.query_stock_asset(account)
             if asset:
                 return {
-                    'account_id': asset.account_id,
-                    'cash': asset.cash,
-                    'frozen_cash': asset.frozen_cash,
-                    'market_value': asset.market_value,
-                    'total_asset': asset.total_asset,
-                    'profit_loss': getattr(asset, 'profit_loss', 0.0),
-                    'update_time': datetime.datetime.now(tz=_SH).strftime('%Y-%m-%d %H:%M:%S')
+                    "account_id": asset.account_id,
+                    "cash": asset.cash,
+                    "frozen_cash": asset.frozen_cash,
+                    "market_value": asset.market_value,
+                    "total_asset": asset.total_asset,
+                    "profit_loss": getattr(asset, "profit_loss", 0.0),
+                    "update_time": datetime.datetime.now(tz=_SH).strftime("%Y-%m-%d %H:%M:%S"),
                 }
             return None
 
@@ -711,7 +817,7 @@ class AdvancedTradeAPI:
             ErrorHandler.log_error(f"获取详细账户资产失败: {str(e)}")
             return None
 
-    def get_positions_detailed(self, account_id: str, code: str = '') -> pd.DataFrame:
+    def get_positions_detailed(self, account_id: str, code: str = "") -> pd.DataFrame:
         """获取详细持仓"""
         """获取详细持仓"""
         if not self.trader or account_id not in self.accounts:
@@ -725,18 +831,24 @@ class AdvancedTradeAPI:
                 code = StockCodeUtils.normalize_code(code)
                 position = self.trader.query_stock_position(account, code)
                 if position:
-                    return pd.DataFrame([{
-                        'code': position.stock_code,
-                        'stock_name': getattr(position, 'stock_name', ''),
-                        'volume': position.volume,
-                        'can_use_volume': position.can_use_volume,
-                        'open_price': position.open_price,
-                        'market_value': position.market_value,
-                        'frozen_volume': position.frozen_volume,
-                        'profit_loss': getattr(position, 'profit_loss', 0.0),
-                        'profit_loss_ratio': getattr(position, 'profit_loss_ratio', 0.0),
-                        'update_time': datetime.datetime.now(tz=_SH).strftime('%Y-%m-%d %H:%M:%S')
-                    }])
+                    return pd.DataFrame(
+                        [
+                            {
+                                "code": position.stock_code,
+                                "stock_name": getattr(position, "stock_name", ""),
+                                "volume": position.volume,
+                                "can_use_volume": position.can_use_volume,
+                                "open_price": position.open_price,
+                                "market_value": position.market_value,
+                                "frozen_volume": position.frozen_volume,
+                                "profit_loss": getattr(position, "profit_loss", 0.0),
+                                "profit_loss_ratio": getattr(position, "profit_loss_ratio", 0.0),
+                                "update_time": datetime.datetime.now(tz=_SH).strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                ),
+                            }
+                        ]
+                    )
                 else:
                     return pd.DataFrame()
             else:
@@ -744,18 +856,22 @@ class AdvancedTradeAPI:
                 if positions:
                     data = []
                     for pos in positions:
-                        data.append({
-                            'code': pos.stock_code,
-                            'stock_name': getattr(pos, 'stock_name', ''),
-                            'volume': pos.volume,
-                            'can_use_volume': pos.can_use_volume,
-                            'open_price': pos.open_price,
-                            'market_value': pos.market_value,
-                            'frozen_volume': pos.frozen_volume,
-                            'profit_loss': getattr(pos, 'profit_loss', 0.0),
-                            'profit_loss_ratio': getattr(pos, 'profit_loss_ratio', 0.0),
-                            'update_time': datetime.datetime.now(tz=_SH).strftime('%Y-%m-%d %H:%M:%S')
-                        })
+                        data.append(
+                            {
+                                "code": pos.stock_code,
+                                "stock_name": getattr(pos, "stock_name", ""),
+                                "volume": pos.volume,
+                                "can_use_volume": pos.can_use_volume,
+                                "open_price": pos.open_price,
+                                "market_value": pos.market_value,
+                                "frozen_volume": pos.frozen_volume,
+                                "profit_loss": getattr(pos, "profit_loss", 0.0),
+                                "profit_loss_ratio": getattr(pos, "profit_loss_ratio", 0.0),
+                                "update_time": datetime.datetime.now(tz=_SH).strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                ),
+                            }
+                        )
                     return pd.DataFrame(data)
                 else:
                     return pd.DataFrame()
@@ -777,31 +893,35 @@ class AdvancedTradeAPI:
             if orders:
                 data = []
                 for order in orders:
-                    order_type_name = '买入' if xt_const and order.order_type == xt_const.STOCK_BUY else '卖出'
+                    order_type_name = (
+                        "买入" if xt_const and order.order_type == xt_const.STOCK_BUY else "卖出"
+                    )
 
                     status_map = {
-                        (xt_const.ORDER_UNREPORTED if xt_const else 0): '未报',
-                        (xt_const.ORDER_WAIT_REPORTING if xt_const else 1): '待报',
-                        (xt_const.ORDER_REPORTED if xt_const else 2): '已报',
-                        (xt_const.ORDER_PART_SUCC if xt_const else 3): '部成',
-                        (xt_const.ORDER_SUCCEEDED if xt_const else 4): '已成',
-                        (xt_const.ORDER_PART_CANCEL if xt_const else 5): '部撤',
-                        (xt_const.ORDER_CANCELED if xt_const else 6): '已撤',
-                        (xt_const.ORDER_JUNK if xt_const else 7): '废单'
+                        (xt_const.ORDER_UNREPORTED if xt_const else 0): "未报",
+                        (xt_const.ORDER_WAIT_REPORTING if xt_const else 1): "待报",
+                        (xt_const.ORDER_REPORTED if xt_const else 2): "已报",
+                        (xt_const.ORDER_PART_SUCC if xt_const else 3): "部成",
+                        (xt_const.ORDER_SUCCEEDED if xt_const else 4): "已成",
+                        (xt_const.ORDER_PART_CANCEL if xt_const else 5): "部撤",
+                        (xt_const.ORDER_CANCELED if xt_const else 6): "已撤",
+                        (xt_const.ORDER_JUNK if xt_const else 7): "废单",
                     }
-                    status_name = status_map.get(order.order_status, '未知')
+                    status_name = status_map.get(order.order_status, "未知")
 
-                    data.append({
-                        'order_id': order.order_id,
-                        'stock_code': order.stock_code,
-                        'order_type': order_type_name,
-                        'order_volume': order.order_volume,
-                        'order_price': order.price,
-                        'traded_volume': order.traded_volume,
-                        'order_status': status_name,
-                        'order_time': order.order_time,
-                        'order_remark': order.order_remark
-                    })
+                    data.append(
+                        {
+                            "order_id": order.order_id,
+                            "stock_code": order.stock_code,
+                            "order_type": order_type_name,
+                            "order_volume": order.order_volume,
+                            "order_price": order.price,
+                            "traded_volume": order.traded_volume,
+                            "order_status": status_name,
+                            "order_time": order.order_time,
+                            "order_remark": order.order_remark,
+                        }
+                    )
                 return pd.DataFrame(data)
             else:
                 return pd.DataFrame()
@@ -823,21 +943,25 @@ class AdvancedTradeAPI:
             if trades:
                 data = []
                 for trade in trades:
-                    order_type_name = '买入' if xt_const and trade.order_type == xt_const.STOCK_BUY else '卖出'
+                    order_type_name = (
+                        "买入" if xt_const and trade.order_type == xt_const.STOCK_BUY else "卖出"
+                    )
 
-                    data.append({
-                        'trade_id': trade.traded_id,
-                        'order_id': trade.order_id,
-                        'stock_code': trade.stock_code,
-                        'stock_name': getattr(trade, 'stock_name', ''),
-                        'order_type': order_type_name,
-                        'traded_volume': trade.traded_volume,
-                        'traded_price': trade.traded_price,
-                        'traded_amount': trade.traded_amount,
-                        'traded_time': trade.traded_time,
-                        'strategy_name': getattr(trade, 'strategy_name', ''),
-                        'order_remark': getattr(trade, 'order_remark', '')
-                    })
+                    data.append(
+                        {
+                            "trade_id": trade.traded_id,
+                            "order_id": trade.order_id,
+                            "stock_code": trade.stock_code,
+                            "stock_name": getattr(trade, "stock_name", ""),
+                            "order_type": order_type_name,
+                            "traded_volume": trade.traded_volume,
+                            "traded_price": trade.traded_price,
+                            "traded_amount": trade.traded_amount,
+                            "traded_time": trade.traded_time,
+                            "strategy_name": getattr(trade, "strategy_name", ""),
+                            "order_remark": getattr(trade, "order_remark", ""),
+                        }
+                    )
                 return pd.DataFrame(data)
             else:
                 return pd.DataFrame()
@@ -846,7 +970,7 @@ class AdvancedTradeAPI:
             ErrorHandler.log_error(f"获取当日成交失败: {str(e)}")
             return pd.DataFrame()
 
-    def subscribe_realtime_data(self, codes, period='tick', callback=None) -> bool:
+    def subscribe_realtime_data(self, codes, period="tick", callback=None) -> bool:
         """订阅实时数据"""
         try:
             # 这里应该实现真实的实时数据订阅
@@ -856,7 +980,7 @@ class AdvancedTradeAPI:
             ErrorHandler.log_error(f"订阅实时数据失败: {str(e)}")
             return False
 
-    def download_history_data(self, codes, period='1d', start=None, end=None) -> bool:
+    def download_history_data(self, codes, period="1d", start=None, end=None) -> bool:
         """下载历史数据"""
         try:
             # 这里应该实现真实的历史数据下载
@@ -866,23 +990,22 @@ class AdvancedTradeAPI:
             ErrorHandler.log_error(f"下载历史数据失败: {str(e)}")
             return False
 
-    def get_local_data(self, codes, period='1d', count=10):
+    def get_local_data(self, codes, period="1d", count=10):
         """获取本地数据"""
         try:
-            # 使用xtdata获取历史数据
-            from xtquant import xtdata
-
             if isinstance(codes, str):
                 codes = [codes]
 
             data_frames = []
             for code in codes:
                 code = StockCodeUtils.normalize_code(code)
-                data = xtdata.get_market_data(
-                    stock_list=[code],
-                    period=period,
-                    count=count
-                )
+
+                def _get_market_data():
+                    import xtquant.xtdata as _xtdata
+
+                    return _xtdata.get_market_data(stock_list=[code], period=period, count=count)
+
+                data = _xtdata_submit(_get_market_data)
 
                 # 检查数据类型和内容
                 if data is not None:
@@ -890,16 +1013,16 @@ class AdvancedTradeAPI:
                         # 如果是字典，尝试转换为DataFrame
                         if code in data and len(data[code]) > 0:
                             df = pd.DataFrame(data[code])
-                            df['code'] = code
+                            df["code"] = code
                             data_frames.append(df)
-                    elif hasattr(data, 'empty') and not data.empty:
+                    elif hasattr(data, "empty") and not data.empty:
                         # 如果是DataFrame且不为空
-                        data['code'] = code
+                        data["code"] = code
                         data_frames.append(data)
                     elif isinstance(data, pd.DataFrame):
                         # 如果是DataFrame但可能为空
                         if len(data) > 0:
-                            data['code'] = code
+                            data["code"] = code
                             data_frames.append(data)
 
             if data_frames:

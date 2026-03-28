@@ -66,21 +66,95 @@ def _run_audit_chain_check() -> None:
 
 
 def _run_cross_source_consistency_check() -> None:
-    """每日更新完成后的跨数据源一致性抽检（由 schedule 调用）。"""
+    """每日更新完成后的跨数据源一致性抽检（由 schedule 调用）。
+
+    实现策略：
+    1. 从 DuckDB stock_daily 表随机抽取 30 只有近期数据的标的
+    2. 对每只标的调用 DataManagerController.cross_validate_sources()
+       —— 该方法直接调用 AKShare（绕开 UDI 路由），实现真正多源比对
+    3. 统计通过/失败数，广播 Events.CROSS_VALIDATION_BATCH_DONE
+    4. 如超过 5% 标的偏差 >2%，记录 ERROR 日志
+    """
+    import datetime as _dt
+    import random
     try:
-        from tools.check_cross_source_consistency import run_check
-        report = run_check(sample_size=30, threshold=0.02, emit_alert=True)
-        if report.get("alert"):
+        # ── 获取 DataManagerController ──────────────────────────────
+        from gui_app.data_manager_controller import DataManagerController
+        ctrl = DataManagerController()
+
+        # ── 从 DuckDB 随机抽样有近期日线数据的标的 ────────────────────
+        try:
+            from data_manager.duckdb_connection_pool import get_db_manager, resolve_duckdb_path
+            mgr = get_db_manager(resolve_duckdb_path())
+            ninety_days_ago = (_dt.date.today() - _dt.timedelta(days=90)).isoformat()
+            df_codes = mgr.execute_read_query(
+                "SELECT DISTINCT stock_code FROM stock_daily"
+                " WHERE date >= ? ORDER BY stock_code",
+                [ninety_days_ago],
+            )
+            if df_codes.empty:
+                logger.warning("跨源抽检：stock_daily 中无近90天数据，跳过")
+                return
+            all_codes: list[str] = df_codes["stock_code"].tolist()
+        except Exception as _db_err:
+            logger.warning("跨源抽检：无法读取 stock_daily 标的列表: %s", _db_err)
+            return
+
+        sample_size = min(30, len(all_codes))
+        sample_codes = random.sample(all_codes, sample_size)
+        end_date = _dt.date.today().isoformat()
+        start_date = (_dt.date.today() - _dt.timedelta(days=90)).isoformat()
+
+        # ── 逐标的调用真正多源 cross_validate_sources ────────────────
+        passed, failed = 0, 0
+        bad_codes: list[str] = []
+        results: list[dict] = []
+        for code in sample_codes:
+            try:
+                r = ctrl.cross_validate_sources(code, start_date, end_date)
+                results.append(r)
+                if r.get("error"):
+                    failed += 1
+                    bad_codes.append(f"{code}(err)")
+                elif not r.get("consistent", True) or r.get("max_diff_pct", 0) > 2.0:
+                    failed += 1
+                    bad_codes.append(
+                        f"{code}({r.get('max_diff_pct', 0):.2f}%)"
+                    )
+                else:
+                    passed += 1
+            except Exception as _e:
+                failed += 1
+                bad_codes.append(f"{code}(exc)")
+                logger.debug("跨源抽检 %s 异常: %s", code, _e)
+
+        # ── 记录日志 ─────────────────────────────────────────────────
+        alert = failed > max(1, sample_size * 0.05)  # >5% 才告警
+        if alert:
             logger.error(
-                "跨源一致性告警: %d/%d 标的偏差超 2%% — %s",
-                report.get("bad", 0),
-                report.get("checked", 0),
-                [d["code"] for d in report.get("details", [])[:5]],
+                "跨源一致性告警: %d/%d 标的偏差超阈值 — %s",
+                failed, sample_size, bad_codes[:5],
             )
         else:
             logger.info(
-                "跨源一致性校验通过: %d 标的抽检通过", report.get("checked", 0)
+                "跨源一致性校验通过: %d/%d 标的通过 (AKShare直接比对)",
+                passed, sample_size,
             )
+
+        # ── 广播批次完成事件 ─────────────────────────────────────────
+        try:
+            from core.signal_bus import signal_bus as _sb
+            from core.events import Events as _Ev
+            _sb.emit(_Ev.CROSS_VALIDATION_BATCH_DONE,
+                     total=sample_size,
+                     passed=passed,
+                     failed=failed,
+                     alert=alert,
+                     bad_codes=bad_codes[:10],
+                     results=results[:5])  # 只带前5条详情，避免payload过大
+        except Exception:
+            pass
+
     except Exception:
         logger.exception("跨源一致性抽检任务执行失败")
 
@@ -220,49 +294,66 @@ class AutoDataUpdater:
             result['message'] = 'UnifiedDataInterface 未初始化'
             return result
 
+        # 每日增量更新覆盖所有基础周期（1d + 分钟线）
+        # 增量追补场景：只走 QMT 本地数据，禁用第三方回退（性能 + 避免限流）
+        _prev_skip_tp = getattr(self.interface, '_skip_third_party_fallback', False)
+        self.interface._skip_third_party_fallback = True
         try:
             today_str = datetime.now(tz=_SH).date().strftime('%Y-%m-%d')
-            plan = self.interface.build_incremental_plan(
-                stock_code=stock_code,
-                start_date=today_str,
-                end_date=today_str,
-                period='1d'
-            )
+            # 增量追补范围：近 3 天（补充可能缺失的最后几根 bar）
+            _3d_ago = (datetime.now(tz=_SH).date()
+                       .__class__.fromordinal(
+                           datetime.now(tz=_SH).date().toordinal() - 3)
+                       ).strftime('%Y-%m-%d')
             total_records = 0
-            if not plan:
-                result['message'] = '无更新计划'
-                return result
-            for item in plan:
-                mode = item.get("mode")
-                if mode == "skip":
-                    continue
-                df = self.interface.get_stock_data(
-                    stock_code=stock_code,
-                    start_date=item.get("start_date", today_str),
-                    end_date=item.get("end_date", today_str),
-                    period='1d',
-                    auto_save=True
-                )
-                if df is not None and not df.empty:
-                    total_records += len(df)
+            # 按所有基础周期逐一增量更新（定时追补，不跑全量）
+            for _period in self.ALL_PERIODS:
+                try:
+                    plan = self.interface.build_incremental_plan(
+                        stock_code=stock_code,
+                        start_date=_3d_ago,
+                        end_date=today_str,
+                        period=_period,
+                    )
+                    if not plan:
+                        continue
+                    for item in plan:
+                        if item.get("mode") == "skip":
+                            continue
+                        df = self.interface.get_stock_data(
+                            stock_code=stock_code,
+                            start_date=item.get("start_date", _3d_ago),
+                            end_date=item.get("end_date", today_str),
+                            period=_period,
+                            auto_save=True,
+                        )
+                        if df is not None and not df.empty:
+                            total_records += len(df)
+                except Exception as _pe:
+                    logger.debug("%s|%s 增量更新失败: %s", stock_code, _period, _pe)
+
             if total_records == 0:
                 result['message'] = '无数据'
                 return result
             result['success'] = True
             result['records'] = total_records
             result['message'] = f'更新成功，{total_records} 条记录'
-
-            logger.info(f"{stock_code}: {result['message']}")
+            logger.info("%s: %s", stock_code, result['message'])
 
         except Exception as e:
             result['message'] = f'更新失败: {e}'
-            logger.error(f"{stock_code}: {result['message']}")
+            logger.error("%s: %s", stock_code, result['message'])
+        finally:
+            self.interface._skip_third_party_fallback = _prev_skip_tp
 
         return result
 
     # ── 全周期批量下载 ─────────────────────────────────────────────────────────
 
     #: 默认全量入库周期（可由调用方覆盖）
+    #: 说明：1d/1m/5m 是直接从数据源下载的原始周期；
+    #:       15m/30m/60m/5d/10d 等自定义周期由 _precompute_custom_period_bars 从基础数据派生，
+    #:       不在此列表中——因为派生的前提是基础数据已存在。
     ALL_PERIODS: list[str] = ["1d", "1m", "5m"]
 
     def get_listing_date(self, stock_code: str) -> str:
@@ -272,18 +363,17 @@ class AutoDataUpdater:
         返回 'YYYY-MM-DD' 字符串。
         """
         # 1. XTQuant 在线获取（OpenDate 为股票 IPO 日，CreateDate 为期货上市日）
-        if os.environ.get("EASYXT_ENABLE_XT_LISTING_DATE", "0") in ("1", "true", "True"):
-            try:
-                from xtquant import xtdata
-                detail = xtdata.get_instrument_detail(stock_code)
-                if detail:
-                    raw = detail.get("OpenDate") or detail.get("CreateDate")
-                    if raw:
-                        s = str(int(raw)).strip()
-                        if len(s) == 8:
-                            return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-            except Exception:
-                pass
+        try:
+            from xtquant import xtdata
+            detail = xtdata.get_instrument_detail(stock_code)
+            if detail:
+                raw = detail.get("OpenDate") or detail.get("CreateDate")
+                if raw:
+                    s = str(int(raw)).strip()
+                    if len(s) == 8:
+                        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+        except Exception:
+            pass
 
         # 2. DuckDB stock_daily 最早记录
         if self.interface is not None and getattr(self.interface, "con", None) is not None:
@@ -445,11 +535,13 @@ class AutoDataUpdater:
         total_records = 0
 
         # 批量入库时禁用远程数据源熔断（QMT 是本地调用，不应被限流）
-        # 同时跳过 Tushare/AKShare 回退（QMT download_history_data 已尝试，无数据即跳过）
+        # 注意：不禁用第三方回退（AKShare/Tushare）——当 QMT 返回空数据时，
+        # 允许系统自动切换到 AKShare 作为兜底源（全量历史补齐场景）。
+        # 增量追补（update_single_stock）才应全程依赖 QMT 本地数据。
         prev_cb_disabled = getattr(self.interface, '_cb_disabled', False)
         prev_skip_tp = getattr(self.interface, '_skip_third_party_fallback', False)
         self.interface._cb_disabled = True
-        self.interface._skip_third_party_fallback = True
+        # _skip_third_party_fallback 保持原值（默认 False），允许空数据时 AKShare 兜底
         total = len(stock_codes)
 
         for idx, code in enumerate(stock_codes):
@@ -478,6 +570,18 @@ class AutoDataUpdater:
                     on_progress(idx + 1, total, code, ','.join(periods), status)
                 except Exception:
                     pass
+            # 同步广播到 signal_bus，让状态栏/任意订阅者感知进度（不阻断流程）
+            try:
+                from core.signal_bus import signal_bus as _sb
+                from core.events import Events as _Ev
+                if hasattr(_Ev, "BULK_DOWNLOAD_PROGRESS"):
+                    _sb.emit(_Ev.BULK_DOWNLOAD_PROGRESS,
+                             current=idx + 1, total=total,
+                             stock_code=code,
+                             period=','.join(periods),
+                             status=status)
+            except Exception:
+                pass
 
         # 下载完成后广播事件（不依赖 Qt，用懒导入避免循环引用）
         try:
@@ -518,8 +622,33 @@ class AutoDataUpdater:
     # ── 断点续传辅助方法 ──────────────────────────────────────────────────────
 
     # ── T1.2: 常用自定义周期预计算 ──────────────────────────────────────────
-    # 高频使用周期：15m/30m/60m（日内策略）、5d/10d（多日策略）
+    # 依赖关系说明：
+    #   intraday_derived（需要 1m 基础数据）: 15m / 30m / 60m
+    #   daily_derived   （需要 1d 基础数据）: 2d / 3d / 5d / 10d / 25d
     _PRECOMPUTE_PERIODS: list[str] = ["15m", "30m", "60m", "5d", "10d"]
+
+    # 各预计算周期所需的基础数据库周期（用于依赖检查）
+    _PRECOMPUTE_BASE_PERIOD: dict[str, str] = {
+        "15m": "1m", "30m": "1m", "60m": "1m",
+        "2d": "1d", "3d": "1d", "5d": "1d", "10d": "1d", "25d": "1d",
+    }
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """子类注册时验证 _PRECOMPUTE_BASE_PERIOD 中的基础周期均已在 ALL_PERIODS 内。
+
+        这是两个解耦列表之间的唯一代码约束：派生周期的基础数据必须
+        在下载计划内，否则预计算将在空表上静默失败。
+        """
+        super().__init_subclass__(**kwargs)
+        required_bases = set(cls._PRECOMPUTE_BASE_PERIOD.values())
+        all_p = set(cls.ALL_PERIODS)
+        missing = required_bases - all_p
+        if missing:
+            raise AssertionError(
+                f"{cls.__name__}._PRECOMPUTE_BASE_PERIOD 中的基础周期 {missing} "
+                f"不在 ALL_PERIODS {cls.ALL_PERIODS} 内，"
+                "预计算将依赖不存在的基础数据。请同步更新 ALL_PERIODS。"
+            )
 
     def _precompute_custom_period_bars(
         self,
@@ -531,11 +660,37 @@ class AutoDataUpdater:
         """批量预计算常用自定义周期 K 线并持久化到 custom_period_bars。
 
         在 bulk_download 完成后调用。仅做 best-effort，单只股票失败不阻断。
+        预计算前先检查基础数据是否存在，避免无效聚合。
         """
         if self.interface is None:
             return
+
+        # 确认基础数据中哪些周期已成功入库（影响哪些派生周期可以运行）
+        # 简单方案：读取 bulk_download 的成功结果；此处直接检查 DuckDB 行数
+        def _has_base_data(code: str, base_period: str) -> bool:
+            """快速检查 DuckDB 中 code+base_period 是否有数据。"""
+            try:
+                _tbl = {
+                    "1d": "stock_daily",
+                    "1m": "stock_minute_1m",
+                    "5m": "stock_minute_5m",
+                }.get(base_period)
+                if _tbl is None:
+                    return True  # 未知周期，乐观通过
+                con = self.interface.con if hasattr(self.interface, "con") else None
+                if con is None:
+                    return True
+                row = con.execute(
+                    f"SELECT COUNT(*) FROM {_tbl} WHERE stock_code = ? LIMIT 1",
+                    [code],
+                ).fetchone()
+                return (row[0] if row else 0) > 0
+            except Exception:
+                return True  # 检查失败时乐观通过，不阻塞预计算
+
         total = len(stock_codes) * len(self._PRECOMPUTE_PERIODS)
         done = 0
+        skipped = 0
         logger.info("custom_period_bars 预计算开始: %d 只 × %d 周期", len(stock_codes), len(self._PRECOMPUTE_PERIODS))
         for code in stock_codes:
             if stop_event is not None and stop_event.is_set():
@@ -543,8 +698,14 @@ class AutoDataUpdater:
                 return
             multi_listing_date = self.get_listing_date(code)
             for period in self._PRECOMPUTE_PERIODS:
+                base = self._PRECOMPUTE_BASE_PERIOD.get(period, "1d")
+                if not _has_base_data(code, base):
+                    logger.debug("预计算跳过 %s %s：基础周期 %s 无数据", code, period, base)
+                    skipped += 1
+                    done += 1
+                    continue
                 try:
-                    listing_date = multi_listing_date if period in ("5d", "10d") else None
+                    listing_date = multi_listing_date if period in ("5d", "10d", "2d", "3d", "25d") else None
                     # _read_from_duckdb 内部：缓存未命中 → 构建 → 自动写入 custom_period_bars
                     self.interface._read_from_duckdb(
                         stock_code=code,
@@ -557,7 +718,7 @@ class AutoDataUpdater:
                 except Exception as exc:
                     logger.debug("预计算 %s %s 失败: %s", code, period, exc)
                 done += 1
-        logger.info("custom_period_bars 预计算完成: %d/%d", done, total)
+        logger.info("custom_period_bars 预计算完成: %d/%d（跳过无基础数据: %d）", done, total, skipped)
 
     def _save_checkpoint(
         self,
@@ -985,6 +1146,19 @@ class AutoDataUpdater:
         logger.info("手动触发数据更新")
         self.initialize_data_manager()
         return self.update_all_stocks(stock_codes)
+
+
+# ── 模块级一致性断言：在 AutoDataUpdater 本身（非子类）上验证约束 ─────────────────
+# __init_subclass__ 只在子类定义时触发；此处对基类自身的列表做导入时静态检查。
+_required_base_periods = set(AutoDataUpdater._PRECOMPUTE_BASE_PERIOD.values())
+_all_periods_set = set(AutoDataUpdater.ALL_PERIODS)
+_missing_base_periods = _required_base_periods - _all_periods_set
+assert not _missing_base_periods, (
+    f"AutoDataUpdater._PRECOMPUTE_BASE_PERIOD 引用了基础周期 {_missing_base_periods}，"
+    f"但这些周期不在 ALL_PERIODS {AutoDataUpdater.ALL_PERIODS} 中。"
+    "预计算将在空表上失败，请同步更新 ALL_PERIODS。"
+)
+del _required_base_periods, _all_periods_set, _missing_base_periods
 
 
 def test_auto_updater():

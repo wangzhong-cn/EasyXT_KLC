@@ -1,0 +1,1560 @@
+{
+  "dat_availability": {
+    "000001.SZ": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "first": "2026-03-24 00:00:00",
+        "last": "2026-03-25 00:00:00"
+      }
+    },
+    "000002.SZ": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "000858.SZ": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "000651.SZ": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "000333.SZ": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "002594.SZ": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "300750.SZ": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "002142.SZ": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "600519.SH": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "601318.SH": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "ag01.SF": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "cu01.SF": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "al01.SF": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "rb01.SF": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "au01.SF": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "i01.DF": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "c01.DF": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "m01.DF": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "p01.DF": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    },
+    "TA01.ZF": {
+      "1m": {
+        "rows": 0,
+        "available": false
+      },
+      "5m": {
+        "rows": 0,
+        "available": false
+      },
+      "1d": {
+        "rows": 0,
+        "available": false
+      }
+    }
+  },
+  "akshare_availability": {
+    "000001.SZ": {
+      "1m": {
+        "rows": 482,
+        "available": true,
+        "time_s": 0.79
+      },
+      "5m": {
+        "rows": 96,
+        "available": true,
+        "time_s": 0.16
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "time_s": 0.1
+      }
+    },
+    "000002.SZ": {
+      "1m": {
+        "rows": 482,
+        "available": true,
+        "time_s": 0.13
+      },
+      "5m": {
+        "rows": 96,
+        "available": true,
+        "time_s": 0.16
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "time_s": 0.11
+      }
+    },
+    "000858.SZ": {
+      "1m": {
+        "rows": 482,
+        "available": true,
+        "time_s": 0.15
+      },
+      "5m": {
+        "rows": 96,
+        "available": true,
+        "time_s": 0.17
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "time_s": 0.1
+      }
+    },
+    "000651.SZ": {
+      "1m": {
+        "rows": 482,
+        "available": true,
+        "time_s": 0.14
+      },
+      "5m": {
+        "rows": 96,
+        "available": true,
+        "time_s": 0.15
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "time_s": 0.1
+      }
+    },
+    "000333.SZ": {
+      "1m": {
+        "rows": 482,
+        "available": true,
+        "time_s": 0.16
+      },
+      "5m": {
+        "rows": 96,
+        "available": true,
+        "time_s": 0.16
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "time_s": 0.1
+      }
+    },
+    "002594.SZ": {
+      "1m": {
+        "rows": 482,
+        "available": true,
+        "time_s": 0.14
+      },
+      "5m": {
+        "rows": 96,
+        "available": true,
+        "time_s": 0.17
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "time_s": 0.1
+      }
+    },
+    "300750.SZ": {
+      "1m": {
+        "rows": 482,
+        "available": true,
+        "time_s": 0.15
+      },
+      "5m": {
+        "rows": 96,
+        "available": true,
+        "time_s": 0.18
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "time_s": 0.13
+      }
+    },
+    "002142.SZ": {
+      "1m": {
+        "rows": 482,
+        "available": true,
+        "time_s": 0.17
+      },
+      "5m": {
+        "rows": 96,
+        "available": true,
+        "time_s": 0.13
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "time_s": 0.1
+      }
+    },
+    "600519.SH": {
+      "1m": {
+        "rows": 482,
+        "available": true,
+        "time_s": 0.14
+      },
+      "5m": {
+        "rows": 96,
+        "available": true,
+        "time_s": 0.16
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "time_s": 0.1
+      }
+    },
+    "601318.SH": {
+      "1m": {
+        "rows": 482,
+        "available": true,
+        "time_s": 0.16
+      },
+      "5m": {
+        "rows": 96,
+        "available": true,
+        "time_s": 0.14
+      },
+      "1d": {
+        "rows": 2,
+        "available": true,
+        "time_s": 0.1
+      }
+    }
+  },
+  "comparisons": [
+    {
+      "symbol": "000001.SZ",
+      "period": "1m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 482,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000001.SZ",
+      "period": "5m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 96,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000001.SZ",
+      "period": "1d",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 2,
+      "rows2": 2,
+      "common_rows": 2,
+      "only_in_src1": 0,
+      "only_in_src2": 0,
+      "field_diffs": {
+        "open": {
+          "max_abs_diff": 0.0,
+          "mean_abs_diff": 0.0,
+          "max_rel_diff": 0.0,
+          "exact_match_rate": 1.0
+        },
+        "high": {
+          "max_abs_diff": 0.0,
+          "mean_abs_diff": 0.0,
+          "max_rel_diff": 0.0,
+          "exact_match_rate": 1.0
+        },
+        "low": {
+          "max_abs_diff": 0.0,
+          "mean_abs_diff": 0.0,
+          "max_rel_diff": 0.0,
+          "exact_match_rate": 1.0
+        },
+        "close": {
+          "max_abs_diff": 0.0,
+          "mean_abs_diff": 0.0,
+          "max_rel_diff": 0.0,
+          "exact_match_rate": 1.0
+        },
+        "volume": {
+          "max_abs_diff": 0.0,
+          "mean_abs_diff": 0.0,
+          "max_rel_diff": 0.0,
+          "exact_match_rate": 1.0
+        }
+      },
+      "status": "已比对"
+    },
+    {
+      "symbol": "000002.SZ",
+      "period": "1m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 482,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000002.SZ",
+      "period": "5m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 96,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000002.SZ",
+      "period": "1d",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 2,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000858.SZ",
+      "period": "1m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 482,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000858.SZ",
+      "period": "5m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 96,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000858.SZ",
+      "period": "1d",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 2,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000651.SZ",
+      "period": "1m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 482,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000651.SZ",
+      "period": "5m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 96,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000651.SZ",
+      "period": "1d",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 2,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000333.SZ",
+      "period": "1m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 482,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000333.SZ",
+      "period": "5m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 96,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "000333.SZ",
+      "period": "1d",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 2,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "002594.SZ",
+      "period": "1m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 482,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "002594.SZ",
+      "period": "5m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 96,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "002594.SZ",
+      "period": "1d",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 2,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "300750.SZ",
+      "period": "1m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 482,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "300750.SZ",
+      "period": "5m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 96,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "300750.SZ",
+      "period": "1d",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 2,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "002142.SZ",
+      "period": "1m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 482,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "002142.SZ",
+      "period": "5m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 96,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "002142.SZ",
+      "period": "1d",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 2,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "600519.SH",
+      "period": "1m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 482,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "600519.SH",
+      "period": "5m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 96,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "600519.SH",
+      "period": "1d",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 2,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "601318.SH",
+      "period": "1m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 482,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "601318.SH",
+      "period": "5m",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 96,
+      "status": "一方为空"
+    },
+    {
+      "symbol": "601318.SH",
+      "period": "1d",
+      "source1": "DAT",
+      "source2": "AKShare",
+      "rows1": 0,
+      "rows2": 2,
+      "status": "一方为空"
+    }
+  ],
+  "auction_1m_analysis": [
+    {
+      "symbol": "000001.SZ",
+      "source": "DAT",
+      "is_stock": true,
+      "is_futures": false,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "000001.SZ",
+      "source": "AKShare",
+      "is_stock": true,
+      "is_futures": false,
+      "pre_market_bars": 0,
+      "gap_period_bars": 0,
+      "first_bar_count": 2,
+      "close_auction_bars": 8,
+      "first_bar_open": 0.0,
+      "first_bar_volume": 11715,
+      "first_bar_times": [
+        "2026-03-24 09:30:00",
+        "2026-03-25 09:30:00"
+      ],
+      "first_bar_vs_avg_ratio": 0.5907231505234695,
+      "auction_volume_merged_hint": "未显著包含集合竞价量",
+      "status": "已分析",
+      "total_bars": 482,
+      "daily_bar_count": {
+        "2026-03-24": 241,
+        "2026-03-25": 241
+      },
+      "first_bar_time": "2026-03-24 09:30:00",
+      "last_bar_time": "2026-03-25 15:00:00"
+    },
+    {
+      "symbol": "000002.SZ",
+      "source": "DAT",
+      "is_stock": true,
+      "is_futures": false,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "000002.SZ",
+      "source": "AKShare",
+      "is_stock": true,
+      "is_futures": false,
+      "pre_market_bars": 0,
+      "gap_period_bars": 0,
+      "first_bar_count": 2,
+      "close_auction_bars": 8,
+      "first_bar_open": 0.0,
+      "first_bar_volume": 14948,
+      "first_bar_times": [
+        "2026-03-24 09:30:00",
+        "2026-03-25 09:30:00"
+      ],
+      "first_bar_vs_avg_ratio": 1.0091391633825875,
+      "auction_volume_merged_hint": "未显著包含集合竞价量",
+      "status": "已分析",
+      "total_bars": 482,
+      "daily_bar_count": {
+        "2026-03-24": 241,
+        "2026-03-25": 241
+      },
+      "first_bar_time": "2026-03-24 09:30:00",
+      "last_bar_time": "2026-03-25 15:00:00"
+    },
+    {
+      "symbol": "000858.SZ",
+      "source": "DAT",
+      "is_stock": true,
+      "is_futures": false,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "000858.SZ",
+      "source": "AKShare",
+      "is_stock": true,
+      "is_futures": false,
+      "pre_market_bars": 0,
+      "gap_period_bars": 0,
+      "first_bar_count": 2,
+      "close_auction_bars": 8,
+      "first_bar_open": 0.0,
+      "first_bar_volume": 728,
+      "first_bar_times": [
+        "2026-03-24 09:30:00",
+        "2026-03-25 09:30:00"
+      ],
+      "first_bar_vs_avg_ratio": 0.31206129775491614,
+      "auction_volume_merged_hint": "未显著包含集合竞价量",
+      "status": "已分析",
+      "total_bars": 482,
+      "daily_bar_count": {
+        "2026-03-24": 241,
+        "2026-03-25": 241
+      },
+      "first_bar_time": "2026-03-24 09:30:00",
+      "last_bar_time": "2026-03-25 15:00:00"
+    },
+    {
+      "symbol": "000651.SZ",
+      "source": "DAT",
+      "is_stock": true,
+      "is_futures": false,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "000651.SZ",
+      "source": "AKShare",
+      "is_stock": true,
+      "is_futures": false,
+      "pre_market_bars": 0,
+      "gap_period_bars": 0,
+      "first_bar_count": 2,
+      "close_auction_bars": 8,
+      "first_bar_open": 0.0,
+      "first_bar_volume": 1545,
+      "first_bar_times": [
+        "2026-03-24 09:30:00",
+        "2026-03-25 09:30:00"
+      ],
+      "first_bar_vs_avg_ratio": 0.26852053008907234,
+      "auction_volume_merged_hint": "未显著包含集合竞价量",
+      "status": "已分析",
+      "total_bars": 482,
+      "daily_bar_count": {
+        "2026-03-24": 241,
+        "2026-03-25": 241
+      },
+      "first_bar_time": "2026-03-24 09:30:00",
+      "last_bar_time": "2026-03-25 15:00:00"
+    },
+    {
+      "symbol": "000333.SZ",
+      "source": "DAT",
+      "is_stock": true,
+      "is_futures": false,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "000333.SZ",
+      "source": "AKShare",
+      "is_stock": true,
+      "is_futures": false,
+      "pre_market_bars": 0,
+      "gap_period_bars": 0,
+      "first_bar_count": 2,
+      "close_auction_bars": 8,
+      "first_bar_open": 0.0,
+      "first_bar_volume": 2821,
+      "first_bar_times": [
+        "2026-03-24 09:30:00",
+        "2026-03-25 09:30:00"
+      ],
+      "first_bar_vs_avg_ratio": 0.8276064395467381,
+      "auction_volume_merged_hint": "未显著包含集合竞价量",
+      "status": "已分析",
+      "total_bars": 482,
+      "daily_bar_count": {
+        "2026-03-24": 241,
+        "2026-03-25": 241
+      },
+      "first_bar_time": "2026-03-24 09:30:00",
+      "last_bar_time": "2026-03-25 15:00:00"
+    },
+    {
+      "symbol": "002594.SZ",
+      "source": "DAT",
+      "is_stock": true,
+      "is_futures": false,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "002594.SZ",
+      "source": "AKShare",
+      "is_stock": true,
+      "is_futures": false,
+      "pre_market_bars": 0,
+      "gap_period_bars": 0,
+      "first_bar_count": 2,
+      "close_auction_bars": 8,
+      "first_bar_open": 0.0,
+      "first_bar_volume": 10505,
+      "first_bar_times": [
+        "2026-03-24 09:30:00",
+        "2026-03-25 09:30:00"
+      ],
+      "first_bar_vs_avg_ratio": 0.4873381386744913,
+      "auction_volume_merged_hint": "未显著包含集合竞价量",
+      "status": "已分析",
+      "total_bars": 482,
+      "daily_bar_count": {
+        "2026-03-24": 241,
+        "2026-03-25": 241
+      },
+      "first_bar_time": "2026-03-24 09:30:00",
+      "last_bar_time": "2026-03-25 15:00:00"
+    },
+    {
+      "symbol": "300750.SZ",
+      "source": "DAT",
+      "is_stock": true,
+      "is_futures": false,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "300750.SZ",
+      "source": "AKShare",
+      "is_stock": true,
+      "is_futures": false,
+      "pre_market_bars": 0,
+      "gap_period_bars": 0,
+      "first_bar_count": 2,
+      "close_auction_bars": 8,
+      "first_bar_open": 0.0,
+      "first_bar_volume": 5133,
+      "first_bar_times": [
+        "2026-03-24 09:30:00",
+        "2026-03-25 09:30:00"
+      ],
+      "first_bar_vs_avg_ratio": 0.6525345622119816,
+      "auction_volume_merged_hint": "未显著包含集合竞价量",
+      "status": "已分析",
+      "total_bars": 482,
+      "daily_bar_count": {
+        "2026-03-24": 241,
+        "2026-03-25": 241
+      },
+      "first_bar_time": "2026-03-24 09:30:00",
+      "last_bar_time": "2026-03-25 15:00:00"
+    },
+    {
+      "symbol": "002142.SZ",
+      "source": "DAT",
+      "is_stock": true,
+      "is_futures": false,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "002142.SZ",
+      "source": "AKShare",
+      "is_stock": true,
+      "is_futures": false,
+      "pre_market_bars": 0,
+      "gap_period_bars": 0,
+      "first_bar_count": 2,
+      "close_auction_bars": 8,
+      "first_bar_open": 0.0,
+      "first_bar_volume": 798,
+      "first_bar_times": [
+        "2026-03-24 09:30:00",
+        "2026-03-25 09:30:00"
+      ],
+      "first_bar_vs_avg_ratio": 0.339737108190091,
+      "auction_volume_merged_hint": "未显著包含集合竞价量",
+      "status": "已分析",
+      "total_bars": 482,
+      "daily_bar_count": {
+        "2026-03-24": 241,
+        "2026-03-25": 241
+      },
+      "first_bar_time": "2026-03-24 09:30:00",
+      "last_bar_time": "2026-03-25 15:00:00"
+    },
+    {
+      "symbol": "600519.SH",
+      "source": "DAT",
+      "is_stock": true,
+      "is_futures": false,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "600519.SH",
+      "source": "AKShare",
+      "is_stock": true,
+      "is_futures": false,
+      "pre_market_bars": 0,
+      "gap_period_bars": 0,
+      "first_bar_count": 2,
+      "close_auction_bars": 8,
+      "first_bar_open": 0.0,
+      "first_bar_volume": 235,
+      "first_bar_times": [
+        "2026-03-24 09:30:00",
+        "2026-03-25 09:30:00"
+      ],
+      "first_bar_vs_avg_ratio": 0.43478260869565216,
+      "auction_volume_merged_hint": "未显著包含集合竞价量",
+      "status": "已分析",
+      "total_bars": 482,
+      "daily_bar_count": {
+        "2026-03-24": 241,
+        "2026-03-25": 241
+      },
+      "first_bar_time": "2026-03-24 09:30:00",
+      "last_bar_time": "2026-03-25 15:00:00"
+    },
+    {
+      "symbol": "601318.SH",
+      "source": "DAT",
+      "is_stock": true,
+      "is_futures": false,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "601318.SH",
+      "source": "AKShare",
+      "is_stock": true,
+      "is_futures": false,
+      "pre_market_bars": 0,
+      "gap_period_bars": 0,
+      "first_bar_count": 2,
+      "close_auction_bars": 8,
+      "first_bar_open": 0.0,
+      "first_bar_volume": 4064,
+      "first_bar_times": [
+        "2026-03-24 09:30:00",
+        "2026-03-25 09:30:00"
+      ],
+      "first_bar_vs_avg_ratio": 0.32814218956590196,
+      "auction_volume_merged_hint": "未显著包含集合竞价量",
+      "status": "已分析",
+      "total_bars": 482,
+      "daily_bar_count": {
+        "2026-03-24": 241,
+        "2026-03-25": 241
+      },
+      "first_bar_time": "2026-03-24 09:30:00",
+      "last_bar_time": "2026-03-25 15:00:00"
+    },
+    {
+      "symbol": "ag01.SF",
+      "source": "DAT",
+      "is_stock": false,
+      "is_futures": true,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "cu01.SF",
+      "source": "DAT",
+      "is_stock": false,
+      "is_futures": true,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "al01.SF",
+      "source": "DAT",
+      "is_stock": false,
+      "is_futures": true,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "rb01.SF",
+      "source": "DAT",
+      "is_stock": false,
+      "is_futures": true,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "au01.SF",
+      "source": "DAT",
+      "is_stock": false,
+      "is_futures": true,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "i01.DF",
+      "source": "DAT",
+      "is_stock": false,
+      "is_futures": true,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "c01.DF",
+      "source": "DAT",
+      "is_stock": false,
+      "is_futures": true,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "m01.DF",
+      "source": "DAT",
+      "is_stock": false,
+      "is_futures": true,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "p01.DF",
+      "source": "DAT",
+      "is_stock": false,
+      "is_futures": true,
+      "status": "数据为空"
+    },
+    {
+      "symbol": "TA01.ZF",
+      "source": "DAT",
+      "is_stock": false,
+      "is_futures": true,
+      "status": "数据为空"
+    }
+  ],
+  "auction_tick_analysis": [],
+  "convergence_1m_vs_1d": [
+    {
+      "symbol": "000001.SZ",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "000001.SZ",
+      "agg_days": 2,
+      "daily_days": 2,
+      "common_days": 2,
+      "comparisons": [
+        {
+          "date": "2026-03-24",
+          "close_1m_agg": 10.88,
+          "close_1d": 10.88,
+          "vol_1m_agg": 1622253,
+          "vol_1d": 1622251,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 1.2328548418216417e-06,
+          "vol_match": true
+        },
+        {
+          "date": "2026-03-25",
+          "close_1m_agg": 10.94,
+          "close_1d": 10.94,
+          "vol_1m_agg": 744779,
+          "vol_1d": 744780,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 1.3426783748220952e-06,
+          "vol_match": true
+        }
+      ],
+      "status": "已比对"
+    },
+    {
+      "symbol": "000002.SZ",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "000002.SZ",
+      "agg_days": 2,
+      "daily_days": 2,
+      "common_days": 2,
+      "comparisons": [
+        {
+          "date": "2026-03-24",
+          "close_1m_agg": 4.09,
+          "close_1d": 4.09,
+          "vol_1m_agg": 915313,
+          "vol_1d": 915313,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 0.0,
+          "vol_match": true
+        },
+        {
+          "date": "2026-03-25",
+          "close_1m_agg": 4.12,
+          "close_1d": 4.12,
+          "vol_1m_agg": 865155,
+          "vol_1d": 865156,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 1.1558609083217362e-06,
+          "vol_match": true
+        }
+      ],
+      "status": "已比对"
+    },
+    {
+      "symbol": "000858.SZ",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "000858.SZ",
+      "agg_days": 2,
+      "daily_days": 2,
+      "common_days": 2,
+      "comparisons": [
+        {
+          "date": "2026-03-24",
+          "close_1m_agg": 101.34,
+          "close_1d": 101.34,
+          "vol_1m_agg": 117506,
+          "vol_1d": 117508,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 1.7020117779215034e-05,
+          "vol_match": true
+        },
+        {
+          "date": "2026-03-25",
+          "close_1m_agg": 102.45,
+          "close_1d": 102.45,
+          "vol_1m_agg": 108592,
+          "vol_1d": 108590,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 1.8417902200939313e-05,
+          "vol_match": true
+        }
+      ],
+      "status": "已比对"
+    },
+    {
+      "symbol": "000651.SZ",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "000651.SZ",
+      "agg_days": 2,
+      "daily_days": 2,
+      "common_days": 2,
+      "comparisons": [
+        {
+          "date": "2026-03-24",
+          "close_1m_agg": 37.6,
+          "close_1d": 37.6,
+          "vol_1m_agg": 333401,
+          "vol_1d": 333400,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 2.999400119976005e-06,
+          "vol_match": true
+        },
+        {
+          "date": "2026-03-25",
+          "close_1m_agg": 38.13,
+          "close_1d": 38.13,
+          "vol_1m_agg": 261143,
+          "vol_1d": 261142,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 3.829334231950433e-06,
+          "vol_match": true
+        }
+      ],
+      "status": "已比对"
+    },
+    {
+      "symbol": "000333.SZ",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "000333.SZ",
+      "agg_days": 2,
+      "daily_days": 2,
+      "common_days": 2,
+      "comparisons": [
+        {
+          "date": "2026-03-24",
+          "close_1m_agg": 74.23,
+          "close_1d": 74.23,
+          "vol_1m_agg": 267149,
+          "vol_1d": 267147,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 7.48651491500934e-06,
+          "vol_match": true
+        },
+        {
+          "date": "2026-03-25",
+          "close_1m_agg": 74.8,
+          "close_1d": 74.8,
+          "vol_1m_agg": 184962,
+          "vol_1d": 184964,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 1.0812914945611037e-05,
+          "vol_match": true
+        }
+      ],
+      "status": "已比对"
+    },
+    {
+      "symbol": "002594.SZ",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "002594.SZ",
+      "agg_days": 2,
+      "daily_days": 2,
+      "common_days": 2,
+      "comparisons": [
+        {
+          "date": "2026-03-24",
+          "close_1m_agg": 106.64,
+          "close_1d": 106.64,
+          "vol_1m_agg": 921444,
+          "vol_1d": 921446,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 2.170501581210402e-06,
+          "vol_match": true
+        },
+        {
+          "date": "2026-03-25",
+          "close_1m_agg": 106.6,
+          "close_1d": 106.6,
+          "vol_1m_agg": 662666,
+          "vol_1d": 662665,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 1.5090581213735446e-06,
+          "vol_match": true
+        }
+      ],
+      "status": "已比对"
+    },
+    {
+      "symbol": "300750.SZ",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "300750.SZ",
+      "agg_days": 2,
+      "daily_days": 2,
+      "common_days": 2,
+      "comparisons": [
+        {
+          "date": "2026-03-24",
+          "close_1m_agg": 396.99,
+          "close_1d": 396.99,
+          "vol_1m_agg": 364103,
+          "vol_1d": 364105,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 5.492920998063746e-06,
+          "vol_match": true
+        },
+        {
+          "date": "2026-03-25",
+          "close_1m_agg": 397.81,
+          "close_1d": 397.81,
+          "vol_1m_agg": 267532,
+          "vol_1d": 267528,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 1.4951705989653419e-05,
+          "vol_match": true
+        }
+      ],
+      "status": "已比对"
+    },
+    {
+      "symbol": "002142.SZ",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "002142.SZ",
+      "agg_days": 2,
+      "daily_days": 2,
+      "common_days": 2,
+      "comparisons": [
+        {
+          "date": "2026-03-24",
+          "close_1m_agg": 30.03,
+          "close_1d": 30.03,
+          "vol_1m_agg": 214269,
+          "vol_1d": 214270,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 4.6670089139870255e-06,
+          "vol_match": true
+        },
+        {
+          "date": "2026-03-25",
+          "close_1m_agg": 30.35,
+          "close_1d": 30.35,
+          "vol_1m_agg": 120053,
+          "vol_1d": 120051,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 1.6659586342471115e-05,
+          "vol_match": true
+        }
+      ],
+      "status": "已比对"
+    },
+    {
+      "symbol": "600519.SH",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "600519.SH",
+      "agg_days": 2,
+      "daily_days": 2,
+      "common_days": 2,
+      "comparisons": [
+        {
+          "date": "2026-03-24",
+          "close_1m_agg": 1407.33,
+          "close_1d": 1407.33,
+          "vol_1m_agg": 28562,
+          "vol_1d": 28562,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 0.0,
+          "vol_match": true
+        },
+        {
+          "date": "2026-03-25",
+          "close_1m_agg": 1410.27,
+          "close_1d": 1410.27,
+          "vol_1m_agg": 26095,
+          "vol_1d": 26093,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 7.664890966925995e-05,
+          "vol_match": true
+        }
+      ],
+      "status": "已比对"
+    },
+    {
+      "symbol": "601318.SH",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "601318.SH",
+      "agg_days": 2,
+      "daily_days": 2,
+      "common_days": 2,
+      "comparisons": [
+        {
+          "date": "2026-03-24",
+          "close_1m_agg": 58.12,
+          "close_1d": 58.12,
+          "vol_1m_agg": 681872,
+          "vol_1d": 681870,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 2.9331104169416457e-06,
+          "vol_match": true
+        },
+        {
+          "date": "2026-03-25",
+          "close_1m_agg": 58.79,
+          "close_1d": 58.79,
+          "vol_1m_agg": 562388,
+          "vol_1d": 562389,
+          "close_diff": 0.0,
+          "close_match": true,
+          "vol_diff_pct": 1.778128661833713e-06,
+          "vol_match": true
+        }
+      ],
+      "status": "已比对"
+    },
+    {
+      "symbol": "ag01.SF",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "cu01.SF",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "al01.SF",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "rb01.SF",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "au01.SF",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "i01.DF",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "c01.DF",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "m01.DF",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "p01.DF",
+      "status": "数据不足"
+    },
+    {
+      "symbol": "TA01.ZF",
+      "status": "数据不足"
+    }
+  ]
+}

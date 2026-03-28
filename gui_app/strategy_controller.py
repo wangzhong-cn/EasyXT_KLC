@@ -19,7 +19,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +86,15 @@ class StrategyController:
             if eng is not None:
                 return eng
         return None
+
+    def _get_backtest_engine_status(self) -> dict[str, Any]:
+        engine_mod = _safe_import("gui_app.backtest.engine")
+        getter = getattr(engine_mod, "get_backtrader_import_status", None) if engine_mod else None
+        if callable(getter):
+            status: Any = getter() or {}
+            if isinstance(status, dict):
+                return cast(dict[str, Any], status)
+        return {}
 
     # ------------------------------------------------------------------
     # 1. 策略 CRUD
@@ -227,6 +236,11 @@ class StrategyController:
         """
         t0 = time.perf_counter()
         try:
+            engine_status = self._get_backtest_engine_status()
+            if engine_status and not bool(engine_status.get("available")):
+                hint = engine_status.get("hint") or engine_status.get("error_message") or "回测引擎不可用，已禁止模拟/降级回测"
+                return {"ok": False, "error": str(hint)}
+
             engine_cls = _safe_import(
                 "gui_app.backtest.engine", "AdvancedBacktestEngine"
             )

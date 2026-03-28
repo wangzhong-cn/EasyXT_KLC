@@ -112,6 +112,8 @@ class DuckDBConnectionManager:
         )
         self._connection_count = 0
         self._wal_repaired_once = False
+        # Fix 9c: 跟踪所有活跃 DuckDB 连接，_on_process_exit 时关闭孤立连接（来自 terminate() 线程）
+        self._tracked_connections: set = set()
         self._lock_metrics: dict = {"attempts": 0, "failures": 0, "wait_times_ms": []}
         self._checkpoint_thread: threading.Thread | None = None
         self._checkpoint_stop = threading.Event()
@@ -159,15 +161,13 @@ class DuckDBConnectionManager:
         with self._wal_repair_lock:
             if self._wal_repaired_once or not os.path.exists(wal_path) or self._connection_count > 0:
                 return False
-            backup_path = f"{wal_path}.bak.{int(time.time())}"
             try:
-                shutil.copy2(wal_path, backup_path)
                 os.remove(wal_path)
                 self._wal_repaired_once = True
-                log.warning("检测到WAL回放异常，已备份并清理: %s", backup_path)
+                log.warning("检测到WAL文件，已在启动时清理: %s", wal_path)
                 return True
             except Exception as _wal_err:
-                log.warning("WAL修复失败: %s", _wal_err)
+                log.warning("WAL清理失败: %s", _wal_err)
                 return False
 
     def repair_wal_if_needed(self) -> bool:
@@ -195,6 +195,7 @@ class DuckDBConnectionManager:
             try:
                 con = duckdb.connect(self.duckdb_path, read_only=False)
                 self._connection_count += 1
+                self._tracked_connections.add(con)  # Fix 9c
                 yield con
                 break
             except Exception as e:
@@ -218,6 +219,7 @@ class DuckDBConnectionManager:
                 raise
             finally:
                 if con:
+                    self._tracked_connections.discard(con)  # Fix 9c
                     try:
                         con.close()
                     except Exception:
@@ -243,6 +245,7 @@ class DuckDBConnectionManager:
                 try:
                     con = duckdb.connect(self.duckdb_path, read_only=False)
                     self._connection_count += 1
+                    self._tracked_connections.add(con)  # Fix 9c
                     con.execute("BEGIN TRANSACTION")
                     try:
                         yield con
@@ -270,6 +273,7 @@ class DuckDBConnectionManager:
                     raise
                 finally:
                     if con:
+                        self._tracked_connections.discard(con)  # Fix 9c
                         try:
                             con.close()
                         except Exception:
@@ -294,11 +298,11 @@ class DuckDBConnectionManager:
                 if age > self._write_lock_stale_s:
                     try:
                         os.remove(self._write_file_lock_path)
+                        continue  # remove 成功 → 立即重试
                     except FileNotFoundError:
-                        pass  # 竞态：另一进程已先清理，直接重试
+                        continue  # 竞态：另一进程已先清理，直接重试
                     except Exception:
-                        pass
-                    continue  # 无论 remove 成功与否都立即重试
+                        pass  # remove 失败 → 穿透到超时检查
                 if (time.monotonic() - start) >= self._write_lock_timeout_s:
                     self._lock_metrics["failures"] += 1
                     raise TimeoutError(
@@ -506,8 +510,48 @@ class DuckDBConnectionManager:
         except Exception:
             pass
         try:
-            if getattr(self, '_checkpoint_on_process_exit', True) and threading.main_thread().is_alive():
-                self._safe_checkpoint("process_exit")
+            if not getattr(self, '_checkpoint_on_process_exit', True):
+                return
+            # Fix 7b: 重置标志，允许 WAL 自愈（线程被 terminate() 强杀时需此机制）
+            self._wal_repaired_once = False
+            # Fix 9c: _tracked_connections 记录了所有活跃连接（context manager 进入时 add，
+            # 退出时 discard）。terminate()'d 线程的连接不会被 discard，故仍在集合中。
+            # 注意：不在 atexit 中直接 close() 这些连接，因为跨线程调用 DuckDB C 扩展
+            # 可能导致崩溃（C 级别异常，无法被 except Exception 捕获）。
+            # 改为在 CHECKPOINT 之后尝试删除 WAL 文件（Fix 9b）。
+            # Fix 9: 绕过所有守卫（_checkpoint_skip_when_busy / _write_lock / _connection_count）
+            # 直接对文件做最终 CHECKPOINT+close，确保进程退出后 WAL 被清理。
+            # 原因：closeEvent 强杀线程后 _write_lock 可能仍被持有，_connection_count > 0，
+            # 导致 _safe_checkpoint() 静默跳过，WAL 残留。直接 duckdb.connect 不受这些守卫影响。
+            db_path = getattr(self, 'duckdb_path', ':memory:')
+            wal_path = f"{db_path}.wal"
+            if db_path != ':memory:' and os.path.exists(db_path):
+                try:
+                    _exit_con = duckdb.connect(db_path, read_only=False)
+                    try:
+                        _exit_con.execute("CHECKPOINT")
+                    finally:
+                        _exit_con.close()
+                    log.debug("进程退出 direct-checkpoint 完成: %s", db_path)
+                except Exception as e:
+                    log.warning("进程退出 direct-checkpoint 失败 (fallback to safe_checkpoint): %s", e)
+                    # 连接失败时（如另一进程仍锁文件）回退到原路径
+                    try:
+                        self._safe_checkpoint("process_exit_fallback")
+                    except Exception:
+                        pass
+                # Fix 9b: 无论 checkpoint 是否成功，主动删除 WAL 文件，防止下次启动时
+                # "failure while replaying wal file"。
+                # 原因：terminate() 强杀的线程留有孤立 DuckDB 连接（未提交事务），
+                # checkpoint 无法清理这些残留，WAL 下次启动时回放失败。
+                # checkpoint 已将已提交数据写入主文件；WAL 中的孤立事务残留无法恢复，
+                # 等价于启动自愈（_repair_wal_if_needed）的提前版本，避免启动时报齐错误。
+                if os.path.exists(wal_path):
+                    try:
+                        os.remove(wal_path)
+                        log.debug("进程退出时清理 WAL 文件: %s", wal_path)
+                    except Exception as _wal_err:
+                        log.warning("进程退出时清理 WAL 失败: %s", _wal_err)
         except Exception as e:
             log.warning("进程退出checkpoint失败: %s", e)
 

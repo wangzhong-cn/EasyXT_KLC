@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 🚀 qstock与EasyXT完美结合量化交易案例
@@ -93,8 +93,8 @@ print("=" * 60)
 
 # 交易配置
 TRADING_CONFIG = {
-    'userdata_path': r'D:\国金QMT交易端模拟\userdata_mini',  # 修改为实际路径
-    'account_id': '39020958',  # 修改为实际账号
+    'userdata_path': r'D:\申万宏源策略量化交易终端\userdata_mini',  # 修改为实际路径
+    'account_id': 'test1101',  # 修改为实际账号
     'session_id': 'qstock_easyxt_session',
     'max_position_ratio': 0.8,  # 最大仓位比例
     'single_stock_ratio': 0.2,  # 单股最大仓位

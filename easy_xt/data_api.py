@@ -2,31 +2,46 @@
 数据API封装模块
 简化xtquant数据接口的调用
 """
+
+import importlib
 import os
 import sys
 from datetime import datetime, timedelta
 from typing import Any, Optional, Union
 from zoneinfo import ZoneInfo
 
-_SH = ZoneInfo('Asia/Shanghai')
+_SH = ZoneInfo("Asia/Shanghai")
 
 import pandas as pd
 
-# 添加xtquant路径
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
-xtquant_path = os.path.join(project_root, 'xtquant')
+from core.xtdata_lock import xtdata_submit as _xtdata_submit
 
-if xtquant_path not in sys.path:
-    sys.path.insert(0, xtquant_path)
 
-xt: Optional[Any]
-try:
-    import xtquant.xtdata as xt
-    print("[OK] xtquant.xtdata imported successfully")
-except ImportError as e:
-    print(f"[ERROR] xtquant.xtdata import failed: {e}")
-    xt = None
+class _XtdataProxy:
+    """惰性 xtdata 代理。
+
+    关键点：绝不能在调用线程里直接 import xtquant.xtdata，
+    否则会把 C 扩展初始化到错误线程上下文，触发 bsonobj.cpp 断言。
+    所有真实导入与方法调用都通过 xtdata_submit() 派发到专用工作线程。
+    """
+
+    def __bool__(self) -> bool:
+        return True
+
+    def __getattr__(self, name: str):
+        def _call(*args, **kwargs):
+            def _invoke():
+                xt_mod = importlib.import_module("xtquant.xtdata")
+                attr = getattr(xt_mod, name)
+                return attr(*args, **kwargs)
+
+            return _xtdata_submit(_invoke)
+
+        return _call
+
+
+# 默认导出为惰性代理；测试可 monkeypatch 此符号为 MagicMock。
+xt: Any = _XtdataProxy()
 
 import time
 
@@ -37,53 +52,58 @@ from .utils import ErrorHandler, StockCodeUtils, TimeUtils
 # QMT支持的数据周期 - 基于xtdata官方文档v2023-01-31
 SUPPORTED_PERIODS = {
     # Level1数据周期 (标准行情数据)
-    'tick': '分笔数据',
-    '1m': '1分钟线',
-    '5m': '5分钟线',
-    '15m': '15分钟线',
-    '30m': '30分钟线',
-    '1h': '1小时线',
-    '1d': '日线',
-
+    "tick": "分笔数据",
+    "1m": "1分钟线",
+    "5m": "5分钟线",
+    "15m": "15分钟线",
+    "30m": "30分钟线",
+    "1h": "1小时线",
+    "1d": "日线",
     # Level2数据周期 (需要Level2权限)
-    'l2quote': 'Level2实时行情快照',
-    'l2order': 'Level2逐笔委托',
-    'l2transaction': 'Level2逐笔成交',
-    'l2quoteaux': 'Level2实时行情补充',
-    'l2orderqueue': 'Level2委买委卖一档委托队列',
-    'l2thousand': 'Level2千档盘口'
+    "l2quote": "Level2实时行情快照",
+    "l2order": "Level2逐笔委托",
+    "l2transaction": "Level2逐笔成交",
+    "l2quoteaux": "Level2实时行情补充",
+    "l2orderqueue": "Level2委买委卖一档委托队列",
+    "l2thousand": "Level2千档盘口",
 }
+
 
 def validate_period(period: str) -> bool:
     """验证数据周期是否支持"""
     return period in SUPPORTED_PERIODS
 
+
 def get_supported_periods() -> dict[str, str]:
     """获取支持的数据周期"""
     return SUPPORTED_PERIODS.copy()
 
+
 # 推荐的测试股票代码
 RECOMMENDED_STOCKS = [
-    '000001.SZ',  # 平安银行
-    '600000.SH',  # 浦发银行
-    '000002.SZ',  # 万科A
-    '600036.SH',  # 招商银行
-    '000858.SZ',  # 五粮液
+    "000001.SZ",  # 平安银行
+    "600000.SH",  # 浦发银行
+    "000002.SZ",  # 万科A
+    "600036.SH",  # 招商银行
+    "000858.SZ",  # 五粮液
 ]
+
 
 def get_recommended_stocks(count: int = 5) -> list[str]:
     """获取推荐的测试股票代码"""
     return RECOMMENDED_STOCKS[:count]
+
 
 def auto_time_range(days: int = 10) -> tuple[str, str]:
     """自动生成合理的时间范围"""
     end_date = datetime.now(tz=_SH)
     start_date = end_date - timedelta(days=days)
 
-    start_time = start_date.strftime('%Y%m%d')
-    end_time = end_date.strftime('%Y%m%d')
+    start_time = start_date.strftime("%Y%m%d")
+    end_time = end_date.strftime("%Y%m%d")
 
     return start_time, end_time
+
 
 def validate_stock_codes(codes: Union[str, list[str]]) -> tuple[bool, str]:
     """验证股票代码有效性"""
@@ -94,21 +114,22 @@ def validate_stock_codes(codes: Union[str, list[str]]) -> tuple[bool, str]:
         if not isinstance(code, str):
             return False, f"股票代码必须是字符串: {code}"
 
-        if '.' not in code:
+        if "." not in code:
             return False, f"股票代码格式错误，缺少市场后缀: {code}"
 
-        parts = code.split('.')
+        parts = code.split(".")
         if len(parts) != 2:
             return False, f"股票代码格式错误: {code}"
 
         stock_code, market = parts
-        if market not in ['SH', 'SZ']:
+        if market not in ["SH", "SZ"]:
             return False, f"不支持的市场代码: {market}"
 
         if not stock_code.isdigit() or len(stock_code) != 6:
             return False, f"股票代码必须是6位数字: {stock_code}"
 
     return True, "股票代码验证通过"
+
 
 class DataAPI:
     """数据API封装类"""
@@ -124,9 +145,19 @@ class DataAPI:
             return False
 
         try:
-            # 尝试获取客户端连接
-            client = self.xt.get_client()
-            self._connected = client.is_connected() if client else False
+            # 对真实 xtdata 代理：把 get_client()/is_connected() 都放到工作线程。
+            # 对测试中的 MagicMock：保持原行为，兼容 monkeypatch。
+            if isinstance(self.xt, _XtdataProxy):
+
+                def _probe_client_connected() -> bool:
+                    xt_mod = importlib.import_module("xtquant.xtdata")
+                    client = xt_mod.get_client()
+                    return client.is_connected() if client else False
+
+                self._connected = bool(_xtdata_submit(_probe_client_connected))
+            else:
+                client = self.xt.get_client()
+                self._connected = client.is_connected() if client else False
 
             if self._connected:
                 print("[OK] Data service connected successfully")
@@ -140,14 +171,16 @@ class DataAPI:
             return False
 
     @ErrorHandler.handle_api_error
-    def get_price(self,
-                  codes: Union[str, list[str]],
-                  start: Optional[str] = None,
-                  end: Optional[str] = None,
-                  period: str = '1d',
-                  count: Optional[int] = None,
-                  fields: Optional[list[str]] = None,
-                  adjust: str = 'front') -> pd.DataFrame:
+    def get_price(
+        self,
+        codes: Union[str, list[str]],
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        period: str = "1d",
+        count: Optional[int] = None,
+        fields: Optional[list[str]] = None,
+        adjust: str = "front",
+    ) -> pd.DataFrame:
         """
         获取股票价格数据
 
@@ -170,7 +203,7 @@ class DataAPI:
         """
         # 验证周期类型
         if not validate_period(period):
-            supported_list = ', '.join(SUPPORTED_PERIODS.keys())
+            supported_list = ", ".join(SUPPORTED_PERIODS.keys())
             raise ValueError(f"不支持的数据周期 '{period}'。支持的周期: {supported_list}")
         # 如果xtquant不可用，直接报错
         if not self.xt:
@@ -190,17 +223,22 @@ class DataAPI:
 
         # 处理时间参数
         from datetime import datetime
+
         if count:
-            end_date = TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime('%Y%m%d')
-            start_date = ''
+            end_date = (
+                TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime("%Y%m%d")
+            )
+            start_date = ""
         else:
-            start_date = TimeUtils.normalize_date(start) if start else '20200101'
-            end_date = TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime('%Y%m%d')
+            start_date = TimeUtils.normalize_date(start) if start else "20200101"
+            end_date = (
+                TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime("%Y%m%d")
+            )
             count = -1
 
         # 处理字段
         if not fields:
-            fields = ['open', 'high', 'low', 'close', 'volume', 'amount']
+            fields = ["open", "high", "low", "close", "volume", "amount"]
         # 确保 fields 是列表类型
         elif isinstance(fields, str):
             fields = [fields]
@@ -209,14 +247,14 @@ class DataAPI:
 
         # 处理复权类型
         dividend_map = {
-            'front': 'front',
-            'back': 'back',
-            'none': 'none',
-            '前复权': 'front',
-            '后复权': 'back',
-            '不复权': 'none'
+            "front": "front",
+            "back": "back",
+            "none": "none",
+            "前复权": "front",
+            "后复权": "back",
+            "不复权": "none",
         }
-        dividend_type = dividend_map.get(adjust, 'front')
+        dividend_type = dividend_map.get(adjust, "front")
 
         try:
             # 先下载历史数据（使用正确的API）
@@ -224,22 +262,23 @@ class DataAPI:
                 print(f"正在下载 {codes} 的历史数据...")
 
                 # 对于分钟数据，限制时间范围避免数据量过大
-                if period in ['1m', '5m', '15m', '30m']:
+                if period in ["1m", "5m", "15m", "30m"]:
                     # 分钟数据只下载最近几天
                     from datetime import timedelta
+
                     end_dt = datetime.now(tz=_SH)
                     start_dt = end_dt - timedelta(days=3)  # 只下载最近3天
-                    download_start = start_dt.strftime('%Y%m%d')
-                    download_end = end_dt.strftime('%Y%m%d')
+                    download_start = start_dt.strftime("%Y%m%d")
+                    download_end = end_dt.strftime("%Y%m%d")
                 else:
-                    download_start = start_date if start_date else '20200101'
-                    download_end = end_date if end_date else datetime.now(tz=_SH).strftime('%Y%m%d')
+                    download_start = start_date if start_date else "20200101"
+                    download_end = end_date if end_date else datetime.now(tz=_SH).strftime("%Y%m%d")
 
                 self.xt.download_history_data2(
                     stock_list=codes,
                     period=period,
                     start_time=download_start,
-                    end_time=download_end
+                    end_time=download_end,
                 )
                 print("历史数据下载完成")
             except Exception as download_error:
@@ -248,7 +287,7 @@ class DataAPI:
 
             # 调用xtquant接口获取数据
             # 对于分钟数据，使用count参数限制数据量
-            if period in ['1m', '5m', '15m', '30m'] and count is None:
+            if period in ["1m", "5m", "15m", "30m"] and count is None:
                 # 分钟数据默认最多获取100条
                 actual_count = 100
             else:
@@ -258,11 +297,11 @@ class DataAPI:
                 field_list=fields,
                 stock_list=codes,
                 period=period,
-                start_time=start_date if start_date else '20200101',
-                end_time=end_date if end_date else datetime.now(tz=_SH).strftime('%Y%m%d'),
+                start_time=start_date if start_date else "20200101",
+                end_time=end_date if end_date else datetime.now(tz=_SH).strftime("%Y%m%d"),
                 count=actual_count,
                 dividend_type=dividend_type,
-                fill_data=config.get('data.fill_data', True)
+                fill_data=config.get("data.fill_data", True),
             )
 
             if not data:
@@ -271,25 +310,27 @@ class DataAPI:
             # 检查是否所有字段都是空的
             all_empty = True
             for field, field_data in data.items():
-                if field_data is not None and hasattr(field_data, 'empty') and not field_data.empty:
+                if field_data is not None and hasattr(field_data, "empty") and not field_data.empty:
                     all_empty = False
                     break
 
             if all_empty:
-                raise DataError(f"无法获取股票 {codes} 的数据。可能的原因：\n1. 需要先在迅投客户端中下载历史数据\n2. 股票代码错误\n3. 网络连接问题\n4. 迅投服务未正常运行\n\n建议：请在迅投客户端中手动下载相关股票的历史数据后重试")
+                raise DataError(
+                    f"无法获取股票 {codes} 的数据。可能的原因：\n1. 需要先在迅投客户端中下载历史数据\n2. 股票代码错误\n3. 网络连接问题\n4. 迅投服务未正常运行\n\n建议：请在迅投客户端中手动下载相关股票的历史数据后重试"
+                )
 
             # 处理返回数据
-            if period == 'tick':
+            if period == "tick":
                 # 分笔数据处理
                 result_frames: list[pd.DataFrame] = []
                 for code, tick_data in data.items():
                     if tick_data is not None and len(tick_data) > 0:
                         df = pd.DataFrame(tick_data)
-                        df['code'] = code
+                        df["code"] = code
 
                         # 处理时间字段 - 兼容不同的字段名称
                         time_field = None
-                        for field in ['time', 'timestamp', 'datetime', 'ttime']:
+                        for field in ["time", "timestamp", "datetime", "ttime"]:
                             if field in df.columns:
                                 time_field = field
                                 break
@@ -297,24 +338,28 @@ class DataAPI:
                         if time_field:
                             # 尝试不同的时间格式转换
                             try:
-                                if df[time_field].dtype in ['int64', 'float64']:
+                                if df[time_field].dtype in ["int64", "float64"]:
                                     # 检查是否是毫秒时间戳
                                     sample_time = df[time_field].iloc[0]
                                     if sample_time > 1000000000000:  # 毫秒时间戳
-                                        df['time'] = pd.to_datetime(df[time_field], unit='ms', utc=True).dt.tz_convert(_SH)
+                                        df["time"] = pd.to_datetime(
+                                            df[time_field], unit="ms", utc=True
+                                        ).dt.tz_convert(_SH)
                                     else:  # 秒时间戳
-                                        df['time'] = pd.to_datetime(df[time_field], unit='s', utc=True).dt.tz_convert(_SH)
+                                        df["time"] = pd.to_datetime(
+                                            df[time_field], unit="s", utc=True
+                                        ).dt.tz_convert(_SH)
                                 else:
                                     # 字符串格式直接转换
-                                    df['time'] = pd.to_datetime(df[time_field])
+                                    df["time"] = pd.to_datetime(df[time_field])
                             except Exception as e:
                                 print(f"时间字段转换失败: {e}")
                                 # 使用当前时间作为默认值
-                                df['time'] = pd.Timestamp.now()
+                                df["time"] = pd.Timestamp.now()
                         else:
                             # 如果没有找到时间字段，使用当前时间
                             print("警告: 未找到时间字段，使用当前时间")
-                            df['time'] = pd.Timestamp.now()
+                            df["time"] = pd.Timestamp.now()
 
                         result_frames.append(df)
 
@@ -332,12 +377,18 @@ class DataAPI:
                 # 检查是否有有效数据
                 has_data = False
                 for stock_code, stock_data in data.items():
-                    if stock_data is not None and hasattr(stock_data, 'empty') and not stock_data.empty:
+                    if (
+                        stock_data is not None
+                        and hasattr(stock_data, "empty")
+                        and not stock_data.empty
+                    ):
                         has_data = True
                         break
 
                 if not has_data:
-                    raise DataError(f"无法获取股票 {codes} 的数据。可能的原因：\n1. 需要先在迅投客户端中下载历史数据\n2. 股票代码错误\n3. 网络连接问题\n4. 迅投服务未正常运行\n\n建议：请在迅投客户端中手动下载相关股票的历史数据后重试")
+                    raise DataError(
+                        f"无法获取股票 {codes} 的数据。可能的原因：\n1. 需要先在迅投客户端中下载历史数据\n2. 股票代码错误\n3. 网络连接问题\n4. 迅投服务未正常运行\n\n建议：请在迅投客户端中手动下载相关股票的历史数据后重试"
+                    )
 
                 # 重构数据格式 - 适配get_market_data_ex新格式
                 result_records: list[dict[str, Any]] = []
@@ -350,13 +401,13 @@ class DataAPI:
                     # 为每个时间点创建记录
                     for time_idx in stock_df.index:
                         record = {
-                            'time': time_idx,  # 使用索引作为时间
-                            'code': stock_code
+                            "time": time_idx,  # 使用索引作为时间
+                            "code": stock_code,
                         }
 
                         # 添加各个字段的数据
                         for field in fields:
-                            if field == 'time':
+                            if field == "time":
                                 continue  # 已经处理
 
                             if field in stock_df.columns:
@@ -373,21 +424,27 @@ class DataAPI:
                     # 修复时间格式 - 基于调试结果的正确处理方式
                     try:
                         # 索引时间格式处理
-                        if final_df['time'].dtype in ['int64', 'float64']:
+                        if final_df["time"].dtype in ["int64", "float64"]:
                             # 检查是否是分钟数据格式 (YYYYMMDDHHMMSS)
-                            sample_time = final_df['time'].iloc[0]
+                            sample_time = final_df["time"].iloc[0]
                             if sample_time > 20000000000000:  # 分钟数据格式
                                 # YYYYMMDDHHMMSS格式
-                                final_df['time'] = pd.to_datetime(final_df['time'].astype(str), format='%Y%m%d%H%M%S', errors='coerce')
+                                final_df["time"] = pd.to_datetime(
+                                    final_df["time"].astype(str),
+                                    format="%Y%m%d%H%M%S",
+                                    errors="coerce",
+                                )
                             else:
                                 # YYYYMMDD格式
-                                final_df['time'] = pd.to_datetime(final_df['time'].astype(str), format='%Y%m%d', errors='coerce')
-                        elif final_df['time'].dtype == 'object':
+                                final_df["time"] = pd.to_datetime(
+                                    final_df["time"].astype(str), format="%Y%m%d", errors="coerce"
+                                )
+                        elif final_df["time"].dtype == "object":
                             # 如果是字符串格式，尝试直接转换
-                            final_df['time'] = pd.to_datetime(final_df['time'], errors='coerce')
+                            final_df["time"] = pd.to_datetime(final_df["time"], errors="coerce")
 
                         # 如果转换失败，尝试其他格式
-                        notna_values = final_df['time'].notna()
+                        notna_values = final_df["time"].notna()
                         notna_count = notna_values.sum()
                         if notna_count == 0:
                             print("警告: 时间格式转换失败")
@@ -395,12 +452,12 @@ class DataAPI:
                         print(f"时间格式处理警告: {e}")
 
                     # 过滤掉无效数据
-                    final_df = final_df.dropna(subset=['time'])
+                    final_df = final_df.dropna(subset=["time"])
 
                     if final_df.empty:
                         raise DataError("时间格式转换后数据为空")
 
-                    return final_df.sort_values(['code', 'time']).reset_index(drop=True)
+                    return final_df.sort_values(["code", "time"]).reset_index(drop=True)
                 else:
                     raise DataError("未能构建有效的数据结构")
 
@@ -445,17 +502,19 @@ class DataAPI:
             result_list = []
             for code, tick_info in data.items():
                 if tick_info:
-                    result_list.append({
-                        'code': code,
-                        'price': tick_info.get('lastPrice', 0),
-                        'open': tick_info.get('open', 0),
-                        'high': tick_info.get('high', 0),
-                        'low': tick_info.get('low', 0),
-                        'pre_close': tick_info.get('lastClose', 0),
-                        'volume': tick_info.get('volume', 0),
-                        'amount': tick_info.get('amount', 0),
-                        'time': tick_info.get('time', 0)
-                    })
+                    result_list.append(
+                        {
+                            "code": code,
+                            "price": tick_info.get("lastPrice", 0),
+                            "open": tick_info.get("open", 0),
+                            "high": tick_info.get("high", 0),
+                            "low": tick_info.get("low", 0),
+                            "pre_close": tick_info.get("lastClose", 0),
+                            "volume": tick_info.get("volume", 0),
+                            "amount": tick_info.get("amount", 0),
+                            "time": tick_info.get("time", 0),
+                        }
+                    )
 
             if not result_list:
                 raise DataError("未获取到有效的实时行情数据")
@@ -469,12 +528,14 @@ class DataAPI:
             raise DataError(f"获取实时价格失败: {str(e)}")
 
     @ErrorHandler.handle_api_error
-    def get_financial_data(self,
-                          codes: Union[str, list[str]],
-                          tables: Optional[list[str]] = None,
-                          start: Optional[str] = None,
-                          end: Optional[str] = None,
-                          report_type: str = 'report_time') -> dict[str, dict[str, pd.DataFrame]]:
+    def get_financial_data(
+        self,
+        codes: Union[str, list[str]],
+        tables: Optional[list[str]] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        report_type: str = "report_time",
+    ) -> dict[str, dict[str, pd.DataFrame]]:
         """
         获取财务数据
 
@@ -505,10 +566,10 @@ class DataAPI:
         codes = StockCodeUtils.normalize_codes(codes)
 
         if not tables:
-            tables = ['Balance', 'Income', 'CashFlow']
+            tables = ["Balance", "Income", "CashFlow"]
 
-        start_date = TimeUtils.normalize_date(start) if start else '20200101'
-        end_date = TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime('%Y%m%d')
+        start_date = TimeUtils.normalize_date(start) if start else "20200101"
+        end_date = TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime("%Y%m%d")
 
         try:
             data = self.xt.get_financial_data(
@@ -516,7 +577,7 @@ class DataAPI:
                 table_list=tables,
                 start_time=start_date,
                 end_time=end_date,
-                report_type=report_type
+                report_type=report_type,
             )
 
             if not data:
@@ -560,8 +621,8 @@ class DataAPI:
                 stock_list = self.xt.get_stock_list_in_sector(sector)
             else:
                 # 获取所有A股
-                sh_stocks = self.xt.get_stock_list_in_sector('沪A')
-                sz_stocks = self.xt.get_stock_list_in_sector('深A')
+                sh_stocks = self.xt.get_stock_list_in_sector("沪A")
+                sz_stocks = self.xt.get_stock_list_in_sector("深A")
                 stock_list = (sh_stocks or []) + (sz_stocks or [])
 
             if not stock_list:
@@ -576,11 +637,13 @@ class DataAPI:
             raise DataError(f"获取股票列表失败: {str(e)}")
 
     @ErrorHandler.handle_api_error
-    def get_trading_dates(self,
-                         market: str = 'SH',
-                         start: Optional[str] = None,
-                         end: Optional[str] = None,
-                         count: int = -1) -> list[str]:
+    def get_trading_dates(
+        self,
+        market: str = "SH",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        count: int = -1,
+    ) -> list[str]:
         """
         获取交易日列表
 
@@ -607,8 +670,8 @@ class DataAPI:
         if not self._connected:
             raise ConnectionError("数据服务未连接，请先调用init_data()并确保迅投客户端已启动")
 
-        start_date = TimeUtils.normalize_date(start) if start else ''
-        end_date = TimeUtils.normalize_date(end) if end else ''
+        start_date = TimeUtils.normalize_date(start) if start else ""
+        end_date = TimeUtils.normalize_date(end) if end else ""
 
         try:
             dates = self.xt.get_trading_dates(market, start_date, end_date, count)
@@ -616,7 +679,9 @@ class DataAPI:
                 raise DataError("未获取到交易日数据")
 
             # 转换时间戳为日期字符串
-            return [TimeUtils.normalize_date(datetime.fromtimestamp(ts/1000, tz=_SH)) for ts in dates]
+            return [
+                TimeUtils.normalize_date(datetime.fromtimestamp(ts / 1000, tz=_SH)) for ts in dates
+            ]
 
         except Exception as e:
             if isinstance(e, (ConnectionError, DataError)):
@@ -624,11 +689,13 @@ class DataAPI:
             ErrorHandler.log_error(f"获取交易日失败: {str(e)}")
             raise DataError(f"获取交易日失败: {str(e)}")
 
-    def download_data(self,
-                     codes: Union[str, list[str]],
-                     period: str = '1d',
-                     start: Optional[str] = None,
-                     end: Optional[str] = None) -> bool:
+    def download_data(
+        self,
+        codes: Union[str, list[str]],
+        period: str = "1d",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> bool:
         """
         下载历史数据到本地
 
@@ -656,8 +723,8 @@ class DataAPI:
             raise ConnectionError("数据服务未连接，请先调用init_data()并确保迅投客户端已启动")
 
         codes = StockCodeUtils.normalize_codes(codes)
-        start_date = TimeUtils.normalize_date(start) if start else '20200101'
-        end_date = TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime('%Y%m%d')
+        start_date = TimeUtils.normalize_date(start) if start else "20200101"
+        end_date = TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime("%Y%m%d")
 
         try:
             for code in codes:
@@ -668,11 +735,13 @@ class DataAPI:
             ErrorHandler.log_error(f"下载数据失败: {str(e)}")
             raise DataError(f"下载数据失败: {str(e)}")
 
-    def download_history_data_batch(self,
-                                  stock_list: Union[str, list[str]],
-                                  period: str = '1d',
-                                  start_time: str = '',
-                                  end_time: str = '') -> dict[str, bool]:
+    def download_history_data_batch(
+        self,
+        stock_list: Union[str, list[str]],
+        period: str = "1d",
+        start_time: str = "",
+        end_time: str = "",
+    ) -> dict[str, bool]:
         """
         批量下载历史数据（使用xtdata.download_history_data2）
 
@@ -706,25 +775,26 @@ class DataAPI:
         # 批量下载数据
         try:
             self.xt.download_history_data2(
-                stock_list=stock_list,
-                period=period,
-                start_time=start_time,
-                end_time=end_time
+                stock_list=stock_list, period=period, start_time=start_time, end_time=end_time
             )
             # 下载完成后，验证每只股票的数据是否真正下载成功
             for stock in stock_list:
                 try:
                     # 尝试获取少量数据来验证下载是否成功
                     test_data = self.xt.get_local_data(
-                        field_list=['open', 'close', 'volume'],
+                        field_list=["open", "close", "volume"],
                         stock_list=[stock],
                         period=period,
                         start_time=start_time,
                         end_time=end_time,
-                        count=1
+                        count=1,
                     )
                     # 如果能获取到数据且不为空，则认为下载成功
-                    if stock in test_data and test_data[stock] is not None and len(test_data[stock]) > 0:
+                    if (
+                        stock in test_data
+                        and test_data[stock] is not None
+                        and len(test_data[stock]) > 0
+                    ):
                         results[stock] = True
                     else:
                         results[stock] = False
@@ -736,22 +806,23 @@ class DataAPI:
             for stock in stock_list:
                 try:
                     self.xt.download_history_data2(
-                        stock_list=[stock],
-                        period=period,
-                        start_time=start_time,
-                        end_time=end_time
+                        stock_list=[stock], period=period, start_time=start_time, end_time=end_time
                     )
                     # 验证数据是否真正下载成功
                     try:
                         test_data = self.xt.get_local_data(
-                            field_list=['open', 'close', 'volume'],
+                            field_list=["open", "close", "volume"],
                             stock_list=[stock],
                             period=period,
                             start_time=start_time,
                             end_time=end_time,
-                            count=1
+                            count=1,
                         )
-                        if stock in test_data and test_data[stock] is not None and len(test_data[stock]) > 0:
+                        if (
+                            stock in test_data
+                            and test_data[stock] is not None
+                            and len(test_data[stock]) > 0
+                        ):
                             results[stock] = True
                             print(f"{stock} 历史数据下载完成并验证成功")
                         else:
@@ -767,15 +838,17 @@ class DataAPI:
         return results
 
     @ErrorHandler.handle_api_error
-    def get_price_robust(self,
-                        codes: Union[str, list[str]],
-                        start: Optional[str] = None,
-                        end: Optional[str] = None,
-                        period: str = '1d',
-                        count: Optional[int] = None,
-                        fields: Optional[list[str]] = None,
-                        adjust: str = 'front',
-                        max_retries: int = 3) -> pd.DataFrame:
+    def get_price_robust(
+        self,
+        codes: Union[str, list[str]],
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        period: str = "1d",
+        count: Optional[int] = None,
+        fields: Optional[list[str]] = None,
+        adjust: str = "front",
+        max_retries: int = 3,
+    ) -> pd.DataFrame:
         """
         健壮的股票价格数据获取（改进版）
 
@@ -799,7 +872,7 @@ class DataAPI:
         """
         # 验证周期类型
         if not validate_period(period):
-            supported_list = ', '.join(SUPPORTED_PERIODS.keys())
+            supported_list = ", ".join(SUPPORTED_PERIODS.keys())
             raise ValueError(f"不支持的数据周期 '{period}'。支持的周期: {supported_list}")
 
         # 验证股票代码
@@ -824,20 +897,26 @@ class DataAPI:
 
         # 智能时间范围处理
         if count:
-            end_date = TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime('%Y%m%d')
-            start_date = ''
+            end_date = (
+                TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime("%Y%m%d")
+            )
+            start_date = ""
         else:
             if not start and not end:
                 # 如果没有指定时间范围，使用智能默认值
                 start_date, end_date = auto_time_range(10)
             else:
-                start_date = TimeUtils.normalize_date(start) if start else '20200101'
-                end_date = TimeUtils.normalize_date(end) if end else datetime.now(tz=_SH).strftime('%Y%m%d')
+                start_date = TimeUtils.normalize_date(start) if start else "20200101"
+                end_date = (
+                    TimeUtils.normalize_date(end)
+                    if end
+                    else datetime.now(tz=_SH).strftime("%Y%m%d")
+                )
             count = -1
 
         # 处理字段
         if not fields:
-            fields = ['open', 'high', 'low', 'close', 'volume', 'amount']
+            fields = ["open", "high", "low", "close", "volume", "amount"]
         # 确保 fields 是列表类型
         elif isinstance(fields, str):
             fields = [fields]
@@ -846,14 +925,14 @@ class DataAPI:
 
         # 处理复权类型
         dividend_map = {
-            'front': 'front',
-            'back': 'back',
-            'none': 'none',
-            '前复权': 'front',
-            '后复权': 'back',
-            '不复权': 'none'
+            "front": "front",
+            "back": "back",
+            "none": "none",
+            "前复权": "front",
+            "后复权": "back",
+            "不复权": "none",
         }
-        dividend_type = dividend_map.get(adjust, 'front')
+        dividend_type = dividend_map.get(adjust, "front")
 
         # 多次重试获取数据
         last_error = None
@@ -861,21 +940,23 @@ class DataAPI:
             try:
                 # 先下载历史数据
                 try:
-                    print(f"正在下载 {codes} 的历史数据... (第{attempt+1}次尝试)")
+                    print(f"正在下载 {codes} 的历史数据... (第{attempt + 1}次尝试)")
 
                     # 对于分钟数据，限制时间范围避免数据量过大
-                    if period in ['1m', '5m', '15m', '30m']:
+                    if period in ["1m", "5m", "15m", "30m"]:
                         # 分钟数据只下载最近几天
                         download_start, download_end = auto_time_range(3)
                     else:
-                        download_start = start_date if start_date else '20200101'
-                        download_end = end_date if end_date else datetime.now(tz=_SH).strftime('%Y%m%d')
+                        download_start = start_date if start_date else "20200101"
+                        download_end = (
+                            end_date if end_date else datetime.now(tz=_SH).strftime("%Y%m%d")
+                        )
 
                     self.xt.download_history_data2(
                         stock_list=codes,
                         period=period,
                         start_time=download_start,
-                        end_time=download_end
+                        end_time=download_end,
                     )
                     print("历史数据下载完成")
                 except Exception as download_error:
@@ -884,7 +965,7 @@ class DataAPI:
 
                 # 调用xtquant接口获取数据
                 # 对于分钟数据，使用count参数限制数据量
-                if period in ['1m', '5m', '15m', '30m'] and count is None:
+                if period in ["1m", "5m", "15m", "30m"] and count is None:
                     # 分钟数据默认最多获取100条
                     actual_count = 100
                 else:
@@ -894,11 +975,11 @@ class DataAPI:
                     field_list=fields,
                     stock_list=codes,
                     period=period,
-                    start_time=start_date if start_date else '20200101',
-                    end_time=end_date if end_date else datetime.now(tz=_SH).strftime('%Y%m%d'),
+                    start_time=start_date if start_date else "20200101",
+                    end_time=end_date if end_date else datetime.now(tz=_SH).strftime("%Y%m%d"),
                     count=actual_count,
                     dividend_type=dividend_type,
-                    fill_data=config.get('data.fill_data', True)
+                    fill_data=config.get("data.fill_data", True),
                 )
 
                 if not data:
@@ -907,22 +988,30 @@ class DataAPI:
                 # 检查是否所有字段都是空的
                 all_empty = True
                 for field, field_data in data.items():
-                    if field_data is not None and hasattr(field_data, 'empty') and not field_data.empty:
+                    if (
+                        field_data is not None
+                        and hasattr(field_data, "empty")
+                        and not field_data.empty
+                    ):
                         all_empty = False
                         break
 
                 if all_empty:
-                    raise DataError(f"无法获取股票 {codes} 的数据。建议：\n1. 检查股票代码是否正确\n2. 尝试使用推荐的股票代码: {get_recommended_stocks()}\n3. 确保时间范围合理\n4. 在迅投客户端中手动下载相关股票的历史数据")
+                    raise DataError(
+                        f"无法获取股票 {codes} 的数据。建议：\n1. 检查股票代码是否正确\n2. 尝试使用推荐的股票代码: {get_recommended_stocks()}\n3. 确保时间范围合理\n4. 在迅投客户端中手动下载相关股票的历史数据"
+                    )
 
                 # 处理返回数据（使用原有的数据处理逻辑）
-                if period == 'tick':
+                if period == "tick":
                     # 分笔数据处理
                     result_frames: list[pd.DataFrame] = []
                     for code, tick_data in data.items():
                         if tick_data is not None and len(tick_data) > 0:
                             df = pd.DataFrame(tick_data)
-                            df['code'] = code
-                            df['time'] = pd.to_datetime(df['time'], unit='ms', utc=True).dt.tz_convert(_SH)
+                            df["code"] = code
+                            df["time"] = pd.to_datetime(
+                                df["time"], unit="ms", utc=True
+                            ).dt.tz_convert(_SH)
                             result_frames.append(df)
 
                     if result_frames:
@@ -937,12 +1026,18 @@ class DataAPI:
                     # 检查是否有有效数据
                     has_data = False
                     for stock_code, stock_data in data.items():
-                        if stock_data is not None and hasattr(stock_data, 'empty') and not stock_data.empty:
+                        if (
+                            stock_data is not None
+                            and hasattr(stock_data, "empty")
+                            and not stock_data.empty
+                        ):
                             has_data = True
                             break
 
                     if not has_data:
-                        raise DataError(f"无法获取股票 {codes} 的数据。建议使用推荐股票: {get_recommended_stocks()}")
+                        raise DataError(
+                            f"无法获取股票 {codes} 的数据。建议使用推荐股票: {get_recommended_stocks()}"
+                        )
 
                     # 重构数据格式 - 适配get_market_data_ex新格式
                     result_records: list[dict[str, Any]] = []
@@ -954,14 +1049,11 @@ class DataAPI:
 
                         # 为每个时间点创建记录
                         for time_idx in stock_df.index:
-                            record = {
-                                'time': time_idx,
-                                'code': stock_code
-                            }
+                            record = {"time": time_idx, "code": stock_code}
 
                             # 添加各个字段的数据
                             for field in fields:
-                                if field == 'time':
+                                if field == "time":
                                     continue  # 已经处理
 
                                 if field in stock_df.columns:
@@ -978,22 +1070,30 @@ class DataAPI:
                         # 修复时间格式 - 基于调试结果的正确处理方式
                         try:
                             # 索引时间格式处理
-                            if final_df['time'].dtype in ['int64', 'float64']:
+                            if final_df["time"].dtype in ["int64", "float64"]:
                                 # 检查是否是分钟数据格式 (YYYYMMDDHHMMSS)
-                                sample_time = final_df['time'].iloc[0]
+                                sample_time = final_df["time"].iloc[0]
                                 if sample_time > 20000000000000:  # 分钟数据格式
                                     # YYYYMMDDHHMMSS格式
-                                    final_df['time'] = pd.to_datetime(final_df['time'].astype(str), format='%Y%m%d%H%M%S', errors='coerce')
+                                    final_df["time"] = pd.to_datetime(
+                                        final_df["time"].astype(str),
+                                        format="%Y%m%d%H%M%S",
+                                        errors="coerce",
+                                    )
                                 else:
                                     # YYYYMMDD格式
-                                    final_df['time'] = pd.to_datetime(final_df['time'].astype(str), format='%Y%m%d', errors='coerce')
-                            elif final_df['time'].dtype == 'object':
+                                    final_df["time"] = pd.to_datetime(
+                                        final_df["time"].astype(str),
+                                        format="%Y%m%d",
+                                        errors="coerce",
+                                    )
+                            elif final_df["time"].dtype == "object":
                                 # 如果是字符串格式，尝试直接转换
-                                final_df['time'] = pd.to_datetime(final_df['time'], errors='coerce')
+                                final_df["time"] = pd.to_datetime(final_df["time"], errors="coerce")
 
                             # 如果转换失败，尝试其他格式
                             # 检查是否所有时间值都是NaT
-                            notna_values = final_df['time'].notna()
+                            notna_values = final_df["time"].notna()
                             notna_count = notna_values.sum()
                             if notna_count == 0:
                                 print("警告: 时间格式转换失败")
@@ -1001,19 +1101,19 @@ class DataAPI:
                             print(f"时间格式处理警告: {e}")
 
                         # 过滤掉无效数据
-                        final_df = final_df.dropna(subset=['time'])
+                        final_df = final_df.dropna(subset=["time"])
 
                         if final_df.empty:
                             raise DataError("时间格式转换后数据为空")
 
-                        return final_df.sort_values(['code', 'time']).reset_index(drop=True)
+                        return final_df.sort_values(["code", "time"]).reset_index(drop=True)
                     else:
                         raise DataError("未能构建有效的数据结构")
 
             except Exception as e:
                 last_error = e
                 if attempt < max_retries - 1:
-                    print(f"第{attempt+1}次尝试失败: {str(e)}")
+                    print(f"第{attempt + 1}次尝试失败: {str(e)}")
                     print("等待3秒后重试...")
                     time.sleep(3)
                 else:

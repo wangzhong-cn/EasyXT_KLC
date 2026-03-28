@@ -235,6 +235,70 @@ class DataManagerController:
             return {"sources": {}, "total_sources": 0, "healthy_sources": 0, "error": str(exc)}
 
     # ------------------------------------------------------------------
+    # 3b. 数据来源溯源（per-stock ingestion traceability）
+    # ------------------------------------------------------------------
+
+    def get_ingestion_traceability(
+        self,
+        stock_code: str | None = None,
+        period: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """查询 data_ingestion_status 表，返回逐标的入库溯源记录。
+
+        返回结构::
+            {
+                "records": [
+                    {
+                        "stock_code": str,
+                        "period": str,
+                        "source": str,
+                        "status": str,
+                        "record_count": int,
+                        "start_date": str,
+                        "end_date": str,
+                        "last_updated": str,
+                        "ingest_run_id": str,
+                        "error_message": str | None,
+                    },
+                    ...
+                ],
+                "total": int,
+                "error": str | None,
+            }
+        """
+        import duckdb
+
+        try:
+            con = duckdb.connect(self._duckdb_path, read_only=True)
+            query = "SELECT * FROM data_ingestion_status"
+            params: list[Any] = []
+            where: list[str] = []
+            if stock_code:
+                where.append("stock_code = ?")
+                params.append(stock_code)
+            if period:
+                where.append("period = ?")
+                params.append(period)
+            if where:
+                query += " WHERE " + " AND ".join(where)
+            query += " ORDER BY last_updated DESC"
+            if limit > 0:
+                query += f" LIMIT {int(limit)}"
+            df = con.execute(query, params).fetchdf() if params else con.execute(query).fetchdf()
+            con.close()
+            records = df.to_dict(orient="records")
+            # 序列化 Timestamp → str
+            for r in records:
+                for k, v in r.items():
+                    if hasattr(v, "isoformat"):
+                        r[k] = v.isoformat()
+            return {"records": records, "total": len(records), "error": None}
+        except Exception as exc:
+            log.warning("get_ingestion_traceability failed: %s", exc)
+            return {"records": [], "total": 0, "error": str(exc)}
+
+    # ------------------------------------------------------------------
     # 4. 环境变量检查
     # ------------------------------------------------------------------
 
@@ -391,19 +455,24 @@ class DataManagerController:
         start_date: str,
         end_date: str,
     ) -> dict[str, Any]:
-        """并行从 DuckDB 与 UnifiedDataInterface 取数，比较收盘价一致性。
+        """从 DuckDB（本地主库）与 AKShare（独立外部源）分别取数，比较收盘价一致性。
+
+        关键设计：AKShare 直接调用，**完全绕开 UnifiedDataInterface 路由**，
+        确保比对双方数据来自独立管道，消除"DuckDB 自比 DuckDB"的循环验证问题。
 
         返回结构::
             {
                 "stock_code": str,
                 "start_date": str, "end_date": str,
                 "duckdb_rows": int,
-                "live_rows": int,
+                "akshare_rows": int,
+                "compared_rows": int,
                 "consistent": bool,
                 "consistency_rate": float,   # 0.0~1.0
                 "max_diff_pct": float,        # 最大相对偏差（%）
-                "diff_days": [...],           # 偏差 > 1% 的日期列表
-                "error": str
+                "diff_days": [...],           # 偏差 > 1% 的日期列表（最多 20 天）
+                "source": str,               # 对照源名称：akshare / contract_validator
+                "error": str                 # 仅在异常时
             }
         """
         result: dict[str, Any] = {
@@ -411,105 +480,141 @@ class DataManagerController:
             "start_date": start_date,
             "end_date": end_date,
             "duckdb_rows": 0,
-            "live_rows": 0,
+            "akshare_rows": 0,
+            "compared_rows": 0,
             "consistent": False,
             "consistency_rate": 0.0,
             "max_diff_pct": 0.0,
             "diff_days": [],
+            "source": "unknown",
         }
+        _pd = _safe_import("pandas")
+        if _pd is None:
+            result["error"] = "pandas 不可用"
+            return result
+
         try:
-            # ── 从 DuckDB 取数 ──────────────────────────────────────────
+            # ── 源1：从 DuckDB 本地主库直接读取（不走 UDI 路由） ──────────
             get_db = _safe_import("data_manager.duckdb_connection_pool", "get_db_manager")
             if get_db is None:
                 result["error"] = "duckdb_connection_pool 不可用"
                 return result
             mgr = get_db(self._duckdb_path)
             df_duck = mgr.execute_read_query(
-                "SELECT date, close FROM stock_daily WHERE code=? AND date>=? AND date<=? ORDER BY date",
+                "SELECT date, close FROM stock_daily"
+                " WHERE stock_code=? AND date>=? AND date<=? ORDER BY date",
                 [stock_code, start_date, end_date],
             )
             result["duckdb_rows"] = len(df_duck)
             if df_duck.empty:
-                result["error"] = f"DuckDB 中 {stock_code} 无数据"
+                result["error"] = f"DuckDB 中 {stock_code} 在 {start_date}~{end_date} 无日线数据"
                 return result
 
-            # ── 从统一数据接口取数（或直接用 DuckDB 已有数据做契约校验）──
-            udi_cls = _safe_import("data_manager.unified_data_interface", "UnifiedDataInterface")
-            if udi_cls is None:
-                # 降级：契约验证替代多源比价
+            # ── 源2A：直接调用 AKShare（独立外部源，绕开 UDI）──────────────
+            # 使用 UnifiedDataInterface._read_from_akshare 以复用已有的列名归一化逻辑，
+            # 但通过 _skip_third_party_fallback=False + force_source='akshare' 绕开DuckDB路由。
+            # 实现方式：直接 import akshare，复用 UDI 中已有的 symbol 拆分和重试逻辑。
+            df_ak: "pd.DataFrame | None" = None
+            ak_error: str = ""
+            try:
+                import akshare as ak  # type: ignore
+                symbol = stock_code.replace(".SZ", "").replace(".SH", "")
+                start_str = start_date.replace("-", "")
+                end_str = end_date.replace("-", "")
+                # 判断是否为指数（6位数字以0/1/3/8开头的 A 股标的，非指数）
+                _idx_prefixes = ("000", "399", "899", "880")
+                is_index = any(symbol.startswith(p) for p in _idx_prefixes) and len(symbol) == 6
+                if is_index:
+                    df_ak = ak.index_zh_a_hist(
+                        symbol=symbol, period="daily",
+                        start_date=start_str, end_date=end_str,
+                    )
+                else:
+                    df_ak = ak.stock_zh_a_hist(
+                        symbol=symbol, period="daily",
+                        start_date=start_str, end_date=end_str,
+                        adjust="",
+                    )
+                if df_ak is None or df_ak.empty:
+                    ak_error = "AKShare 返回空数据"
+                else:
+                    # 列名归一化（AKShare 中文列名 → 英文）
+                    df_ak = df_ak.rename(columns={"日期": "date", "收盘": "close"})
+                    df_ak["date"] = _pd.to_datetime(df_ak["date"], errors="coerce").dt.date
+                    df_ak = df_ak[["date", "close"]].dropna(subset=["date", "close"])
+                    df_ak["close"] = _pd.to_numeric(df_ak["close"], errors="coerce")
+                    df_ak = df_ak.dropna(subset=["close"])
+            except ImportError:
+                ak_error = "akshare 未安装"
+            except Exception as ak_exc:
+                ak_error = str(ak_exc)
+                log.warning("cross_validate: AKShare 拉取失败 %s: %s", stock_code, ak_exc)
+
+            # ── 源2B：AKShare 不可用时降级为 DataContractValidator 内部一致性校验 ──
+            if df_ak is None or (hasattr(df_ak, "empty") and df_ak.empty):
                 validator_cls = _safe_import(
                     "data_manager.data_contract_validator", "DataContractValidator"
                 )
                 if validator_cls is None:
-                    result["error"] = "UnifiedDataInterface 和 DataContractValidator 均不可用"
+                    result["error"] = f"AKShare 不可用（{ak_error}），DataContractValidator 也不可用"
                     return result
                 validator = validator_cls()
                 vr = validator.validate(df_duck, symbol=stock_code, source="duckdb")
-                result["consistent"] = not vr.violations
-                result["consistency_rate"] = vr.ohlc_sanity_pct
-                result["max_diff_pct"] = round(vr.velocity_violation_pct * 100, 2)
-                result["live_rows"] = len(df_duck)
-                result["note"] = "降级模式：使用 DataContractValidator 内部一致性校验"
+                result.update({
+                    "akshare_rows": len(df_duck),
+                    "compared_rows": len(df_duck),
+                    "consistent": not getattr(vr, "violations", True),
+                    "consistency_rate": getattr(vr, "ohlc_sanity_pct", 0.0),
+                    "max_diff_pct": round(getattr(vr, "velocity_violation_pct", 0.0) * 100, 2),
+                    "source": "contract_validator（AKShare降级）",
+                    "note": f"AKShare不可用（{ak_error}），使用内部契约校验",
+                })
                 return result
 
-            try:
-                udi = udi_cls()
-                df_live = udi.get_stock_data(
-                    stock_code=stock_code,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-            except Exception as exc:
-                result["note"] = f"实时源拉取失败（{exc}），仅展示 DuckDB 侧数据"
-                result["duckdb_rows"] = len(df_duck)
-                result["consistent"] = True
-                result["consistency_rate"] = 1.0
-                return result
+            # ── 正式多源比对 ────────────────────────────────────────────
+            result["akshare_rows"] = len(df_ak)
+            result["source"] = "akshare"
 
-            result["live_rows"] = len(df_live)
-
-            # ── 比对收盘价 ──────────────────────────────────────────────
-            if df_live.empty:
-                result["error"] = "实时数据源无返回数据"
-                return result
-
-            # 归一化列名
-            for col in ("close", "Close", "close_price"):
-                if col in df_live.columns:
-                    df_live = df_live.rename(columns={col: "close"})
-                    break
-            for col in ("date", "Date", "trade_date"):
-                if col in df_live.columns:
-                    df_live = df_live.rename(columns={col: "date"})
-                    break
-
-            _pd = _safe_import("pandas")
-            if _pd is None:
-                result["error"] = "pandas 不可用"
-                return result
             df_duck["date"] = _pd.to_datetime(df_duck["date"]).dt.date
-            df_live["date"] = _pd.to_datetime(df_live["date"]).dt.date
-            merged = df_duck.merge(df_live[["date", "close"]], on="date", suffixes=("_duckdb", "_live"))
+            df_duck["close"] = _pd.to_numeric(df_duck["close"], errors="coerce")
+
+            merged = df_duck.merge(df_ak, on="date", suffixes=("_duckdb", "_ak"))
+            result["compared_rows"] = len(merged)
 
             if merged.empty:
-                result["error"] = "两源数据无交集日期，无法对账"
+                result["error"] = "两源数据无交集交易日，无法对账（可能时区或假期处理不同）"
                 return result
 
-            diffs = ((merged["close_live"] - merged["close_duckdb"]).abs() /
-                     merged["close_duckdb"].replace(0, float("nan"))).fillna(0)
+            # 相对偏差计算（以 DuckDB 为基准）
+            close_base = merged["close_duckdb"].replace(0, float("nan"))
+            diffs = ((merged["close_ak"] - merged["close_duckdb"]).abs() / close_base).fillna(0)
             threshold = 0.01  # 1% 偏差视为不一致
             diff_mask = diffs > threshold
-            max_diff = float(diffs.max()) * 100
+            max_diff_pct = float(diffs.max()) * 100
             consistency_rate = float((~diff_mask).mean())
             diff_days = merged.loc[diff_mask, "date"].astype(str).tolist()
 
             result.update({
                 "consistent": consistency_rate >= 0.99,
                 "consistency_rate": round(consistency_rate, 4),
-                "max_diff_pct": round(max_diff, 4),
-                "diff_days": diff_days[:20],  # 最多展示 20 天
-                "compared_rows": len(merged),
+                "max_diff_pct": round(max_diff_pct, 4),
+                "diff_days": diff_days[:20],
             })
+
+            # 验证完成后广播事件
+            try:
+                from core.signal_bus import signal_bus as _sb
+                from core.events import Events as _Ev
+                if hasattr(_Ev, "DATA_QUALITY_UPDATED"):
+                    _sb.emit(_Ev.DATA_QUALITY_UPDATED,
+                             stock_code=stock_code,
+                             consistent=result["consistent"],
+                             consistency_rate=result["consistency_rate"],
+                             max_diff_pct=result["max_diff_pct"],
+                             source="cross_validate")
+            except Exception:
+                pass
+
         except Exception as exc:
             log.warning("cross_validate_sources(%s) failed: %s", stock_code, exc)
             result["error"] = str(exc)

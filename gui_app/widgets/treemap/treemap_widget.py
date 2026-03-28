@@ -25,7 +25,6 @@ TreemapWidget — 行情热图主控件
 from __future__ import annotations
 
 import logging
-import random
 from typing import Optional
 
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
@@ -40,75 +39,6 @@ from PyQt5.QtWidgets import (
 )
 
 log = logging.getLogger(__name__)
-
-# ── 内置演示数据（占位，待接入真实行情后替换）──────────────────────────────────
-_DEMO_SECTORS = [
-    {
-        "name": "电子",
-        "children": [
-            {"symbol": "600703.SH", "name": "三安光电",   "value": 500_0000_0000,  "pct_change": 3.21},
-            {"symbol": "002415.SZ", "name": "海康威视",   "value": 3000_0000_0000, "pct_change": 1.05},
-            {"symbol": "300015.SZ", "name": "爱尔眼科",   "value": 800_0000_0000,  "pct_change": -0.53},
-            {"symbol": "603501.SH", "name": "韦尔股份",   "value": 600_0000_0000,  "pct_change": 4.87},
-            {"symbol": "002049.SZ", "name": "紫光国微",   "value": 400_0000_0000,  "pct_change": 2.34},
-        ],
-    },
-    {
-        "name": "医药生物",
-        "children": [
-            {"symbol": "600276.SH", "name": "恒瑞医药",   "value": 2000_0000_0000, "pct_change": -1.23},
-            {"symbol": "000661.SZ", "name": "长春高新",   "value": 500_0000_0000,  "pct_change": 0.78},
-            {"symbol": "300741.SZ", "name": "华宝新能",   "value": 300_0000_0000,  "pct_change": -3.45},
-        ],
-    },
-    {
-        "name": "食品饮料",
-        "children": [
-            {"symbol": "600519.SH", "name": "贵州茅台",   "value": 20000_0000_0000,"pct_change": 0.55},
-            {"symbol": "000858.SZ", "name": "五粮液",     "value": 5000_0000_0000, "pct_change": -0.22},
-            {"symbol": "603288.SH", "name": "海天味业",   "value": 1500_0000_0000, "pct_change": 1.89},
-        ],
-    },
-    {
-        "name": "银行",
-        "children": [
-            {"symbol": "601398.SH", "name": "工商银行",   "value": 15000_0000_0000,"pct_change": 0.12},
-            {"symbol": "600036.SH", "name": "招商银行",   "value": 10000_0000_0000,"pct_change": -0.88},
-            {"symbol": "601328.SH", "name": "交通银行",   "value": 3000_0000_0000, "pct_change": 0.45},
-        ],
-    },
-    {
-        "name": "非银金融",
-        "children": [
-            {"symbol": "600030.SH", "name": "中信证券",   "value": 4000_0000_0000, "pct_change": 2.01},
-            {"symbol": "000166.SZ", "name": "申万宏源",   "value": 1000_0000_0000, "pct_change": 3.15},
-        ],
-    },
-    {
-        "name": "新能源",
-        "children": [
-            {"symbol": "300750.SZ", "name": "宁德时代",   "value": 15000_0000_0000,"pct_change": -2.34},
-            {"symbol": "002594.SZ", "name": "比亚迪",     "value": 8000_0000_0000, "pct_change": -1.11},
-            {"symbol": "601012.SH", "name": "隆基绿能",   "value": 2000_0000_0000, "pct_change": -5.67},
-            {"symbol": "600438.SH", "name": "通威股份",   "value": 1200_0000_0000, "pct_change": -4.23},
-        ],
-    },
-    {
-        "name": "房地产",
-        "children": [
-            {"symbol": "000002.SZ", "name": "万科A",      "value": 1500_0000_0000, "pct_change": -6.78},
-            {"symbol": "600048.SH", "name": "保利发展",   "value": 1200_0000_0000, "pct_change": -3.45},
-        ],
-    },
-    {
-        "name": "计算机",
-        "children": [
-            {"symbol": "002236.SZ", "name": "大华股份",   "value": 600_0000_0000,  "pct_change": 1.56},
-            {"symbol": "688111.SH", "name": "金山办公",   "value": 800_0000_0000,  "pct_change": 0.99},
-            {"symbol": "300059.SZ", "name": "东方财富",   "value": 2000_0000_0000, "pct_change": 5.43},
-        ],
-    },
-]
 
 
 class TreemapWidget(QWidget):
@@ -228,7 +158,6 @@ class TreemapWidget(QWidget):
         if is_native:
             adapter.on_symbol_click(self._on_symbol_clicked)
             self._initialized = True
-            # 加载演示数据
             QTimer.singleShot(100, self.refresh)
         else:
             log.warning("TreemapWidget: 降级模式，热图不可用")
@@ -239,7 +168,7 @@ class TreemapWidget(QWidget):
         """
         拉取行情数据并推送到 JS 端。
 
-        当前使用内置演示数据；接入真实行情后在此处调用 UDI。
+        当前禁止内置演示数据；仅等待真实行情接入。
         """
         if not self._initialized:
             return
@@ -261,17 +190,11 @@ class TreemapWidget(QWidget):
 
     def _load_sectors(self) -> list[dict]:
         """
-        数据源入口。目前返回内置演示数据。
+        数据源入口。演示数据已移除，返回空列表等待真实行情接入。
 
         TODO: 接 UnifiedDataInterface.get_sector_heatmap()
         """
-        # 给演示数据添加随机微小扰动，模拟实时行情
-        import copy
-        sectors = copy.deepcopy(_DEMO_SECTORS)
-        for sector in sectors:
-            for stock in sector.get("children", []):
-                stock["pct_change"] += round(random.uniform(-0.3, 0.3), 2)
-        return sectors
+        return []
 
     def _rebuild_sector_filter(self, sectors: list[dict]) -> None:
         """根据数据动态填充板块下拉框。"""

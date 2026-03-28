@@ -658,5 +658,6 @@ def create_chart_adapter(
 
     # ── 3. 默认 lwc_python ────────────────────────────────────────────────────
     if chart is None:
-        raise ValueError("create_chart_adapter: lwc_python backend 需要传入 chart 对象")
+        # 无 chart 对象时无法创建 LwcPythonChartAdapter，回退到 NativeLwcChartAdapter
+        return NativeLwcChartAdapter()
     return LwcPythonChartAdapter(chart)

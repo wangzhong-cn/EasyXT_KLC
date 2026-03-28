@@ -252,10 +252,9 @@ class CacheManager:
             if isinstance(value, pd.DataFrame):
                 value.to_parquet(path, index=False)
             else:
-                json_path = self._get_disk_json_cache_path(namespace, key)
-                payload = {"_meta": {"fmt": "json", "version": 1}, "data": value}
-                with open(json_path, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False)
+                import pickle
+                with open(path, "wb") as f:
+                    pickle.dump(value, f)
         except Exception as e:
             self._logger.warning(f"Failed to save to disk cache: {e}")
 
@@ -267,8 +266,14 @@ class CacheManager:
             if path.exists():
                 try:
                     return pd.read_parquet(path)
+                except Exception:
+                    pass
+                try:
+                    import pickle
+                    with open(path, "rb") as f:
+                        return pickle.load(f)
                 except Exception as e:
-                    self._logger.warning("Invalid parquet cache, evicting: %s", e)
+                    self._logger.warning("Invalid cache file, evicting: %s", e)
                     try:
                         path.unlink()
                     except Exception:

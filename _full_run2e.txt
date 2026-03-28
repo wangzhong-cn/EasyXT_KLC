@@ -1,0 +1,9 @@
+Fatal Python error: PyEval_SaveThread: the function must be called with the GIL held, but the GIL is released (the current Python thread state is NULL)
+Python runtime state: initialized
+
+Thread 0x0000961c (most recent call first):
+  File Windows fatal exception: access violation
+
+Thread 0x0000961c (most recent call first):
+  File Windows fatal exception: access violation
+

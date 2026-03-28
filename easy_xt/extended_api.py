@@ -490,7 +490,6 @@ class ExtendedAPI:
 
                 results[code] = signal
             except Exception as _sig_err:
-                logging.getLogger(__name__).warning("信号计算异常 %s: %s", code, _sig_err)as _sig_err:
                 logging.getLogger(__name__).warning("信号计算异常 %s: %s", code, _sig_err)
                 results[code] = 'hold'
 
@@ -797,6 +796,157 @@ class ExtendedAPI:
                     results[code] = order_ids
 
         return results
+
+    def optimize_and_rebalance(
+        self,
+        account_id: str,
+        returns: "pd.DataFrame",
+        max_single_weight: float = 0.3,
+        dry_run: bool = False,
+    ) -> tuple:
+        """基于历史收益率优化权重后执行再平衡。
+
+        Returns:
+            (OptimizeResult, OptimalWeightRiskCheck, order_ids_dict)
+            当优化不可行或风险检查未通过或 dry_run=True 时，order_ids_dict 为 {}。
+        """
+        from core.portfolio_optimizer import PortfolioOptimizeConfig, PortfolioOptimizer
+        from core.portfolio_risk import OptimalWeightRiskCheck, PortfolioRiskAnalyzer
+
+        opt = PortfolioOptimizer(
+            PortfolioOptimizeConfig(method="risk_parity", max_weight=max_single_weight)
+        )
+        opt_result = opt.optimize_result(returns)
+
+        if not opt_result.feasible:
+            risk_check = OptimalWeightRiskCheck(feasible=False, warnings=["优化不可行"])
+            return (opt_result, risk_check, {})
+
+        risk_check = PortfolioRiskAnalyzer.check_optimal_weights(
+            opt_result.weights, max_single_weight=max_single_weight
+        )
+
+        if not risk_check.feasible or dry_run:
+            return (opt_result, risk_check, {})
+
+        order_ids = self.rebalance_portfolio(account_id, opt_result.weights)
+        return (opt_result, risk_check, order_ids)
+
+    def execute_twap(
+        self,
+        account_id: str,
+        code: str,
+        side: str,
+        total_volume: int,
+        slices: int = 5,
+        interval_sec: float = 60.0,
+        dry_run: bool = False,
+    ) -> dict:
+        """TWAP 分批执行。将 total_volume 均分为 slices 批次，每批间隔 interval_sec 秒。
+
+        Args:
+            account_id: 账户ID
+            code: 股票代码
+            side: 'buy' 或 'sell'
+            total_volume: 总量
+            slices: 拆分批次数（默认5）
+            interval_sec: 批次间隔秒数（默认60）
+            dry_run: True 时只返回计划，不实际下单
+
+        Returns:
+            {feasible, message, planned_volumes, submitted_volumes, order_ids}
+        """
+        if side not in ("buy", "sell"):
+            return {"feasible": False, "message": "side 必须为 buy/sell", "planned_volumes": [], "submitted_volumes": [], "order_ids": []}
+
+        if slices <= 0:
+            slices = 1
+        base_vol = total_volume // slices
+        remainder = total_volume - base_vol * slices
+        planned: list[int] = [base_vol + (1 if i < remainder else 0) for i in range(slices)]
+
+        if dry_run:
+            return {"feasible": True, "message": "dry_run=True", "planned_volumes": planned, "submitted_volumes": [], "order_ids": []}
+
+        submitted: list[int] = []
+        order_ids: list = []
+        for i, vol in enumerate(planned):
+            if i > 0:
+                time.sleep(interval_sec)
+            if side == "buy":
+                oid = self.trade_api.buy(account_id, code, vol)
+            else:
+                oid = self.trade_api.sell(account_id, code, vol)
+            submitted.append(vol)
+            order_ids.append(oid)
+
+        return {"feasible": True, "message": "ok", "planned_volumes": planned, "submitted_volumes": submitted, "order_ids": order_ids}
+
+    def execute_vwap(
+        self,
+        account_id: str,
+        code: str,
+        side: str,
+        total_volume: int,
+        volume_profile: list | None = None,
+        interval_sec: float = 60.0,
+        dry_run: bool = False,
+    ) -> dict:
+        """VWAP 分批执行。按 volume_profile 比例分配 total_volume，若 volume_profile 为空则回退到 TWAP。
+
+        Args:
+            account_id: 账户ID
+            code: 股票代码
+            side: 'buy' 或 'sell'
+            total_volume: 总量
+            volume_profile: 各时段成交量比例列表（空列表则回退 TWAP）
+            interval_sec: 批次间隔秒数（默认60）
+            dry_run: True 时只返回计划，不实际下单
+
+        Returns:
+            {feasible, message, fallback_to_twap, planned_volumes, submitted_volumes, order_ids}
+        """
+        if side not in ("buy", "sell"):
+            return {"feasible": False, "message": "side 必须为 buy/sell", "fallback_to_twap": False, "planned_volumes": [], "submitted_volumes": [], "order_ids": []}
+
+        fallback = not volume_profile
+        if fallback:
+            slices = 5
+            base_vol = total_volume // slices
+            remainder = total_volume - base_vol * slices
+            planned: list[int] = [base_vol + (1 if i < remainder else 0) for i in range(slices)]
+        else:
+            total_ratio = sum(volume_profile)
+            if total_ratio <= 0:
+                fallback = True
+                slices = 5
+                base_vol = total_volume // slices
+                remainder = total_volume - base_vol * slices
+                planned = [base_vol + (1 if i < remainder else 0) for i in range(slices)]
+            else:
+                ratios = [r / total_ratio for r in volume_profile]
+                raw = [int(total_volume * r) for r in ratios]
+                diff = total_volume - sum(raw)
+                for i in range(abs(diff)):
+                    raw[i] += 1 if diff > 0 else -1
+                planned = raw
+
+        if dry_run:
+            return {"feasible": True, "message": "dry_run=True", "fallback_to_twap": fallback, "planned_volumes": planned, "submitted_volumes": [], "order_ids": []}
+
+        submitted: list[int] = []
+        order_ids: list = []
+        for i, vol in enumerate(planned):
+            if i > 0:
+                time.sleep(interval_sec)
+            if side == "buy":
+                oid = self.trade_api.buy(account_id, code, vol)
+            else:
+                oid = self.trade_api.sell(account_id, code, vol)
+            submitted.append(vol)
+            order_ids.append(oid)
+
+        return {"feasible": True, "message": "ok", "fallback_to_twap": fallback, "planned_volumes": planned, "submitted_volumes": submitted, "order_ids": order_ids}
 
     # ==================== 16. 数据导出 ====================
 

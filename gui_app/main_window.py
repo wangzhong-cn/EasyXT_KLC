@@ -25,6 +25,7 @@ from urllib.parse import quote
 # 强制设置Matplotlib后端为Agg，防止在GUI线程中初始化交互式后端导致死锁
 try:
     import matplotlib
+
     matplotlib.use("Agg")
 except ImportError:
     pass
@@ -35,30 +36,57 @@ try:
 except ImportError:
     pass
 
-from PyQt5.QtCore import QCoreApplication, QProcess, QProcessEnvironment, QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import (
+    QCoreApplication,
+    QProcess,
+    QProcessEnvironment,
+    QSettings,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+)
 from PyQt5.QtGui import QDesktopServices, QFont
 from PyQt5.QtWidgets import (
     QApplication,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QStatusBar,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+
 project_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_path not in sys.path:
     sys.path.insert(0, project_path)
 
 try:
-    from tools.release_rag_policy import gate_detail_tag, header_rag_status, parse_gate_detail_tag, period_validation_summary, period_validation_tag, period_validation_detail_tag, rag_badge, rag_color, rag_tag
+    from tools.release_rag_policy import (
+        gate_detail_tag,
+        header_rag_status,
+        parse_gate_detail_tag,
+        period_validation_summary,
+        period_validation_tag,
+        period_validation_detail_tag,
+        rag_badge,
+        rag_color,
+        rag_tag,
+    )
 except Exception:
+
     def period_validation_summary(stability_evidence, peak_release_gate):
         gate = peak_release_gate if isinstance(peak_release_gate, dict) else {}
         evidence = stability_evidence if isinstance(stability_evidence, dict) else {}
-        period = evidence.get("period_validation") if isinstance(evidence.get("period_validation"), dict) else {}
+        period = (
+            evidence.get("period_validation")
+            if isinstance(evidence.get("period_validation"), dict)
+            else {}
+        )
         failed = int(gate.get("period_validation_failed_items", period.get("failed_rows", 0)) or 0)
         max_allowed = int(gate.get("max_period_validation_failed_items", 0) or 0)
         return failed, max_allowed
@@ -128,8 +156,13 @@ except Exception:
 
     def parse_gate_detail_tag(tag):
         text = str(tag or "")
-        ok = text.startswith("GATE_DETAIL[v=1|rag=RAG[") and "|pv_detail=PV_DETAIL[v=1|" in text and text.endswith("]")
+        ok = (
+            text.startswith("GATE_DETAIL[v=1|rag=RAG[")
+            and "|pv_detail=PV_DETAIL[v=1|" in text
+            and text.endswith("]")
+        )
         return {"ok": ok, "error": "" if ok else "invalid_gate_detail_format", "raw": text}
+
 
 from gui_app.widgets.chart.trading_hours_guard import TradingHoursGuard
 
@@ -268,6 +301,7 @@ def _is_realtime_failure_reason(reason: str) -> bool:
     )
     return any(k in text for k in keys)
 
+
 Events = importlib.import_module("core.events").Events
 signal_bus = importlib.import_module("core.signal_bus").signal_bus
 ThemeManager = importlib.import_module("core.theme_manager").ThemeManager
@@ -278,7 +312,10 @@ try:
     build_engine_status_detail = getattr(engine_status_ui_module, "build_engine_status_detail")
     format_engine_status_log = getattr(engine_status_ui_module, "format_engine_status_log")
 except Exception:
-    def format_engine_status_ui(status: dict | None, label_prefix: str = "回测引擎") -> dict[str, str]:
+
+    def format_engine_status_ui(
+        status: dict | None, label_prefix: str = "回测引擎"
+    ) -> dict[str, str]:
         return {
             "text": f"{label_prefix}: 状态未知 ❓",
             "color": "#666666",
@@ -290,6 +327,7 @@ except Exception:
 
     def format_engine_status_log(status: dict | None, prefix: str = "BACKTEST_ENGINE") -> str:
         return f"[{prefix}] level=WARN mode=unknown available=None message=状态格式化模块不可用"
+
 
 EASYXT_AVAILABLE = False
 easy_xt = None
@@ -501,13 +539,19 @@ class ConnectionCheckThread(QThread):
             if os.environ.get("EASYXT_ENABLE_ACTIVE_PROBE", "0") not in ("1", "true", "True"):
                 probe_mode = "passive"
             else:
-                probe_mode = os.environ.get("EASYXT_CONNECTION_PROBE_MODE", "passive").strip().lower()
+                probe_mode = (
+                    os.environ.get("EASYXT_CONNECTION_PROBE_MODE", "passive").strip().lower()
+                )
             if probe_mode not in ("active", "safe"):
                 probe_mode = "passive"
             if probe_mode == "passive":
                 self.result.emit(True)
                 return
-            if os.environ.get("EASYXT_ENABLE_PROBE_SUBPROCESS_ISOLATION", "1") in ("1", "true", "True"):
+            if os.environ.get("EASYXT_ENABLE_PROBE_SUBPROCESS_ISOLATION", "1") in (
+                "1",
+                "true",
+                "True",
+            ):
                 self.result.emit(_probe_easyxt_in_subprocess(probe_mode))
                 return
             try:
@@ -581,10 +625,10 @@ class MainWindow(QMainWindow):
         self._logger = logging.getLogger(__name__)
         os.environ["EASYXT_CONNECTION_PROBE_MODE"] = "passive"
         os.environ.setdefault("EASYXT_ENABLE_XTDATA_QUOTE_PROBE", "1")
-        os.environ.setdefault("EASYXT_RT_XTDATA_ONLY", "0")
-        os.environ.setdefault("EASYXT_API_PORT", "8080")
+        os.environ.setdefault("EASYXT_RT_XTDATA_ONLY", "1")
+        os.environ.setdefault("EASYXT_API_PORT", "8765")
         os.environ.setdefault("EASYXT_USE_WS_QUOTE", "1")
-        os.environ.setdefault("EASYXT_ENABLE_BROKER_WARMUP", "1")
+        os.environ.setdefault("EASYXT_ENABLE_BROKER_WARMUP", "0")
         os.environ.setdefault("EASYXT_ENABLE_XT_LISTING_DATE", "0")
         os.environ.setdefault("EASYXT_ENABLE_QMT_ONLINE", "1")
         os.environ.setdefault("EASYXT_ENABLE_AUTO_CHECKPOINT", "0")
@@ -650,13 +694,23 @@ class MainWindow(QMainWindow):
         self._last_realtime_probe_log: Optional[str] = None
         self._realtime_fail_streak = 0
         self._realtime_fuse_open_until = 0.0
-        self._realtime_fuse_fail_threshold = int(os.environ.get("EASYXT_RT_FUSE_FAIL_THRESHOLD", "8") or 8)
-        self._realtime_fuse_cooldown_s = float(os.environ.get("EASYXT_RT_FUSE_COOLDOWN_S", "45") or 45.0)
+        self._realtime_fuse_fail_threshold = int(
+            os.environ.get("EASYXT_RT_FUSE_FAIL_THRESHOLD", "8") or 8
+        )
+        self._realtime_fuse_cooldown_s = float(
+            os.environ.get("EASYXT_RT_FUSE_COOLDOWN_S", "45") or 45.0
+        )
         self._realtime_fuse_last_log_ts = 0.0
-        self._realtime_fuse_log_interval_s = float(os.environ.get("EASYXT_RT_FUSE_LOG_INTERVAL_S", "10") or 10.0)
-        self._watchdog_gap_buffer = deque(maxlen=int(os.environ.get("EASYXT_WATCHDOG_BUFFER_SIZE", "240")))
+        self._realtime_fuse_log_interval_s = float(
+            os.environ.get("EASYXT_RT_FUSE_LOG_INTERVAL_S", "10") or 10.0
+        )
+        self._watchdog_gap_buffer = deque(
+            maxlen=int(os.environ.get("EASYXT_WATCHDOG_BUFFER_SIZE", "240"))
+        )
         self._watchdog_stats_last_emit = time.monotonic()
-        self._watchdog_stats_interval_s = float(os.environ.get("EASYXT_WATCHDOG_STATS_INTERVAL_S", "60"))
+        self._watchdog_stats_interval_s = float(
+            os.environ.get("EASYXT_WATCHDOG_STATS_INTERVAL_S", "60")
+        )
         self._watchdog_slo_p99_s = float(os.environ.get("EASYXT_WATCHDOG_P99_SLO_S", "1.2"))
         self._watchdog_consecutive_violations = 0
         self._watchdog_log_path = os.path.join(project_path, "logs", "main_thread_latency.log")
@@ -678,6 +732,8 @@ class MainWindow(QMainWindow):
         self.signal_bus.subscribe(Events.DATA_QUALITY_ALERT, self._on_data_quality_alert)
         self.signal_bus.subscribe(Events.DATA_REPAIRED, self._on_data_repaired)
         self.signal_bus.subscribe(Events.ENV_CONFIG_SAVED, self._on_env_config_saved)
+        if hasattr(Events, "BULK_DOWNLOAD_PROGRESS"):
+            self.signal_bus.subscribe(Events.BULK_DOWNLOAD_PROGRESS, self._on_bulk_download_progress)
         self._startup_duckdb_health_gate()
         self._p("t0")
         self.init_ui()
@@ -838,13 +894,17 @@ class MainWindow(QMainWindow):
     def _save_alerts_state(self):
         try:
             self._alerts_settings.setValue("alerts/log_offset", int(self._alerts_log_offset))
-            self._alerts_settings.setValue("alerts/last_archive_date", self._alerts_last_archive_date)
+            self._alerts_settings.setValue(
+                "alerts/last_archive_date", self._alerts_last_archive_date
+            )
         except Exception:
             pass
 
     def _probe_backtest_engine_status(self):
         # 回测引擎探测包含重量级 import (backtrader 等)，推到后台线程（㊷修复）
-        thread_manager.run(self._probe_backtest_engine_status_bg, name="probe_backtest_engine_status")
+        thread_manager.run(
+            self._probe_backtest_engine_status_bg, name="probe_backtest_engine_status"
+        )
 
     def _probe_backtest_engine_status_bg(self):
         status = {
@@ -864,7 +924,7 @@ class MainWindow(QMainWindow):
                 available = engine_cls is not None
                 status = {
                     "available": available,
-                    "mode": "backtrader" if available else "mock",
+                    "mode": "backtrader" if available else "unavailable",
                     "error_type": None,
                     "error_message": None,
                     "hint": "状态接口不可用，使用兼容判定",
@@ -877,7 +937,9 @@ class MainWindow(QMainWindow):
                 "error_message": str(e),
                 "hint": "主窗口探测失败，请打开回测页查看详情",
             }
-        self.signal_bus.emit(Events.BACKTEST_ENGINE_STATUS_UPDATED, status=status, source="main_window")
+        self.signal_bus.emit(
+            Events.BACKTEST_ENGINE_STATUS_UPDATED, status=status, source="main_window"
+        )
 
     def _run_health_checks(self, stage: str = "runtime"):
         """健康检查：DuckDB/easyxt 在后台线程执行，chart 在主线程"""
@@ -928,6 +990,7 @@ class MainWindow(QMainWindow):
                     "wal_exists": wal_exists,
                 }
             from data_manager.duckdb_connection_pool import get_db_manager
+
             with get_db_manager(path).get_read_connection() as con:
                 try:
                     row = con.execute("SELECT COUNT(*) FROM stock_daily").fetchone()
@@ -975,10 +1038,24 @@ class MainWindow(QMainWindow):
             if os.environ.get("EASYXT_HEALTH_IMPORT_EASYXT", "0") not in ("1", "true", "True"):
                 if "easy_xt" in sys.modules:
                     mod = cast(Any, sys.modules.get("easy_xt"))
-                    return {"status": "ok", "version": getattr(mod, "__version__", "unknown"), "mode": "cached"}
-                return {"status": "ok", "code": "lazy_import_disabled", "message": "跳过主动导入 easy_xt（防止触发 xtquant C 扩展）", "mode": "lazy_skip"}
+                    return {
+                        "status": "ok",
+                        "version": getattr(mod, "__version__", "unknown"),
+                        "mode": "cached",
+                    }
+                return {
+                    "status": "ok",
+                    "code": "lazy_import_disabled",
+                    "message": "跳过主动导入 easy_xt（防止触发 xtquant C 扩展）",
+                    "mode": "lazy_skip",
+                }
             import easy_xt
-            return {"status": "ok", "version": getattr(easy_xt, "__version__", "unknown"), "mode": "imported"}
+
+            return {
+                "status": "ok",
+                "version": getattr(easy_xt, "__version__", "unknown"),
+                "mode": "imported",
+            }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -992,6 +1069,7 @@ class MainWindow(QMainWindow):
         """调用 PipelineHealth 获取因子注册表 + 数据源注册表健康摘要。"""
         try:
             from data_manager.pipeline_health import PipelineHealth
+
             report = PipelineHealth().report()
             checks = report.get("checks", {})
             factor_check = checks.get("factor_registry", {})
@@ -1018,7 +1096,7 @@ class MainWindow(QMainWindow):
                 code = result.get("code")
                 suffix = f"/{code}" if code else ""
                 summary.append(f"{name}: {status}{suffix}")
-        self._logger.info("[HEALTH][%s] %s", self._health_check_stage, ' | '.join(summary))
+        self._logger.info("[HEALTH][%s] %s", self._health_check_stage, " | ".join(summary))
 
     def _health_level(self) -> tuple[str, str]:
         # 返回 (level, text)
@@ -1058,6 +1136,7 @@ class MainWindow(QMainWindow):
     def _emit_stability_summary_bg(self):
         try:
             from data_manager.duckdb_connection_pool import resolve_duckdb_path, get_db_manager
+
             try:
                 mgr = get_db_manager(resolve_duckdb_path())
                 db_connections = getattr(mgr, "_connection_count", -1)
@@ -1077,8 +1156,12 @@ class MainWindow(QMainWindow):
         wal_flag = "修复过" if wal_repaired else "无"
         self._logger.info(
             "[STABILITY@60s] 服务重启=%s/%s 熔断=%s 日志抑制批次=%s DB连接数=%s WAL修复=%s",
-            restarts, self._SERVICE_MAX_RESTARTS,
-            circuit_flag, log_suppressed, db_connections, wal_flag,
+            restarts,
+            self._SERVICE_MAX_RESTARTS,
+            circuit_flag,
+            log_suppressed,
+            db_connections,
+            wal_flag,
         )
 
         tooltip = (
@@ -1096,7 +1179,9 @@ class MainWindow(QMainWindow):
             self.health_status.setToolTip(tooltip)
 
     def _emit_service_log_diagnostics(self):
-        thread_manager.run(self._emit_service_log_diagnostics_worker, name="emit_service_log_diagnostics")
+        thread_manager.run(
+            self._emit_service_log_diagnostics_worker, name="emit_service_log_diagnostics"
+        )
 
     def _emit_service_log_diagnostics_worker(self):
         log_path = os.path.join(project_path, "logs", "service_manager.log")
@@ -1158,10 +1243,16 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda s=summary: self._apply_service_log_diagnostics_ui(s))
 
     def _apply_service_log_diagnostics_ui(self, summary: dict):
-        fatal_signals = int(summary["gbk_errors"]) + int(summary["bind_conflicts"]) + int(summary["restart_hints"])
+        fatal_signals = (
+            int(summary["gbk_errors"])
+            + int(summary["bind_conflicts"])
+            + int(summary["restart_hints"])
+        )
         if fatal_signals > 0:
             self.service_diag_status.setText(f"服务诊断: ⚠️ {fatal_signals}")
-            self.service_diag_status.setStyleSheet("color:#d32f2f; padding-left:8px; font-weight:bold;")
+            self.service_diag_status.setStyleSheet(
+                "color:#d32f2f; padding-left:8px; font-weight:bold;"
+            )
         else:
             self.service_diag_status.setText("服务诊断: ✅")
             self.service_diag_status.setStyleSheet("color:#00aa66; padding-left:8px;")
@@ -1173,8 +1264,11 @@ class MainWindow(QMainWindow):
         self.service_diag_status.setToolTip(tip)
         self._logger.info(
             "[SERVICE_DIAG@120s] error=%s warning=%s gbk=%s bind10048=%s restart_hints=%s",
-            summary['error_lines'], summary['warning_lines'],
-            summary['gbk_errors'], summary['bind_conflicts'], summary['restart_hints'],
+            summary["error_lines"],
+            summary["warning_lines"],
+            summary["gbk_errors"],
+            summary["bind_conflicts"],
+            summary["restart_hints"],
         )
 
     def _p(self, tag: str):
@@ -1303,6 +1397,7 @@ class MainWindow(QMainWindow):
         elif hasattr(strategy_module, "tab_widget"):
             w = strategy_module.tab_widget.widget(0)
             from gui_app.widgets.strategy_governance_panel import StrategyGovernancePanel
+
             if isinstance(w, StrategyGovernancePanel):
                 panel = w
         if panel is None:
@@ -1310,6 +1405,7 @@ class MainWindow(QMainWindow):
         # 回测完成后向 signal_bus 广播
         try:
             from core.signal_bus import signal_bus as _bus
+
             if hasattr(panel, "_result_tab"):
                 # result_tab 的 load_result 被调用时回测已完成，无需额外信号
                 pass
@@ -1372,12 +1468,21 @@ class MainWindow(QMainWindow):
         record["consecutive_violations"] = self._watchdog_consecutive_violations
         self._logger.info(
             "[MAIN_THREAD_LATENCY] status=%s samples=%s p50=%.3fs p95=%.3fs p99=%.3fs max=%.3fs slow=%s consec_viol=%s",
-            status, record['samples'], p50, p95, p99, max_gap, slow_count, self._watchdog_consecutive_violations,
+            status,
+            record["samples"],
+            p50,
+            p95,
+            p99,
+            max_gap,
+            slow_count,
+            self._watchdog_consecutive_violations,
         )
         if status != "OK":
             self._logger.warning(
                 "[WATCHDOG][SLO] p99=%.3fs > target=%.3fs consecutive=%s",
-                p99, self._watchdog_slo_p99_s, self._watchdog_consecutive_violations,
+                p99,
+                self._watchdog_slo_p99_s,
+                self._watchdog_consecutive_violations,
             )
         thread_manager.run(
             self._append_json_log_line,
@@ -1395,7 +1500,8 @@ class MainWindow(QMainWindow):
         if active_threads > self._thread_watermark_threshold:
             self._logger.warning(
                 "[THREAD_WATERMARK] active=%s > threshold=%s",
-                active_threads, self._thread_watermark_threshold,
+                active_threads,
+                self._thread_watermark_threshold,
             )
         thread_manager.run(
             self._append_json_log_line,
@@ -1563,12 +1669,18 @@ class MainWindow(QMainWindow):
         self.realtime_pipeline_status = QLabel("实时链路: 待检测")
         self.realtime_pipeline_status.setStyleSheet("color:#999; padding-left:8px;")
         self.realtime_pipeline_status.setToolTip("等待图表模块上报实时链路状态")
-        setattr(self.realtime_pipeline_status, "mousePressEvent", self.on_realtime_pipeline_status_clicked)
+        setattr(
+            self.realtime_pipeline_status,
+            "mousePressEvent",
+            self.on_realtime_pipeline_status_clicked,
+        )
         self.status_bar.addPermanentWidget(self.realtime_pipeline_status)
         self.backtest_engine_status = QLabel("回测引擎: 待检测")
         self.backtest_engine_status.setStyleSheet("color:#999; padding-left:8px;")
         self.backtest_engine_status.setToolTip("等待回测页上报引擎状态")
-        setattr(self.backtest_engine_status, "mousePressEvent", self.on_backtest_engine_status_clicked)
+        setattr(
+            self.backtest_engine_status, "mousePressEvent", self.on_backtest_engine_status_clicked
+        )
         self.status_bar.addPermanentWidget(self.backtest_engine_status)
         self.health_status = QLabel("健康检查: 初始化中…")
         self.health_status.setStyleSheet("color:#999; padding-left:8px;")
@@ -1593,6 +1705,19 @@ class MainWindow(QMainWindow):
         self.qmt_diag_status.setToolTip("显示 EASYXT_ENABLE_QMT_ONLINE 与 qmt_available")
         setattr(self.qmt_diag_status, "mousePressEvent", self.on_qmt_diag_status_clicked)
         self.status_bar.addPermanentWidget(self.qmt_diag_status)
+
+        # ── 批量下载进度（平时隐藏，下载时自动显示）──
+        self._dl_progress_label = QLabel()
+        self._dl_progress_label.setStyleSheet("color:#0097A7; padding-left:8px; font-size:11px;")
+        self._dl_progress_label.setVisible(False)
+        self._dl_progress_bar = QProgressBar()
+        self._dl_progress_bar.setFixedWidth(120)
+        self._dl_progress_bar.setFixedHeight(14)
+        self._dl_progress_bar.setTextVisible(False)
+        self._dl_progress_bar.setVisible(False)
+        self.status_bar.addPermanentWidget(self._dl_progress_label)
+        self.status_bar.addPermanentWidget(self._dl_progress_bar)
+
         self.status_bar.showMessage("就绪")
 
         # 检查MiniQMT连接状态（启动时延迟1秒检查）
@@ -1604,7 +1729,9 @@ class MainWindow(QMainWindow):
         self.connection_check_timer.start(self._check_base_interval)
         self.release_gate_timer = QTimer()
         self.release_gate_timer.timeout.connect(self._refresh_release_gate_status)
-        self.release_gate_timer.start(int(os.environ.get("EASYXT_RELEASE_GATE_REFRESH_MS", "10000")))
+        self.release_gate_timer.start(
+            int(os.environ.get("EASYXT_RELEASE_GATE_REFRESH_MS", "10000"))
+        )
         self.qmt_diag_timer = QTimer()
         self.qmt_diag_timer.timeout.connect(self._refresh_qmt_diag_status)
         self.qmt_diag_timer.start(int(os.environ.get("EASYXT_QMT_DIAG_REFRESH_MS", "15000")))
@@ -1637,7 +1764,7 @@ class MainWindow(QMainWindow):
                     "切换为本窗口管理",
                     "当前正在复用外部服务管理器。\n是否清除复用标记并由本窗口接管启动？",
                     QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
+                    QMessageBox.No,
                 )
                 if reply == QMessageBox.Yes:
                     self._service_external_manager = False
@@ -1649,7 +1776,7 @@ class MainWindow(QMainWindow):
                     self,
                     "服务状态",
                     "当前正在复用外部服务管理器，主窗口不再重复拉起服务。\n"
-                    "如需切换为本窗口接管，请按住 Ctrl 后点击此标签。"
+                    "如需切换为本窗口接管，请按住 Ctrl 后点击此标签。",
                 )
             return
         if self.service_process and self.service_process.state() != QProcess.NotRunning:
@@ -1662,13 +1789,17 @@ class MainWindow(QMainWindow):
                     "强制停止服务",
                     "确定要强制停止后台数据服务吗？\n这将中断HTTP和WebSocket连接。",
                     QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
+                    QMessageBox.No,
                 )
                 if reply == QMessageBox.Yes:
                     self.service_process.terminate()
                     self.update_service_status(False)
             else:
-                QMessageBox.information(self, "服务状态", "EasyXT 后台数据服务正在运行中。\n\n此服务为系统核心组件，负责数据推送和API接口，通常无需手动干预。")
+                QMessageBox.information(
+                    self,
+                    "服务状态",
+                    "EasyXT 后台数据服务正在运行中。\n\n此服务为系统核心组件，负责数据推送和API接口，通常无需手动干预。",
+                )
         else:
             # 手动启动服务（manual=True 重置熔断状态）
             self.start_all_services(manual=True)
@@ -1687,9 +1818,13 @@ class MainWindow(QMainWindow):
         governance_detail = governance_detail if isinstance(governance_detail, dict) else {}
         watermark_detail = gate.get("watermark_quality_detail") if isinstance(gate, dict) else {}
         watermark_detail = watermark_detail if isinstance(watermark_detail, dict) else {}
-        watermark_audit = gate.get("watermark_profile_audit_detail") if isinstance(gate, dict) else {}
+        watermark_audit = (
+            gate.get("watermark_profile_audit_detail") if isinstance(gate, dict) else {}
+        )
         watermark_audit = watermark_audit if isinstance(watermark_audit, dict) else {}
-        watermark_approval = gate.get("watermark_profile_approval_detail") if isinstance(gate, dict) else {}
+        watermark_approval = (
+            gate.get("watermark_profile_approval_detail") if isinstance(gate, dict) else {}
+        )
         watermark_approval = watermark_approval if isinstance(watermark_approval, dict) else {}
         metrics_path = os.path.join(project_path, "artifacts", "p0_metrics_latest.json")
         action = str(detail.get("recommended_action") or "").strip()
@@ -1698,26 +1833,56 @@ class MainWindow(QMainWindow):
         final_action = governance_action or intraday_action or action
         if final_action:
             QApplication.clipboard().setText(final_action)
-        trend_items = watermark_detail.get("trend") if isinstance(watermark_detail.get("trend"), list) else []
-        wm_weights = watermark_detail.get("weights") if isinstance(watermark_detail.get("weights"), dict) else {}
+        trend_items = (
+            watermark_detail.get("trend") if isinstance(watermark_detail.get("trend"), list) else []
+        )
+        wm_weights = (
+            watermark_detail.get("weights")
+            if isinstance(watermark_detail.get("weights"), dict)
+            else {}
+        )
         wm_profile = str(watermark_detail.get("profile") or "balanced")
         trend_tail = trend_items[-3:] if trend_items else []
-        trend_text = " | ".join(
-            [f"{str(it.get('date') or '')}:{float(it.get('q_score', 0.0) or 0.0):.3f}" for it in trend_tail if isinstance(it, dict)]
-        ) or "N/A"
-        q_spark = self._score_sparkline([float(it.get("q_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)])
-        late_spark = self._score_sparkline([float(it.get("late_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)])
-        ooo_spark = self._score_sparkline([float(it.get("ooo_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)])
-        lateness_spark = self._score_sparkline([float(it.get("lateness_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)])
-        audit_recent = watermark_audit.get("recent") if isinstance(watermark_audit.get("recent"), list) else []
-        audit_tail = audit_recent[-3:] if audit_recent else []
-        audit_text = " | ".join(
+        trend_text = (
+            " | ".join(
+                [
+                    f"{str(it.get('date') or '')}:{float(it.get('q_score', 0.0) or 0.0):.3f}"
+                    for it in trend_tail
+                    if isinstance(it, dict)
+                ]
+            )
+            or "N/A"
+        )
+        q_spark = self._score_sparkline(
+            [float(it.get("q_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)]
+        )
+        late_spark = self._score_sparkline(
+            [float(it.get("late_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)]
+        )
+        ooo_spark = self._score_sparkline(
+            [float(it.get("ooo_score", 0.0) or 0.0) for it in trend_items if isinstance(it, dict)]
+        )
+        lateness_spark = self._score_sparkline(
             [
-                f"{str(it.get('ts') or '')} {str(it.get('action') or '')}->{str(it.get('profile') or '')} {'OK' if bool(it.get('success', False)) else 'FAIL'}"
-                for it in audit_tail
+                float(it.get("lateness_score", 0.0) or 0.0)
+                for it in trend_items
                 if isinstance(it, dict)
             ]
-        ) or "N/A"
+        )
+        audit_recent = (
+            watermark_audit.get("recent") if isinstance(watermark_audit.get("recent"), list) else []
+        )
+        audit_tail = audit_recent[-3:] if audit_recent else []
+        audit_text = (
+            " | ".join(
+                [
+                    f"{str(it.get('ts') or '')} {str(it.get('action') or '')}->{str(it.get('profile') or '')} {'OK' if bool(it.get('success', False)) else 'FAIL'}"
+                    for it in audit_tail
+                    if isinstance(it, dict)
+                ]
+            )
+            or "N/A"
+        )
         lines = [
             f"strict_gate_pass: {gate.get('strict_gate_pass')}",
             f"P0_open_count: {gate.get('P0_open_count')}",
@@ -1788,12 +1953,22 @@ class MainWindow(QMainWindow):
         self._refresh_qmt_diag_status()
 
     def _build_realtime_selfcheck_snapshot(self) -> dict[str, object]:
-        status = self._realtime_pipeline_status if isinstance(self._realtime_pipeline_status, dict) else {}
+        status = (
+            self._realtime_pipeline_status
+            if isinstance(self._realtime_pipeline_status, dict)
+            else {}
+        )
         qmt = self._collect_qmt_diag_snapshot()
         api_token = str(os.environ.get("EASYXT_API_TOKEN", "") or "").strip()
         dev_mode = str(os.environ.get("EASYXT_DEV_MODE", "") or "").lower() in ("1", "true", "yes")
-        auth_mode = "dev_bypass" if (not api_token and dev_mode) else ("enabled" if api_token else "blocked")
-        service_running = bool(self.service_process and self.service_process.state() != QProcess.NotRunning)
+        auth_mode = (
+            "dev_bypass"
+            if (not api_token and dev_mode)
+            else ("enabled" if api_token else "blocked")
+        )
+        service_running = bool(
+            self.service_process and self.service_process.state() != QProcess.NotRunning
+        )
         return {
             "auth_mode": auth_mode,
             "api_token_set": bool(api_token),
@@ -1820,40 +1995,32 @@ class MainWindow(QMainWindow):
         reason = str(info.get("pipeline_reason") or "")
         app_cmd = "& C:/Users/wangzhong/miniconda3/envs/myenv/python.exe d:/EasyXT_KLC/gui_app/main_window.py"
         if auth_mode == "blocked":
-            cmd = (
-                "$env:EASYXT_API_TOKEN=\"dev-local-token\"; "
-                "$env:EASYXT_DEV_MODE=\"1\"; "
-                f"{app_cmd}"
-            )
+            cmd = f'$env:EASYXT_API_TOKEN="dev-local-token"; $env:EASYXT_DEV_MODE="1"; {app_cmd}'
             return "实时链路修复建议", "API鉴权阻断（token未设置）", cmd
         if not ws_enabled:
-            cmd = (
-                "$env:EASYXT_USE_WS_QUOTE=\"1\"; "
-                "$env:EASYXT_ENABLE_QMT_ONLINE=\"1\"; "
-                f"{app_cmd}"
-            )
+            cmd = f'$env:EASYXT_USE_WS_QUOTE="1"; $env:EASYXT_ENABLE_QMT_ONLINE="1"; {app_cmd}'
             return "实时链路修复建议", "WS实时报价开关关闭", cmd
         if qmt_available is False:
             cmd = (
-                "$env:EASYXT_ENABLE_QMT_ONLINE=\"1\"; "
-                "$env:EASYXT_QMT_CHECK_RETRY=\"5\"; "
-                "$env:EASYXT_QMT_CHECK_RETRY_SLEEP=\"0.8\"; "
+                '$env:EASYXT_ENABLE_QMT_ONLINE="1"; '
+                '$env:EASYXT_QMT_CHECK_RETRY="5"; '
+                '$env:EASYXT_QMT_CHECK_RETRY_SLEEP="0.8"; '
                 f"{app_cmd}"
             )
             return "实时链路修复建议", "QMT不可用，需先恢复QMT连通", cmd
         if connected is False and reason in ("no_quote_data", "realtime_api_error"):
             cmd = (
-                "$env:EASYXT_RT_XTDATA_ONLY=\"0\"; "
-                "$env:EASYXT_USE_WS_QUOTE=\"1\"; "
-                "$env:EASYXT_ENABLE_QMT_ONLINE=\"1\"; "
-                "$env:EASYXT_DEV_MODE=\"1\"; "
+                '$env:EASYXT_RT_XTDATA_ONLY="0"; '
+                '$env:EASYXT_USE_WS_QUOTE="1"; '
+                '$env:EASYXT_ENABLE_QMT_ONLINE="1"; '
+                '$env:EASYXT_DEV_MODE="1"; '
                 f"{app_cmd}"
             )
             return "实时链路修复建议", "实时API已启动但未收到首笔行情", cmd
         cmd = (
-            "$env:EASYXT_DEV_MODE=\"1\"; "
-            "$env:EASYXT_USE_WS_QUOTE=\"1\"; "
-            "$env:EASYXT_ENABLE_QMT_ONLINE=\"1\"; "
+            '$env:EASYXT_DEV_MODE="1"; '
+            '$env:EASYXT_USE_WS_QUOTE="1"; '
+            '$env:EASYXT_ENABLE_QMT_ONLINE="1"; '
             f"{app_cmd}"
         )
         return "实时链路修复建议", "执行标准自检重启流程", cmd
@@ -1981,7 +2148,9 @@ class MainWindow(QMainWindow):
     def on_service_diag_status_clicked(self, event):
         summary = self._service_diag_summary or {}
         if not summary:
-            QMessageBox.information(self, "服务日志诊断", "暂无诊断摘要，请等待启动120秒后自动生成。")
+            QMessageBox.information(
+                self, "服务日志诊断", "暂无诊断摘要，请等待启动120秒后自动生成。"
+            )
             return
         lines = [
             f"时间窗口: {summary.get('window', 'N/A')}",
@@ -2065,7 +2234,9 @@ class MainWindow(QMainWindow):
                 self._realtime_fail_streak >= max(1, int(self._realtime_fuse_fail_threshold))
                 and now >= self._realtime_fuse_open_until
             ):
-                self._realtime_fuse_open_until = now + max(5.0, float(self._realtime_fuse_cooldown_s))
+                self._realtime_fuse_open_until = now + max(
+                    5.0, float(self._realtime_fuse_cooldown_s)
+                )
                 self._logger.warning(
                     "[REALTIME_FUSE] open cooldown=%.1fs streak=%s reason=%s",
                     float(self._realtime_fuse_cooldown_s),
@@ -2078,7 +2249,9 @@ class MainWindow(QMainWindow):
                 current["degraded"] = True
                 current["reason"] = f"runtime_fuse_open:{remain}s"
                 current["fuse_fail_streak"] = int(self._realtime_fail_streak)
-                if now - self._realtime_fuse_last_log_ts >= max(1.0, float(self._realtime_fuse_log_interval_s)):
+                if now - self._realtime_fuse_last_log_ts >= max(
+                    1.0, float(self._realtime_fuse_log_interval_s)
+                ):
                     self._realtime_fuse_last_log_ts = now
                     self._logger.warning(
                         "[REALTIME_FUSE] suppressing reconnect flapping remain=%ss streak=%s",
@@ -2099,6 +2272,30 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "status_bar") and self.status_bar is not None:
                 self.status_bar.showMessage(text, 10000)
+        except Exception:
+            pass
+
+    def _on_bulk_download_progress(self, current=0, total=0, stock_code="",
+                                    period="", status="", **_kw):
+        """批量下载进度 → 状态栏进度条实时展示。下载完成后自动隐藏。"""
+        try:
+            bar = getattr(self, "_dl_progress_bar", None)
+            lbl = getattr(self, "_dl_progress_label", None)
+            if bar is None or lbl is None:
+                return
+            if total > 0:
+                bar.setMaximum(total)
+                bar.setValue(current)
+                code_short = str(stock_code)[:10] if stock_code else ""
+                lbl.setText(f"下载 {current}/{total} {code_short}")
+                bar.setVisible(True)
+                lbl.setVisible(True)
+            if current >= total > 0:
+                # 下载完成，3秒后隐藏
+                QTimer.singleShot(3000, lambda: (
+                    bar.setVisible(False),
+                    lbl.setVisible(False),
+                ))
         except Exception:
             pass
 
@@ -2157,8 +2354,15 @@ class MainWindow(QMainWindow):
                 text = f"实时链路: 已连接 ✅{suffix}"
                 color = "#00aa66"
         elif connected is False:
-            text = "实时链路: 未连接 ⚠️"
-            color = "#ef6c00"
+            if reason == "market_closed":
+                text = "实时链路: 休市 🌙"
+                color = "#888888"
+            elif reason == "realtime_api_blocked":
+                text = "实时链路: API已屏蔽 ⛔"
+                color = "#ef6c00"
+            else:
+                text = "实时链路: 未连接 ⚠️"
+                color = "#ef6c00"
         else:
             text = "实时链路: 待检测"
             color = "#999999"
@@ -2177,7 +2381,18 @@ class MainWindow(QMainWindow):
     def _refresh_release_gate_status(self):
         metrics_path = os.path.join(project_path, "artifacts", "p0_metrics_latest.json")
         if not os.path.exists(metrics_path):
-            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}, "intraday_bar_semantic_detail": {}, "governance_nightly_detail": {}, "period_validation_detail": {}, "watermark_quality_detail": {}, "watermark_profile_audit_detail": {}, "watermark_profile_approval_detail": {}}
+            self._release_gate_status = {
+                "strict_gate_pass": None,
+                "P0_open_count": None,
+                "active_critical_high": None,
+                "duckdb_write_probe_detail": {},
+                "intraday_bar_semantic_detail": {},
+                "governance_nightly_detail": {},
+                "period_validation_detail": {},
+                "watermark_quality_detail": {},
+                "watermark_profile_audit_detail": {},
+                "watermark_profile_approval_detail": {},
+            }
             self._render_release_gate_status()
             return
         try:
@@ -2185,7 +2400,18 @@ class MainWindow(QMainWindow):
                 gate = json.load(f)
             self._release_gate_status = gate if isinstance(gate, dict) else {}
         except Exception:
-            self._release_gate_status = {"strict_gate_pass": None, "P0_open_count": None, "active_critical_high": None, "duckdb_write_probe_detail": {}, "intraday_bar_semantic_detail": {}, "governance_nightly_detail": {}, "period_validation_detail": {}, "watermark_quality_detail": {}, "watermark_profile_audit_detail": {}, "watermark_profile_approval_detail": {}}
+            self._release_gate_status = {
+                "strict_gate_pass": None,
+                "P0_open_count": None,
+                "active_critical_high": None,
+                "duckdb_write_probe_detail": {},
+                "intraday_bar_semantic_detail": {},
+                "governance_nightly_detail": {},
+                "period_validation_detail": {},
+                "watermark_quality_detail": {},
+                "watermark_profile_audit_detail": {},
+                "watermark_profile_approval_detail": {},
+            }
         self._render_release_gate_status()
 
     def _load_artifact_json(self, file_name):
@@ -2205,13 +2431,41 @@ class MainWindow(QMainWindow):
         gate = self._release_gate_status if isinstance(self._release_gate_status, dict) else {}
         strict_pass = gate.get("strict_gate_pass")
         p0_open = gate.get("P0_open_count")
-        detail = gate.get("duckdb_write_probe_detail") if isinstance(gate.get("duckdb_write_probe_detail"), dict) else {}
-        intraday_detail = gate.get("intraday_bar_semantic_detail") if isinstance(gate.get("intraday_bar_semantic_detail"), dict) else {}
-        governance_detail = gate.get("governance_nightly_detail") if isinstance(gate.get("governance_nightly_detail"), dict) else {}
-        period_validation_detail = gate.get("period_validation_detail") if isinstance(gate.get("period_validation_detail"), dict) else {}
-        watermark_detail = gate.get("watermark_quality_detail") if isinstance(gate.get("watermark_quality_detail"), dict) else {}
-        watermark_audit = gate.get("watermark_profile_audit_detail") if isinstance(gate.get("watermark_profile_audit_detail"), dict) else {}
-        watermark_approval = gate.get("watermark_profile_approval_detail") if isinstance(gate.get("watermark_profile_approval_detail"), dict) else {}
+        detail = (
+            gate.get("duckdb_write_probe_detail")
+            if isinstance(gate.get("duckdb_write_probe_detail"), dict)
+            else {}
+        )
+        intraday_detail = (
+            gate.get("intraday_bar_semantic_detail")
+            if isinstance(gate.get("intraday_bar_semantic_detail"), dict)
+            else {}
+        )
+        governance_detail = (
+            gate.get("governance_nightly_detail")
+            if isinstance(gate.get("governance_nightly_detail"), dict)
+            else {}
+        )
+        period_validation_detail = (
+            gate.get("period_validation_detail")
+            if isinstance(gate.get("period_validation_detail"), dict)
+            else {}
+        )
+        watermark_detail = (
+            gate.get("watermark_quality_detail")
+            if isinstance(gate.get("watermark_quality_detail"), dict)
+            else {}
+        )
+        watermark_audit = (
+            gate.get("watermark_profile_audit_detail")
+            if isinstance(gate.get("watermark_profile_audit_detail"), dict)
+            else {}
+        )
+        watermark_approval = (
+            gate.get("watermark_profile_approval_detail")
+            if isinstance(gate.get("watermark_profile_approval_detail"), dict)
+            else {}
+        )
         stability_evidence = self._load_artifact_json("stability_evidence_30d.json")
         peak_release_gate = self._load_artifact_json("peak_release_gate_latest.json")
         wm_profile = str(watermark_detail.get("profile") or "balanced")
@@ -2222,7 +2476,9 @@ class MainWindow(QMainWindow):
         g_failed = int(governance_detail.get("failed_items") or 0)
         pv_status = str(period_validation_detail.get("status") or "").lower()
         pv_failed = int(period_validation_detail.get("failed_items") or 0)
-        pv_failed_norm, pv_max_allowed = period_validation_summary(stability_evidence, peak_release_gate)
+        pv_failed_norm, pv_max_allowed = period_validation_summary(
+            stability_evidence, peak_release_gate
+        )
         if pv_failed_norm == 0 and pv_max_allowed == 0 and pv_failed > 0:
             pv_failed_norm = pv_failed
         pv_tag_text = period_validation_tag(pv_failed_norm, pv_max_allowed)
@@ -2245,17 +2501,26 @@ class MainWindow(QMainWindow):
         w_q = float(watermark_detail.get("today_q_score", 0.0) or 0.0)
         q_mean = float(watermark_detail.get("q_score_mean_7d", 0.0) or 0.0)
         q_vol = float(watermark_detail.get("q_score_vol_7d", 0.0) or 0.0)
-        w_trend = watermark_detail.get("trend") if isinstance(watermark_detail.get("trend"), list) else []
-        q_spark = self._score_sparkline([float(it.get("q_score", 0.0) or 0.0) for it in w_trend if isinstance(it, dict)])
-        audit_recent = watermark_audit.get("recent") if isinstance(watermark_audit.get("recent"), list) else []
+        w_trend = (
+            watermark_detail.get("trend") if isinstance(watermark_detail.get("trend"), list) else []
+        )
+        q_spark = self._score_sparkline(
+            [float(it.get("q_score", 0.0) or 0.0) for it in w_trend if isinstance(it, dict)]
+        )
+        audit_recent = (
+            watermark_audit.get("recent") if isinstance(watermark_audit.get("recent"), list) else []
+        )
         audit_tail = audit_recent[-3:] if audit_recent else []
-        audit_text = " | ".join(
-            [
-                f"{str(it.get('action') or '')}->{str(it.get('profile') or '')}:{'OK' if bool(it.get('success', False)) else 'FAIL'}"
-                for it in audit_tail
-                if isinstance(it, dict)
-            ]
-        ) or "N/A"
+        audit_text = (
+            " | ".join(
+                [
+                    f"{str(it.get('action') or '')}->{str(it.get('profile') or '')}:{'OK' if bool(it.get('success', False)) else 'FAIL'}"
+                    for it in audit_tail
+                    if isinstance(it, dict)
+                ]
+            )
+            or "N/A"
+        )
         appr_required = bool(watermark_approval.get("required", False))
         appr_valid = bool(watermark_approval.get("valid", False))
         appr_risk = str(watermark_approval.get("risk_level") or "").lower()
@@ -2272,10 +2537,20 @@ class MainWindow(QMainWindow):
         gate_detail_parsed = parse_gate_detail_tag(gate_detail_value)
         gate_detail_parse_ok = bool(gate_detail_parsed.get("ok", False))
         gate_contract_valid = bool(gate.get("gate_contract_valid", gate_detail_parse_ok))
-        gate_contract_version = int(gate.get("gate_contract_version", gate_detail_parsed.get("version", 0)) or 0)
-        gate_contract_error = str(gate.get("gate_contract_error", gate_detail_parsed.get("error", "")) or "")
-        gate_contract_rag = str(gate.get("gate_contract_rag", gate_detail_parsed.get("rag", rag_tag_value)) or "")
-        contract_health = "HEALTHY" if gate_contract_valid and gate_contract_version > 0 and gate_contract_error == "" else "BROKEN"
+        gate_contract_version = int(
+            gate.get("gate_contract_version", gate_detail_parsed.get("version", 0)) or 0
+        )
+        gate_contract_error = str(
+            gate.get("gate_contract_error", gate_detail_parsed.get("error", "")) or ""
+        )
+        gate_contract_rag = str(
+            gate.get("gate_contract_rag", gate_detail_parsed.get("rag", rag_tag_value)) or ""
+        )
+        contract_health = (
+            "HEALTHY"
+            if gate_contract_valid and gate_contract_version > 0 and gate_contract_error == ""
+            else "BROKEN"
+        )
         rag_icon = rag_badge_value.split(" ", 1)[0] if rag_badge_value else "⚪"
         if strict_pass is True:
             if appr_risk == "warn":
@@ -2452,8 +2727,14 @@ class MainWindow(QMainWindow):
         if self._service_external_manager and (
             not self.service_process or self.service_process.state() == QProcess.NotRunning
         ):
-            self.service_status.setText("🟡 复用外部服务")
-            self.service_status.setStyleSheet("color: #ef6c00; padding-left: 8px; font-weight: bold;")
+            self.service_status.setText("� 复用外部服务")
+            self.service_status.setStyleSheet(
+                "color: #1976d2; padding-left: 8px; font-weight: bold;"
+            )
+            self.service_status.setToolTip(
+                "当前实例复用外部已启动的服务管理器（正常模式）。\n"
+                "历史数据获取与实时订阅均通过该外部服务完成。"
+            )
             return
         if running:
             self.service_status.setText("🟢 服务运行中")
@@ -2516,7 +2797,7 @@ class MainWindow(QMainWindow):
             "服务自动重启已熔断",
             f"后台数据服务已连续退出 {self._SERVICE_MAX_RESTARTS} 次，"
             f"自动重启已暂停以防止拖慕 GUI。\n\n"
-            f"请检查日志确认根因，然后点击状态栏「服务待命」按鈕手动重启。"
+            f"请检查日志确认根因，然后点击状态栏「服务待命」按鈕手动重启。",
         )
 
     def stop_all_services(self):
@@ -2558,7 +2839,9 @@ class MainWindow(QMainWindow):
                 return
             self._service_log_last_ts = now
             if self._service_log_suppressed > 0:
-                self._logger.info("[SERVICE_LOG] 日志恢复，之前抑制 %d 批输出", self._service_log_suppressed)
+                self._logger.info(
+                    "[SERVICE_LOG] 日志恢复，之前抑制 %d 批输出", self._service_log_suppressed
+                )
                 self._service_log_suppressed = 0
             print(data, end="")
 
@@ -2570,7 +2853,9 @@ class MainWindow(QMainWindow):
                 self._service_restart_scheduled = False
                 self._service_restart_count = 0
                 self.update_service_status(True)
-                self._logger.info("检测到已有服务管理器实例在运行，当前窗口切换为复用模式，不再自动重启。")
+                self._logger.info(
+                    "检测到已有服务管理器实例在运行，当前窗口切换为复用模式，不再自动重启。"
+                )
                 return
             run_seconds = 0.0
             if self._service_start_ts > 0:
@@ -2584,7 +2869,9 @@ class MainWindow(QMainWindow):
                 self._service_restart_count += 1
                 self._logger.info(
                     "服务进程已退出，第 %d/%d 次重启，延迟 %dms...",
-                    self._service_restart_count, self._SERVICE_MAX_RESTARTS, backoff,
+                    self._service_restart_count,
+                    self._SERVICE_MAX_RESTARTS,
+                    backoff,
                 )
                 if not self._service_restart_scheduled:
                     self._service_restart_scheduled = True
@@ -2637,10 +2924,12 @@ class MainWindow(QMainWindow):
             thread_manager.run(self._warmup_xtquant_broker, name="warmup_xtquant_broker")
 
             # 自动启动服务（如果尚未运行，且未熔断）
-            if (not self.service_process or self.service_process.state() == QProcess.NotRunning)\
-                    and not self._service_circuit_broken\
-                    and not self._service_external_manager\
-                    and not self._service_restart_scheduled:
+            if (
+                (not self.service_process or self.service_process.state() == QProcess.NotRunning)
+                and not self._service_circuit_broken
+                and not self._service_external_manager
+                and not self._service_restart_scheduled
+            ):
                 # 延迟启动，避免与主线程竞争资源
                 QTimer.singleShot(2000, self.start_all_services)
         else:
@@ -2665,21 +2954,14 @@ class MainWindow(QMainWindow):
     def _collect_qmt_diag_snapshot(self) -> dict[str, object]:
         online_raw = str(os.environ.get("EASYXT_ENABLE_QMT_ONLINE", "1"))
         online_on = online_raw in ("1", "true", "True")
-        qmt_available: Optional[bool] = None
-        error = ""
-        try:
-            from data_manager.unified_data_interface import UnifiedDataInterface
-
-            ui = UnifiedDataInterface()
-            ui._refresh_qmt_status()
-            qmt_available = bool(ui.qmt_available)
-        except Exception as exc:
-            error = str(exc)[:120]
+        # xtdata 检查已移除：xtquant C 扩展只能从 QThread.run() 调用，
+        # 从 GUI 事件线程或 threading.Thread 调用会导致 BSON 断言崩溃。
+        # qmt_available 由 _RealtimeQuoteWorker 等 QThread 的实际操作结果回填。
         return {
             "online_on": online_on,
             "online_raw": online_raw,
-            "qmt_available": qmt_available,
-            "error": error,
+            "qmt_available": None,
+            "error": "",
         }
 
     def _refresh_qmt_diag_status(self):
@@ -2712,6 +2994,7 @@ class MainWindow(QMainWindow):
             return
         try:
             import easy_xt
+
             easy_xt.get_xtquant_broker()
         except Exception:
             pass
@@ -2720,7 +3003,7 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         try:
-            already_running = (self._check_thread is not None and self._check_thread.isRunning())
+            already_running = self._check_thread is not None and self._check_thread.isRunning()
         except RuntimeError:
             already_running = False
             self._check_thread = None
@@ -2739,10 +3022,13 @@ class MainWindow(QMainWindow):
     def closeEvent(self, a0):
         """关闭事件"""
         self._closing = True
+
         def _stop_child_threads():
             child_threads = []
             try:
-                child_threads = [t for t in self.findChildren(QThread) if t is not None and t.isRunning()]
+                child_threads = [
+                    t for t in self.findChildren(QThread) if t is not None and t.isRunning()
+                ]
             except Exception:
                 child_threads = []
             for t in child_threads:
@@ -2760,12 +3046,19 @@ class MainWindow(QMainWindow):
                         t.wait(300)
                 except Exception:
                     pass
+
         try:
-            self.signal_bus.unsubscribe(Events.BACKTEST_ENGINE_STATUS_UPDATED, self._on_backtest_engine_status_updated)
-            self.signal_bus.unsubscribe(Events.REALTIME_PIPELINE_STATUS_UPDATED, self._on_realtime_pipeline_status_updated)
+            self.signal_bus.unsubscribe(
+                Events.BACKTEST_ENGINE_STATUS_UPDATED, self._on_backtest_engine_status_updated
+            )
+            self.signal_bus.unsubscribe(
+                Events.REALTIME_PIPELINE_STATUS_UPDATED, self._on_realtime_pipeline_status_updated
+            )
             self.signal_bus.unsubscribe(Events.DATA_QUALITY_ALERT, self._on_data_quality_alert)
             self.signal_bus.unsubscribe(Events.DATA_REPAIRED, self._on_data_repaired)
             self.signal_bus.unsubscribe(Events.ENV_CONFIG_SAVED, self._on_env_config_saved)
+            if hasattr(Events, "BULK_DOWNLOAD_PROGRESS"):
+                self.signal_bus.unsubscribe(Events.BULK_DOWNLOAD_PROGRESS, self._on_bulk_download_progress)
         except Exception:
             pass
 
@@ -2796,7 +3089,7 @@ class MainWindow(QMainWindow):
 
         # 清理连接检查线程
         try:
-            check_running = (self._check_thread is not None and self._check_thread.isRunning())
+            check_running = self._check_thread is not None and self._check_thread.isRunning()
         except RuntimeError:
             check_running = False
             self._check_thread = None
@@ -2829,9 +3122,11 @@ def main():
         _lock_file = open(_lock_path, "w")
         if os.name == "nt":
             import msvcrt
+
             msvcrt.locking(_lock_file.fileno(), msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
+
             fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (OSError, IOError):
         # 已有实例运行 — QApplication/QMessageBox 已在模块顶层导入
@@ -2856,10 +3151,12 @@ def main():
     # ── P1: 环境完整性校验（QApplication 创建后方可显示 QMessageBox）────────
     try:
         from data_manager import validate_environment as _ve
+
         _env_results = _ve(raise_on_error=False)
         _env_errors = {k: v for k, v in _env_results.items() if v.startswith("ERROR")}
         if _env_errors:
             import logging as _logging
+
             _logging.getLogger("easyxt.startup").error("启动环境校验发现错误: %s", _env_errors)
             _err_msg = "\n".join(f"  • {k}：{v}" for k, v in _env_errors.items())
             QMessageBox.warning(

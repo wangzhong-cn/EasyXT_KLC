@@ -4,7 +4,7 @@ QmtFeed 单元测试（不依赖 QMT 运行环境）。
 覆盖范围：
   - _normalize_tick 字段映射
   - subscribe / unsubscribe 状态管理
-  - QMT 不可用时的 mock 降级
+  - QMT 不可用时拒绝订阅（返回 error）
   - _on_tick 回调 → ingest 注入
   - all_subscriptions / stats 可观测接口
   - is_available / is_subscribed
@@ -128,41 +128,41 @@ class TestIsAvailable:
 
 
 # ---------------------------------------------------------------------------
-# subscribe — QMT 不可用时 mock 降级
+# subscribe — QMT 不可用时拒绝订阅
 # ---------------------------------------------------------------------------
 
-class TestSubscribeMockFallback:
+class TestSubscribeQmtUnavailable:
     def _make_feed(self) -> QmtFeed:
         feed = QmtFeed()
         return feed
 
     @patch.object(QmtFeed, "is_available", return_value=False)
-    def test_returns_mock_source(self, _):
+    def test_returns_error_source(self, _):
         feed = self._make_feed()
         result = feed.subscribe("000001.SZ")
-        assert result["subscribed"] is True
-        assert result["source"] == "mock"
+        assert result["subscribed"] is False
+        assert result["source"] == "error"
 
     @patch.object(QmtFeed, "is_available", return_value=False)
-    def test_marks_as_subscribed(self, _):
+    def test_does_not_mark_as_subscribed(self, _):
         feed = self._make_feed()
         feed.subscribe("000001.SZ")
-        assert feed.is_subscribed("000001.SZ") is True
+        assert feed.is_subscribed("000001.SZ") is False
 
     @patch.object(QmtFeed, "is_available", return_value=False)
-    def test_idempotent_double_subscribe(self, _):
+    def test_double_subscribe_both_fail(self, _):
         feed = self._make_feed()
-        feed.subscribe("000001.SZ")
+        result1 = feed.subscribe("000001.SZ")
         result2 = feed.subscribe("000001.SZ")
-        assert result2["subscribed"] is True
-        assert "已处于订阅状态" in result2["message"]
+        assert result1["subscribed"] is False
+        assert result2["subscribed"] is False
 
     @patch.object(QmtFeed, "is_available", return_value=False)
-    def test_period_stored_in_state(self, _):
+    def test_state_empty_when_unavailable(self, _):
         feed = self._make_feed()
         feed.subscribe("600519.SH", period="1m")
         subs = feed.all_subscriptions()
-        assert subs[0]["period"] == "1m"
+        assert subs == []
 
 
 # ---------------------------------------------------------------------------
@@ -202,10 +202,11 @@ class TestUnsubscribe:
         assert result["unsubscribed"] is False
         assert "未处于订阅状态" in result["message"]
 
-    @patch.object(QmtFeed, "is_available", return_value=False)
-    def test_unsubscribe_removes_state(self, _):
+    def test_unsubscribe_removes_state(self):
         feed = QmtFeed()
-        feed.subscribe("000001.SZ")
+        with mock_xtquant_xtdata() as mock_xd:
+            mock_xd.subscribe_quote.return_value = "sub_001"
+            feed.subscribe("000001.SZ")
         assert feed.is_subscribed("000001.SZ") is True
         result = feed.unsubscribe("000001.SZ")
         assert result["unsubscribed"] is True
@@ -225,33 +226,38 @@ class TestUnsubscribe:
 # ---------------------------------------------------------------------------
 
 class TestOnTick:
-    @patch.object(QmtFeed, "is_available", return_value=False)
-    def test_on_tick_calls_ingest(self, _):
+    @staticmethod
+    def _inject_state(feed: QmtFeed, symbol: str, period: str = "tick"):
+        """直接注入订阅状态（不经过 subscribe 流程）。"""
+        from core.qmt_feed import _SubscriptionState
+        feed._states[symbol] = _SubscriptionState(symbol=symbol, period=period)
+
+    def test_on_tick_calls_ingest(self):
+        mock_api = MagicMock()
         feed = QmtFeed()
-        feed.subscribe("000001.SZ")
-        with patch("core.api_server.ingest_tick_from_thread") as mock_ingest:
+        self._inject_state(feed, "000001.SZ")
+        with patch.dict("sys.modules", {"core.api_server": mock_api}):
             feed._on_tick("000001.SZ", "tick", {"000001.SZ": {"lastPrice": 12.5}})
-        mock_ingest.assert_called_once()
-        call_symbol, call_payload = mock_ingest.call_args[0]
+        mock_api.ingest_tick_from_thread.assert_called_once()
+        call_symbol, call_payload = mock_api.ingest_tick_from_thread.call_args[0]
         assert call_symbol == "000001.SZ"
         assert call_payload["price"] == 12.5
 
-    @patch.object(QmtFeed, "is_available", return_value=False)
-    def test_on_tick_increments_ingested_count(self, _):
+    def test_on_tick_increments_ingested_count(self):
+        mock_api = MagicMock()
         feed = QmtFeed()
-        feed.subscribe("000001.SZ")
-        with patch("core.api_server.ingest_tick_from_thread"):
+        self._inject_state(feed, "000001.SZ")
+        with patch.dict("sys.modules", {"core.api_server": mock_api}):
             feed._on_tick("000001.SZ", "tick", {"lastPrice": 10.0})
             feed._on_tick("000001.SZ", "tick", {"lastPrice": 10.1})
         subs = feed.all_subscriptions()
         assert subs[0]["ingested_count"] == 2
         assert feed.stats()["total_ingested"] == 2
 
-    @patch.object(QmtFeed, "is_available", return_value=False)
-    def test_on_tick_handles_exception_gracefully(self, _):
+    def test_on_tick_handles_exception_gracefully(self):
         """回调异常不应向外传播，错误计数应递增。"""
         feed = QmtFeed()
-        feed.subscribe("000001.SZ")
+        self._inject_state(feed, "000001.SZ")
         import sys, types
         bad_api = types.ModuleType("core.api_server")
         bad_api.ingest_tick_from_thread = MagicMock(side_effect=RuntimeError("炸了"))  # type: ignore
@@ -276,21 +282,21 @@ class TestObservability:
         feed = QmtFeed()
         assert feed.all_subscriptions() == []
 
-    @patch.object(QmtFeed, "is_available", return_value=False)
-    def test_all_subscriptions_returns_correct_fields(self, _):
+    def test_all_subscriptions_returns_correct_fields(self):
         feed = QmtFeed()
-        feed.subscribe("000001.SZ", "tick")
+        from core.qmt_feed import _SubscriptionState
+        feed._states["000001.SZ"] = _SubscriptionState(symbol="000001.SZ", period="tick")
         subs = feed.all_subscriptions()
         assert len(subs) == 1
         expected_keys = {"symbol", "period", "subscribed_at", "ingested_count",
                          "error_count", "last_tick_ts"}
         assert expected_keys.issubset(subs[0].keys())
 
-    @patch.object(QmtFeed, "is_available", return_value=False)
-    def test_stats_total_subscriptions(self, _):
+    def test_stats_total_subscriptions(self):
         feed = QmtFeed()
-        feed.subscribe("000001.SZ")
-        feed.subscribe("600519.SH")
+        from core.qmt_feed import _SubscriptionState
+        feed._states["000001.SZ"] = _SubscriptionState(symbol="000001.SZ", period="tick")
+        feed._states["600519.SH"] = _SubscriptionState(symbol="600519.SH", period="tick")
         stats = feed.stats()
         assert stats["total_subscriptions"] == 2
 

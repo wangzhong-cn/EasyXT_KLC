@@ -49,6 +49,7 @@ import pandas as pd
 from data_manager.timestamp_utils import (  # noqa: E402
     UTC8_OFFSET_S,
     dat_s_to_beijing,
+    qmt_ms_to_beijing,
 )
 
 _logger = logging.getLogger(__name__)
@@ -263,6 +264,238 @@ def read_dat(
 
 # ─── 面向 DataSourceRegistry 的类接口 ─────────────────────────────────────────
 
+# ─── Tick 格式常量（实地测量确认：SZ/0/000001/20251117.dat 等） ─────────────────
+# 路径格式：{qmt_base}/{MARKET}/0/{CODE}/{YYYYMMDD}.dat
+#   - 小写 .dat 扩展名，无文件头，记录从 offset 0 开始
+#   - 每条记录 144 字节（1×int64 + 34×uint32 = 8+136 = 144）
+#
+# 字段映射（基于 000001.SZ/600519.SH 实测验证）：
+#   [0..7]   int64  time_ms     UTC epoch 毫秒 → 加 UTC8_OFFSET_MS 得北京时间
+#   [8..11]  uint32 lastPrice   成交价 × 1000
+#   [12..15] uint32 stockFlags  每品种常量标志（000001.SZ=32760, 600519.SH=32765）
+#   [16..19] uint32 amount      累计成交额（元，uint32 ≤ 4.29B）
+#   [20..23] uint32 _pad1       保留（始终为 0）
+#   [24..27] uint32 volume      累计成交量（手 = 100 股）
+#   [28..31] uint32 stockStatus 交易状态（12=竞价,13=连续,14=竞价撮合,18=尾盘竞价）
+#   [32..35] uint32 _pad2       保留（始终为 0）
+#   [36..39] uint32 tradeNum    累计成交笔数
+#   [40..43] uint32 _pad3       保留（始终为 0）
+#   [44..47] uint32 open        开盘价 × 1000（竞价期间为 0）
+#   [48..51] uint32 high        最高价 × 1000
+#   [52..55] uint32 low         最低价 × 1000
+#   [56..59] uint32 _pad4       保留（始终为 0）
+#   [60..63] uint32 lastClose   前收盘价 × 1000（全天不变）
+#   [64..83]  askPrice1-5 × 1000（卖盘五档价格，0=档位为空）
+#   [84..103] askVol1-5（卖盘五档挂单量，手）
+#   [104..123] bidPrice1-5 × 1000（买盘五档）
+#   [124..143] bidVol1-5（买盘五档挂单量）
+TICK_RECORD_SIZE: int = 144
+
+_TICK_DTYPE = np.dtype([
+    ("time_ms",    "<i8"),   # [0..7]
+    ("lastPrice",  "<u4"),   # [8..11]
+    ("stockFlags", "<u4"),   # [12..15]
+    ("amount",     "<u4"),   # [16..19]
+    ("_pad1",      "<u4"),   # [20..23]
+    ("volume",     "<u4"),   # [24..27]
+    ("stockStatus","<u4"),   # [28..31]
+    ("_pad2",      "<u4"),   # [32..35]
+    ("tradeNum",   "<u4"),   # [36..39]
+    ("_pad3",      "<u4"),   # [40..43]
+    ("open",       "<u4"),   # [44..47]
+    ("high",       "<u4"),   # [48..51]
+    ("low",        "<u4"),   # [52..55]
+    ("_pad4",      "<u4"),   # [56..59]
+    ("lastClose",  "<u4"),   # [60..63]
+    ("askPrice1",  "<u4"),   # [64..67]
+    ("askPrice2",  "<u4"),   # [68..71]
+    ("askPrice3",  "<u4"),   # [72..75]
+    ("askPrice4",  "<u4"),   # [76..79]
+    ("askPrice5",  "<u4"),   # [80..83]
+    ("askVol1",    "<u4"),   # [84..87]
+    ("askVol2",    "<u4"),   # [88..91]
+    ("askVol3",    "<u4"),   # [92..95]
+    ("askVol4",    "<u4"),   # [96..99]
+    ("askVol5",    "<u4"),   # [100..103]
+    ("bidPrice1",  "<u4"),   # [104..107]
+    ("bidPrice2",  "<u4"),   # [108..111]
+    ("bidPrice3",  "<u4"),   # [112..115]
+    ("bidPrice4",  "<u4"),   # [116..119]
+    ("bidPrice5",  "<u4"),   # [120..123]
+    ("bidVol1",    "<u4"),   # [124..127]
+    ("bidVol2",    "<u4"),   # [128..131]
+    ("bidVol3",    "<u4"),   # [132..135]
+    ("bidVol4",    "<u4"),   # [136..139]
+    ("bidVol5",    "<u4"),   # [140..143]
+])
+
+
+# ─── Tick 路径工具 ────────────────────────────────────────────────────────────
+
+def _build_tick_dat_paths(
+    qmt_base: Path,
+    symbol: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> list[Path]:
+    """返回指定 symbol 的 tick .dat 文件路径列表（按日期升序）。
+
+    路径格式：{qmt_base}/{MARKET}/0/{CODE}/{YYYYMMDD}.dat
+    """
+    market, code = _symbol_to_market_code(symbol)
+    tick_dir = qmt_base / market / "0" / code
+    if not tick_dir.is_dir():
+        return []
+    files = sorted(tick_dir.glob("*.dat"))
+    if start_date:
+        sd = pd.to_datetime(start_date, errors="coerce")
+        if sd is not pd.NaT:
+            sd_str = sd.strftime("%Y%m%d")
+            files = [f for f in files if f.stem >= sd_str]
+    if end_date:
+        ed = pd.to_datetime(end_date, errors="coerce")
+        if ed is not pd.NaT:
+            ed_str = ed.strftime("%Y%m%d")
+            files = [f for f in files if f.stem <= ed_str]
+    return files
+
+
+# ─── Tick 核心读取 ────────────────────────────────────────────────────────────
+
+def _read_tick_dat_numpy(dat_path: Path) -> pd.DataFrame:
+    """读取单日 tick .dat 文件，返回 DataFrame。
+
+    格式规格（SZ/0/000001/20251117.dat 实地验证）：
+        - 无文件头，记录从 offset 0 开始
+        - 每条记录 144 字节
+        - time_ms = UTC epoch 毫秒（int64 LE）→ +UTC8_OFFSET_MS 转北京时间
+
+    返回 DataFrame：
+        index  : 北京时间 naive Timestamp（index.name = "datetime"）
+        columns: lastPrice, volume, amount, open, high, low, lastClose,
+                 askPrice1-5, askVol1-5, bidPrice1-5, bidVol1-5
+    """
+    try:
+        fsize = dat_path.stat().st_size
+    except OSError as exc:
+        _logger.warning("tick DAT 文件无法访问: %s — %s", dat_path, exc)
+        return pd.DataFrame()
+
+    n_records = fsize // TICK_RECORD_SIZE
+    if n_records < 1:
+        return pd.DataFrame()
+
+    try:
+        with dat_path.open("rb") as fh:
+            raw = fh.read(n_records * TICK_RECORD_SIZE)
+    except OSError as exc:
+        _logger.warning("tick DAT 文件读取失败: %s — %s", dat_path, exc)
+        return pd.DataFrame()
+
+    try:
+        arr = np.frombuffer(raw[: n_records * TICK_RECORD_SIZE], dtype=_TICK_DTYPE)
+    except ValueError as exc:
+        _logger.warning("tick DAT 解析失败: %s — %s", dat_path, exc)
+        return pd.DataFrame()
+
+    # 过滤无效时间戳
+    # A 股最早上市时间 1990-01-01 UTC ms
+    _TICK_MIN_MS = 631_152_000_000
+    _TICK_MAX_MS = 1_893_456_000_000   # 2030-01-01 UTC ms
+    ts_ms = arr["time_ms"].astype(np.int64)
+    mask = (ts_ms > _TICK_MIN_MS) & (ts_ms < _TICK_MAX_MS)
+    arr = arr[mask]
+
+    if len(arr) == 0:
+        return pd.DataFrame()
+
+    # UTC ms → 北京时间 naive Timestamp
+    timestamps = qmt_ms_to_beijing(pd.Series(arr["time_ms"].astype(np.int64)))
+
+    price_div = np.float64(1000.0)
+    df = pd.DataFrame(
+        {
+            "lastPrice": arr["lastPrice"].astype(np.float64) / price_div,
+            "volume":    arr["volume"].astype(np.int64),
+            "amount":    arr["amount"].astype(np.int64),
+            "open":      arr["open"].astype(np.float64) / price_div,
+            "high":      arr["high"].astype(np.float64) / price_div,
+            "low":       arr["low"].astype(np.float64) / price_div,
+            "lastClose": arr["lastClose"].astype(np.float64) / price_div,
+            "askPrice1": arr["askPrice1"].astype(np.float64) / price_div,
+            "askPrice2": arr["askPrice2"].astype(np.float64) / price_div,
+            "askPrice3": arr["askPrice3"].astype(np.float64) / price_div,
+            "askPrice4": arr["askPrice4"].astype(np.float64) / price_div,
+            "askPrice5": arr["askPrice5"].astype(np.float64) / price_div,
+            "askVol1":   arr["askVol1"].astype(np.int64),
+            "askVol2":   arr["askVol2"].astype(np.int64),
+            "askVol3":   arr["askVol3"].astype(np.int64),
+            "askVol4":   arr["askVol4"].astype(np.int64),
+            "askVol5":   arr["askVol5"].astype(np.int64),
+            "bidPrice1": arr["bidPrice1"].astype(np.float64) / price_div,
+            "bidPrice2": arr["bidPrice2"].astype(np.float64) / price_div,
+            "bidPrice3": arr["bidPrice3"].astype(np.float64) / price_div,
+            "bidPrice4": arr["bidPrice4"].astype(np.float64) / price_div,
+            "bidPrice5": arr["bidPrice5"].astype(np.float64) / price_div,
+            "bidVol1":   arr["bidVol1"].astype(np.int64),
+            "bidVol2":   arr["bidVol2"].astype(np.int64),
+            "bidVol3":   arr["bidVol3"].astype(np.int64),
+            "bidVol4":   arr["bidVol4"].astype(np.int64),
+            "bidVol5":   arr["bidVol5"].astype(np.int64),
+        },
+        index=timestamps.values,
+    )
+    df.index.name = "datetime"
+    return df
+
+
+# ─── Tick 公开函数式接口 ──────────────────────────────────────────────────────
+
+def read_tick_dat(
+    symbol: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    qmt_base: Optional[Path] = None,
+) -> pd.DataFrame:
+    """从 QMT tick .dat 文件直读 L1 实时行情数据（不依赖 xtquant）。
+
+    自动合并日期范围内的所有日文件，返回按时间升序排列的 DataFrame。
+
+    Args:
+        symbol:     标准代码，如 "000001.SZ"、"600519.SH"
+        start_date: 起始日期（含），"20200101" 或 "2020-01-01"
+        end_date:   结束日期（含）
+        qmt_base:   覆盖默认路径（测试 / 自定义路径用）
+
+    Returns:
+        DataFrame（index=北京时间 naive Timestamp，index.name="datetime",
+                   columns=[lastPrice, volume, amount, open, high, low,
+                            lastClose, askPrice1-5, askVol1-5,
+                            bidPrice1-5, bidVol1-5]）
+        文件不存在或无有效数据时返回空 DataFrame。
+    """
+    _base = qmt_base if qmt_base is not None else _load_qmt_base_from_config()
+    if _base is None:
+        _logger.debug("QMT 数据目录不可用，跳过 tick DAT 直读: %s", symbol)
+        return pd.DataFrame()
+
+    paths = _build_tick_dat_paths(_base, symbol, start_date, end_date)
+    if not paths:
+        _logger.debug("tick DAT 文件不存在: %s", symbol)
+        return pd.DataFrame()
+
+    frames = [_read_tick_dat_numpy(p) for p in paths]
+    frames = [f for f in frames if not f.empty]
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames)
+    df = df[~df.index.duplicated(keep="last")]
+    return df.sort_index()
+
+
+# ─── 面向 DataSourceRegistry 的类接口 ─────────────────────────────────────────
+
 class DATBinaryReader:
     """
     面向 DataSourceRegistry 的 DAT 直读适配器。
@@ -308,3 +541,18 @@ class DATBinaryReader:
             "available": self.is_available(),
             "qmt_base":  str(self._qmt_base) if self._qmt_base else None,
         }
+
+    def get_tick_data(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """读取 L1 tick 数据，返回带完整盘口信息的 DataFrame。
+
+        Returns:
+            DataFrame（index=北京时间 Timestamp，columns=lastPrice, volume, amount,
+                       open, high, low, lastClose, askPrice1-5/Vol1-5,
+                       bidPrice1-5/Vol1-5）
+        """
+        return read_tick_dat(symbol, start_date, end_date, self._qmt_base)

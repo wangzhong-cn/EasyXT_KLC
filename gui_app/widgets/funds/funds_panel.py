@@ -2,7 +2,7 @@
 
 FundsPanel — 账户资产概览（总资产/可用资金/冻结资金/持仓市值/仓位占比）
 数据来源：easy_xt.get_api().trade.get_account_asset(account_id)
-Demo 阶段：使用内置演示数据，TODO 对接实时 API
+严格禁止任何演示/模拟资产数据自动注入。
 """
 
 from __future__ import annotations
@@ -24,16 +24,6 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-# ── Demo 数据 ────────────────────────────────────────────────────────────────
-
-_DEMO_ASSET: dict[str, Any] = {
-    "account_id": "1678070127",
-    "cash":         123_456.78,   # 可用资金
-    "frozen_cash":    5_000.00,   # 冻结资金
-    "market_value": 371_543.22,   # 持仓市值
-    "total_asset":  500_000.00,   # 总资产
-}
-
 # ── 颜色常量 ─────────────────────────────────────────────────────────────────
 
 _COLOR_TOTAL    = QColor(220, 220, 220)   # 总资产  — 亮白
@@ -42,6 +32,15 @@ _COLOR_FROZEN   = QColor(220, 160,  0)   # 冻结资金 — 琥珀
 _COLOR_MARKET   = QColor(60,  140, 220)   # 持仓市值 — 蓝
 _COLOR_RATIO    = QColor(180, 100, 220)   # 仓位占比 — 紫
 _COLOR_LABEL    = QColor(150, 150, 150)   # 标题字体 — 灰
+
+# 演示账户资产数据（未连接 QMT 时展示，仅作结构示意）
+_DEMO_ASSET: dict[str, object] = {
+    "account_id":   "demo",
+    "total_asset":   500_000.00,
+    "cash":          123_456.78,
+    "frozen_cash":     5_000.00,
+    "market_value":  371_543.22,
+}
 
 # 格式化辅助
 def _fmt_money(val: float) -> str:
@@ -140,7 +139,7 @@ class FundsPanel(QWidget):
     """资金账户面板 (Sprint 9)。
 
     显示账户总资产、可用资金、冻结资金、持仓市值、仓位占比。
-    - showEvent 首次可见时自动加载 Demo 数据
+    - showEvent 首次可见时仅显示“等待 QMT 数据”
     - update_asset(asset_dict) — 外部注入实时数据
     - clear_data() — 重置为 "--"
     """
@@ -167,7 +166,7 @@ class FundsPanel(QWidget):
         hl.addWidget(QLabel("账户:"))
         self._account_combo = QComboBox()
         self._account_combo.setMinimumWidth(160)
-        self._account_combo.addItem("演示账户  1678070127", "demo")
+        self._account_combo.addItem("演示账户", "demo")
         hl.addWidget(self._account_combo)
         hl.addStretch()
 
@@ -210,7 +209,7 @@ class FundsPanel(QWidget):
 
     def _on_refresh(self) -> None:
         # TODO: 对接真实 API: easy_xt.get_api().trade.get_account_asset(account_id)
-        self.update_asset(_DEMO_ASSET.copy())
+        self._render(_DEMO_ASSET)
 
     # ── 核心渲染逻辑 ──────────────────────────────────────────────────────────
 

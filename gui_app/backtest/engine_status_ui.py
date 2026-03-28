@@ -29,16 +29,16 @@ def format_engine_status_ui(status: dict[str, Any] | None, label_prefix: str = "
             "tooltip": "easyxt_backtest 原生引擎可用，使用无 backtrader 依赖路径",
         }
 
-    if mode == "mock":
+    if mode in {"mock", "unavailable"}:
         suffix = f" ({error_type})" if error_type else ""
-        tooltip = "Backtrader不可用，已降级模拟模式"
+        tooltip = "回测引擎不可用，已禁止模拟引擎降级"
         if error_message:
             tooltip += f"\n原因: {error_message}"
         if hint:
             tooltip += f"\n建议: {hint}"
         return {
-            "text": f"{label_prefix}: 模拟模式 ⚠️{suffix}",
-            "color": "#ef6c00",
+            "text": f"{label_prefix}: 不可用 ❌{suffix}",
+            "color": "#d32f2f",
             "tooltip": tooltip,
         }
 
@@ -91,10 +91,10 @@ def format_engine_status_log(status: dict[str, Any] | None, prefix: str = "BACKT
     if available is True and mode == "native":
         return f"[{prefix}] level=INFO mode=native available=True message=原生引擎可用"
 
-    if mode == "mock":
+    if mode in {"mock", "unavailable"}:
         parts = [
-            f"[{prefix}] level=WARN mode=mock available={available}",
-            "message=Backtrader不可用，已降级模拟模式",
+            f"[{prefix}] level=ERROR mode={mode} available={available}",
+            "message=回测引擎不可用，已禁止模拟引擎降级",
         ]
         if error_type:
             parts.append(f"error_type={error_type}")

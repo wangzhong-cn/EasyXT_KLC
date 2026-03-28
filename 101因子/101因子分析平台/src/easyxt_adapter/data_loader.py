@@ -61,7 +61,7 @@ except Exception as e:
 
 class EasyXTDataLoader:
     """EasyXT数据加载器"""
-    
+
     def __init__(self):
         # 只使用真实的EasyXT实例
         if not EASYXT_AVAILABLE or not real_easyxt_instance:
@@ -79,7 +79,7 @@ class EasyXTDataLoader:
                 raise ConnectionError("EasyXT数据服务连接失败，请确保迅投客户端已启动")
         except Exception as e:
             raise ConnectionError(f"初始化EasyXT数据服务时出错: {e}\n请确保迅投客户端已启动")
-    
+
     def load_data(self, symbols: Union[str, List[str]], start_date: str, end_date: str,
                   fields: Optional[List[str]] = None) -> pd.DataFrame:
         """
@@ -112,11 +112,11 @@ class EasyXTDataLoader:
                 fields = test_fields
             except:
                 pass
-        
+
         # 检查连接状态
         if not self.connected:
             raise ConnectionError("EasyXT未连接，请先调用 connect() 方法连接到迅投客户端")
-        
+
         try:
             # 获取价格数据
             df_data = self.easyxt.get_price(
@@ -133,32 +133,32 @@ class EasyXTDataLoader:
 
             if df_data.empty:
                 raise ValueError(f"获取的数据为空，请检查股票代码 {symbols} 和日期范围 {start_date} - {end_date}")
-            
+
             # 重命名列以匹配期望的格式
             df_data = df_data.rename(columns={
                 'time': 'date',
                 'code': 'symbol'
             })
-            
+
             # 确保date列为datetime类型
             df_data['date'] = pd.to_datetime(df_data['date'])
-            
+
             # 设置多级索引 [date, symbol]
             df_data = df_data.set_index(['date', 'symbol']).sort_index()
-            
+
             # 计算额外字段
             df_data = self._calculate_additional_fields(df_data)
-            
+
             print(f"[OK] 成功加载真实数据，形状: {df_data.shape}")
             return df_data
-            
+
         except Exception as e:
             print(f'加载真实数据时出错: {e}')
             import traceback
             traceback.print_exc()
             # 不再使用模拟数据，直接抛出异常
             raise RuntimeError(f"数据加载失败: {str(e)}\n请确保：\n1. 迅投客户端已启动\n2. 已下载相关股票的历史数据\n3. 股票代码正确")
-    
+
     def get_historical_data(self, symbols: List[str], start_date: str, end_date: str,
                            fields: Optional[List[str]] = None, warmup_days: int = 250) -> pd.DataFrame:
         """
@@ -230,54 +230,17 @@ class EasyXTDataLoader:
         df['returns'] = df.groupby(level=1)['close'].pct_change()
 
         return df
-    
-    def _generate_mock_data(self, symbols: Union[str, List[str]], start_date: str, end_date: str) -> pd.DataFrame:
-        """生成模拟数据"""
-        # 第二重保险：模拟数据生成前强制转换
-        if isinstance(symbols, str):
-            symbols = [s.strip() for s in symbols.split(',') if s.strip()]
-            
-        dates = pd.date_range(start=start_date, end=end_date, freq='D')
-        # 过滤掉非交易日
-        dates = [date for date in dates if date.weekday() < 5]  # 简单过滤周末
-        
-        all_data = []
-        for symbol in symbols:
-            for date in dates:
-                row = {
-                    'date': date,
-                    'symbol': symbol,
-                    'open': np.random.uniform(90, 110),
-                    'high': np.random.uniform(100, 120),
-                    'low': np.random.uniform(80, 100),
-                    'close': np.random.uniform(90, 110),
-                    'volume': np.random.randint(1000000, 10000000)
-                }
-                all_data.append(row)
-        
-        if all_data:
-            df = pd.DataFrame(all_data)
-            df['date'] = pd.to_datetime(df['date'])
-            df = df.set_index(['date', 'symbol']).sort_index()
-            
-            # 计算额外字段
-            df = self._calculate_additional_fields(df)
-            
-            print(f'[OK] 成功生成模拟数据，形状: {df.shape}')
-            return df
-        else:
-            raise Exception('无法生成模拟数据')
 
 
 # 测试代码
 if __name__ == '__main__':
     loader = EasyXTDataLoader()
-    
+
     # 测试数据加载
     symbols = ['000001.SZ', '600000.SH']
     start_date = '2023-01-01'
     end_date = '2023-01-31'
-    
+
     data = loader.load_data(symbols, start_date, end_date)
     print(f'加载数据形状: {data.shape}')
     print(f'数据列: {list(data.columns)}')

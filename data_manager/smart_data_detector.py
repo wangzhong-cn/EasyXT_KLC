@@ -12,9 +12,26 @@
 
 from datetime import date, timedelta
 import os
+import threading
 from typing import Optional
 
 import pandas as pd
+
+
+# ── 模块级单例：TradingCalendar 初始化（_load_holidays n=11000迭代 + 可能触发网络调用）
+# 代价昂贵，进程内只应创建一次。使用双检锁 + 模块级引用实现惰性单例。
+_TRADING_CALENDAR_SINGLETON: "TradingCalendar | None" = None
+_TRADING_CALENDAR_LOCK = threading.Lock()
+
+
+def get_trading_calendar() -> "TradingCalendar":
+    """获取全局唯一的 TradingCalendar 实例（线程安全惰性初始化）。"""
+    global _TRADING_CALENDAR_SINGLETON
+    if _TRADING_CALENDAR_SINGLETON is None:
+        with _TRADING_CALENDAR_LOCK:
+            if _TRADING_CALENDAR_SINGLETON is None:
+                _TRADING_CALENDAR_SINGLETON = TradingCalendar()
+    return _TRADING_CALENDAR_SINGLETON
 
 
 class TradingCalendar:

@@ -445,7 +445,7 @@ class _PipelineTab(QWidget):
 
 
 class DataGovernancePanel(QWidget):
-    """统一数据治理面板（11 个 Tab）。
+    """统一数据治理面板（13 个 Tab）。
 
     嵌入到 main_window 的「数据管理」Tab 位置。
 
@@ -461,7 +461,7 @@ class DataGovernancePanel(QWidget):
     Tab  9  环境配置   → 统一环境变量向导 + 连通性测试
     Tab 10  实时链路   → REALTIME_PIPELINE_STATUS_UPDATED 事件流
     Tab 11  数据覆盖   → DataCoverageWidget 覆盖率矩阵 + 全周期补数
-    Tab 11  数据覆盖   → DataCoverageWidget 覆盖率矩阵 + 全周期补数
+    Tab 12  数据溯源   → data_ingestion_status 逐标的入库血缘追踪
     """
 
     _calendar_tab: _TradingCalendarTab
@@ -504,7 +504,8 @@ class DataGovernancePanel(QWidget):
         self._tabs.addTab(self._make_query_tab(), "数据查询")
 
         # Tab 5：数据对账
-        self._tabs.addTab(_ReconciliationTab(self._ctrl), "数据对账")
+        self._reconciliation_tab = _ReconciliationTab(self._ctrl)
+        self._tabs.addTab(self._reconciliation_tab, "数据对账")
 
         # Tab 6：交易日历
         self._calendar_tab = _TradingCalendarTab(self._ctrl)
@@ -536,6 +537,10 @@ class DataGovernancePanel(QWidget):
             self._coverage_tab = _lbl  # type: ignore[assignment]
         self._tabs.addTab(self._coverage_tab, "数据覆盖")
 
+        # Tab 12：数据来源溯源
+        self._traceability_tab = _TraceabilityTab(self._ctrl)
+        self._tabs.addTab(self._traceability_tab, "数据溯源")
+
         # 切换 Tab 时触发自动刷新
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -554,6 +559,9 @@ class DataGovernancePanel(QWidget):
             signal_bus.subscribe(
                 Events.DATA_INGESTION_COMPLETE, self._on_ingestion_complete
             )
+            signal_bus.subscribe(
+                Events.CROSS_VALIDATION_BATCH_DONE, self._on_batch_done
+            )
         except Exception:
             pass
 
@@ -565,6 +573,7 @@ class DataGovernancePanel(QWidget):
             (Events.DATA_QUALITY_ALERT, self._on_data_quality_alert_event),
             (Events.BACKFILL_TASK_UPDATED, self._on_backfill_task_updated),
             (Events.DATA_INGESTION_COMPLETE, self._on_ingestion_complete),
+            (Events.CROSS_VALIDATION_BATCH_DONE, self._on_batch_done),
         ]
         for evt, handler in _unsub_pairs:
             try:
@@ -607,6 +616,15 @@ class DataGovernancePanel(QWidget):
         except Exception:
             pass
 
+    def _on_batch_done(self, **payload) -> None:
+        """定时批量交叉验证完成后，将结果推送到对账 Tab 的概要区域。"""
+        if self._closed:
+            return
+        try:
+            self._reconciliation_tab.on_batch_done(**payload)
+        except Exception:
+            pass
+
     def _make_download_tab(self) -> QWidget:
         """尝试加载 LocalDataManagerWidget，失败时显示说明标签。"""
         try:
@@ -644,6 +662,8 @@ class DataGovernancePanel(QWidget):
             self._env_config_tab._refresh()
         elif index == 10 and hasattr(self, "_realtime_tab"):
             self._realtime_tab._refresh()
+        elif index == 12 and hasattr(self, "_traceability_tab"):
+            self._traceability_tab._refresh()
 
 
 # ─── Tab 5：数据对账（多源交叉验证兜底） ──────────────────────────────────
@@ -696,10 +716,12 @@ class _ReconciliationTab(QWidget):
         self._lbl_rate = QLabel("—")
         self._lbl_max_diff = QLabel("—")
         self._lbl_rows = QLabel("—")
+        self._lbl_source = QLabel("—")
         sg_layout.addRow("一致性：", self._lbl_consistent)
         sg_layout.addRow("一致率：", self._lbl_rate)
         sg_layout.addRow("最大偏差：", self._lbl_max_diff)
         sg_layout.addRow("比对行数：", self._lbl_rows)
+        sg_layout.addRow("验证方式：", self._lbl_source)
         layout.addWidget(summary_group)
 
         # 偏差日期明细
@@ -713,6 +735,40 @@ class _ReconciliationTab(QWidget):
 
         self._status = QLabel("就绪")
         layout.addWidget(self._status)
+
+        # ── 定时批量对账结果（由 CROSS_VALIDATION_BATCH_DONE 事件驱动推送） ──
+        self._batch_group = QGroupBox("上次定时批量对账（15:40 自动运行）")
+        bg_layout = QFormLayout(self._batch_group)
+        self._lbl_batch_time = QLabel("—")
+        self._lbl_batch_total = QLabel("—")
+        self._lbl_batch_passed = QLabel("—")
+        self._lbl_batch_failed = QLabel("—")
+        bg_layout.addRow("完成时间：", self._lbl_batch_time)
+        bg_layout.addRow("验证标的数：", self._lbl_batch_total)
+        bg_layout.addRow("通过：", self._lbl_batch_passed)
+        bg_layout.addRow("异常：", self._lbl_batch_failed)
+        self._lbl_batch_bad = QLabel("—")
+        self._lbl_batch_bad.setWordWrap(True)
+        bg_layout.addRow("异常标的：", self._lbl_batch_bad)
+        layout.addWidget(self._batch_group)
+
+    def on_batch_done(self, total: int = 0, passed: int = 0, failed: int = 0,
+                      results: list | None = None, bad_codes: list | None = None,
+                      **_kwargs) -> None:
+        """DataGovernancePanel 收到 CROSS_VALIDATION_BATCH_DONE 时调用，更新批量摘要。"""
+        import datetime as _dt
+        now = _dt.datetime.now().strftime("%H:%M:%S")
+        self._lbl_batch_time.setText(now)
+        self._lbl_batch_total.setText(str(total))
+        self._lbl_batch_passed.setText(str(passed))
+        failed_color = "#F44336" if failed > 0 else "#4CAF50"
+        self._lbl_batch_failed.setText(
+            f"<span style='color:{failed_color};font-weight:bold'>{failed}</span>"
+        )
+        if bad_codes:
+            self._lbl_batch_bad.setText("  ".join(bad_codes[:8]))
+        else:
+            self._lbl_batch_bad.setText("无")
 
     def _run(self) -> None:
         code = self._code_input.text().strip()
@@ -741,12 +797,15 @@ class _ReconciliationTab(QWidget):
         rate = result.get("consistency_rate", 0.0)
         max_diff = result.get("max_diff_pct", 0.0)
         duckdb_rows = result.get("duckdb_rows", 0)
-        live_rows = result.get("live_rows", 0)
-        compared = result.get("compared_rows", min(duckdb_rows, live_rows))
+        # 兼容新字段名 akshare_rows（真正多源），也兼容旧字段 live_rows
+        akshare_rows = result.get("akshare_rows", result.get("live_rows", 0))
+        compared = result.get("compared_rows", min(duckdb_rows, akshare_rows))
+        source = result.get("source", "unknown")
         self._lbl_consistent.setText("✅ 一致" if consistent else "⚠️ 存在差异")
         self._lbl_rate.setText(f"{rate * 100:.2f}%")
         self._lbl_max_diff.setText(f"{max_diff:.4f}%")
-        self._lbl_rows.setText(f"DuckDB {duckdb_rows} 行 / 实时源 {live_rows} 行 / 比对 {compared} 行")
+        self._lbl_rows.setText(f"DuckDB {duckdb_rows} 行 / 对照源 {akshare_rows} 行 / 比对 {compared} 行")
+        self._lbl_source.setText(source)
         diff_days = result.get("diff_days", [])
         if diff_days:
             self._diff_text.setPlainText("\n".join(diff_days))
@@ -1698,3 +1757,167 @@ class _RealtimeMonitorTab(QWidget):
     def _on_error(self, msg: str) -> None:
         self._refresh_btn.setEnabled(True)
         self._conn_label.setText(f"链路状态：错误 — {msg[:40]}")
+
+
+# ─── Tab 12：数据来源溯源面板 ──────────────────────────────────────────────
+
+
+class _TraceabilityTab(QWidget):
+    """逐标的数据入库溯源面板。
+
+    展示 data_ingestion_status 表中每只股票/每个周期的：
+        - 实际数据来源（duckdb / dat / qmt / tushare / akshare）
+        - 入库状态（success / error）
+        - 记录行数
+        - 数据时间跨度
+        - 入库时间
+        - 批次 ID (ingest_run_id)
+
+    支持按标的代码和周期筛选，60s 自动刷新可选。
+    """
+
+    _SOURCE_COLORS: dict[str, str] = {
+        "duckdb": "#4CAF50",
+        "dat": "#2196F3",
+        "qmt": "#FF9800",
+        "tushare": "#9C27B0",
+        "akshare": "#00BCD4",
+    }
+
+    def __init__(self, controller: DataManagerController, parent=None):
+        super().__init__(parent)
+        self._ctrl = controller
+        self._thread: _ControllerThread | None = None
+        self._auto_timer = QTimer(self)
+        self._auto_timer.timeout.connect(self._refresh)
+        self._init_ui()
+
+    def _init_ui(self) -> None:
+        layout = QVBoxLayout(self)
+
+        # ── 筛选栏 ──
+        filter_bar = QHBoxLayout()
+        filter_bar.addWidget(QLabel("标的代码:"))
+        self._stock_input = QLineEdit()
+        self._stock_input.setPlaceholderText("如 000001.SZ（留空查全部）")
+        self._stock_input.setMaximumWidth(200)
+        filter_bar.addWidget(self._stock_input)
+
+        filter_bar.addWidget(QLabel("周期:"))
+        self._period_combo = QComboBox()
+        self._period_combo.addItems(["全部", "1d", "1m", "5m", "tick"])
+        self._period_combo.setMaximumWidth(100)
+        filter_bar.addWidget(self._period_combo)
+
+        self._refresh_btn = QPushButton("查询溯源")
+        self._refresh_btn.clicked.connect(self._refresh)
+        filter_bar.addWidget(self._refresh_btn)
+
+        self._auto_btn = QPushButton("自动刷新(60s)")
+        self._auto_btn.setCheckable(True)
+        self._auto_btn.toggled.connect(self._toggle_auto)
+        filter_bar.addWidget(self._auto_btn)
+
+        filter_bar.addStretch()
+        self._summary_label = QLabel("就绪")
+        filter_bar.addWidget(self._summary_label)
+        layout.addLayout(filter_bar)
+
+        # ── 溯源表格 ──
+        self._table = QTableWidget(0, 8)
+        self._table.setHorizontalHeaderLabels([
+            "标的代码", "周期", "数据来源", "状态",
+            "行数", "起始日期", "结束日期", "入库时间",
+        ])
+        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setSelectionBehavior(QTableWidget.SelectRows)
+        layout.addWidget(self._table)
+
+        # ── 来源统计摘要 ──
+        self._stats_area = QPlainTextEdit()
+        self._stats_area.setReadOnly(True)
+        self._stats_area.setMaximumHeight(120)
+        self._stats_area.setFont(QFont("Consolas", 9))
+        layout.addWidget(self._stats_area)
+
+    def _toggle_auto(self, checked: bool) -> None:
+        if checked:
+            self._auto_timer.start(60_000)
+            self._auto_btn.setText("停止自动刷新")
+            self._refresh()
+        else:
+            self._auto_timer.stop()
+            self._auto_btn.setText("自动刷新(60s)")
+
+    def _refresh(self) -> None:
+        stock = self._stock_input.text().strip() or None
+        period_text = self._period_combo.currentText()
+        period = None if period_text == "全部" else period_text
+        self._refresh_btn.setEnabled(False)
+        self._thread = _ControllerThread(
+            self._ctrl.get_ingestion_traceability,
+            stock_code=stock,
+            period=period,
+        )
+        self._thread.result_ready.connect(self._on_result)
+        self._thread.error_occurred.connect(self._on_error)
+        self._thread.start()
+
+    def _on_result(self, result: dict) -> None:
+        self._refresh_btn.setEnabled(True)
+        if result.get("error"):
+            self._stats_area.setPlainText(f"[ERROR] {result['error']}")
+            self._summary_label.setText("查询失败")
+            return
+
+        records = result.get("records", [])
+        self._table.setRowCount(len(records))
+        source_counts: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
+
+        for row, rec in enumerate(records):
+            src = str(rec.get("source", ""))
+            status = str(rec.get("status", ""))
+            source_counts[src] = source_counts.get(src, 0) + 1
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+            self._table.setItem(row, 0, QTableWidgetItem(str(rec.get("stock_code", ""))))
+            self._table.setItem(row, 1, QTableWidgetItem(str(rec.get("period", ""))))
+
+            source_item = QTableWidgetItem(src)
+            color = self._SOURCE_COLORS.get(src)
+            if color:
+                from PyQt5.QtGui import QColor
+                source_item.setForeground(QColor(color))
+                source_item.setFont(QFont("", -1, QFont.Bold))
+            self._table.setItem(row, 2, source_item)
+
+            status_item = QTableWidgetItem(status)
+            if status == "error":
+                from PyQt5.QtGui import QColor
+                status_item.setForeground(QColor("#F44336"))
+            self._table.setItem(row, 3, status_item)
+
+            self._table.setItem(row, 4, QTableWidgetItem(str(rec.get("record_count", ""))))
+            self._table.setItem(row, 5, QTableWidgetItem(str(rec.get("start_date", ""))[:10]))
+            self._table.setItem(row, 6, QTableWidgetItem(str(rec.get("end_date", ""))[:10]))
+            self._table.setItem(row, 7, QTableWidgetItem(str(rec.get("last_updated", ""))[:19]))
+
+        self._summary_label.setText(f"共 {len(records)} 条溯源记录")
+
+        # 生成统计摘要
+        lines = ["═══ 数据来源分布 ═══"]
+        for src, cnt in sorted(source_counts.items(), key=lambda x: -x[1]):
+            lines.append(f"  {src:<12s}  {cnt} 条")
+        lines.append("")
+        lines.append("═══ 入库状态分布 ═══")
+        for st, cnt in sorted(status_counts.items(), key=lambda x: -x[1]):
+            lines.append(f"  {st:<12s}  {cnt} 条")
+        self._stats_area.setPlainText("\n".join(lines))
+
+    def _on_error(self, msg: str) -> None:
+        self._refresh_btn.setEnabled(True)
+        self._stats_area.setPlainText(f"[FATAL] {msg}")
+        self._summary_label.setText("查询异常")

@@ -337,15 +337,14 @@ class TradingInterface(QMainWindow):
             self.disconnect_from_trading()
 
     def connect_to_trading(self):
-        """连接到交易服务。当 easyxt 不可用或未传入时自动切换为模拟模式。"""
+        """连接到交易服务。严格禁止自动切换到任何模拟/演示模式。"""
         try:
             if not EASYXT_AVAILABLE or not self.easyxt:
-                # 模拟连接模式：加载演示数据，供开发/测试/离线环境使用
-                self.is_connected = True
-                self.connection_status_label.setText("🟡 模拟模式")
-                self.connect_btn.setText("🔌 断开连接")
-                self.status_bar.showMessage("运行于模拟模式（无实盘连接）")
-                self.load_demo_data()
+                self.is_connected = False
+                self.connection_status_label.setText("🔴 未连接")
+                self.connect_btn.setText("🔌 连接")
+                self.clear_data()
+                self.status_bar.showMessage("交易接口不可用：已禁止 Demo/模拟模式")
                 return
 
             if not self.userdata_path or not self.account_id:
@@ -430,7 +429,7 @@ class TradingInterface(QMainWindow):
                 added_ids.append(str(account_id))
         return added_ids
 
-    def _select_preferred_account(self, accounts, preferred_id="1678070127"):
+    def _select_preferred_account(self, accounts, preferred_id="test1101"):
         api = self.easyxt
         if api is None:
             return
@@ -587,24 +586,12 @@ class TradingInterface(QMainWindow):
             print(f"刷新账户信息失败: {e}")
 
     def load_demo_data(self):
-        """加载演示数据"""
-        # 模拟账户数据
-        demo_account = {
-            'total_asset': 100000.00,
-            'available_cash': 50000.00,
-            'market_value': 50000.00,
-            'today_pnl': 1500.00
-        }
-        self.account_info = demo_account
-        self.update_account_display(demo_account)
-
-        # 模拟持仓数据
-        demo_positions = [
-            {'stock_code': '000001.SZ', 'volume': 1000, 'available_volume': 1000, 'cost_price': 12.50},
-            {'stock_code': '600000.SH', 'volume': 500, 'available_volume': 500, 'cost_price': 8.80},
-        ]
-        self.positions = demo_positions
-        self.update_position_display(demo_positions)
+        """兼容保留：严禁演示数据注入，统一清空界面。"""
+        self.account_info = {}
+        self.positions = []
+        self.clear_data()
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage("Demo/模拟数据已被禁止")
 
     def update_account_display(self, account_info):
         self.account_panel.update_account_info(account_info)
@@ -688,16 +675,10 @@ class TradingInterface(QMainWindow):
                     self.status_bar.showMessage("自动交易下单失败", 5000)
                 return False
             if source == "manual":
-                QMessageBox.information(
-                    self,
-                    "模拟交易",
-                    f"模拟{'买入' if side == 'buy' else '卖出'}: {stock_code}\\n数量: {volume}股\\n价格: {price}",
-                )
+                QMessageBox.warning(self, "交易不可用", "交易接口不可用，已严格禁止任何模拟/演示下单")
             elif hasattr(self, "status_bar") and self.status_bar:
-                self.status_bar.showMessage(f"模拟交易 {side} {stock_code} {volume} @{price}", 5000)
-            signal_bus.emit(Events.ORDER_SUBMITTED, side=side, symbol=stock_code, price=price, volume=volume)
-            self._track_order()
-            return True
+                self.status_bar.showMessage("交易接口不可用：已禁止模拟/演示下单", 5000)
+            return False
         except Exception as e:
             if source == "manual":
                 QMessageBox.critical(self, "交易错误", f"下单失败: {str(e)}")

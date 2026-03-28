@@ -27,11 +27,11 @@ class FiveFoldAdjustmentManager:
 
     # 复权类型枚举
     ADJUST_TYPES = {
-        'none': '不复权',
-        'front': '前复权',
-        'back': '后复权',
-        'geometric_front': '等比前复权',
-        'geometric_back': '等比后复权'
+        "none": "不复权",
+        "front": "前复权",
+        "back": "后复权",
+        "geometric_front": "等比前复权",
+        "geometric_back": "等比后复权",
     }
 
     def __init__(self, duckdb_path: Optional[str] = None):
@@ -46,6 +46,9 @@ class FiveFoldAdjustmentManager:
         self.duckdb_path = resolve_duckdb_path(duckdb_path)
         self._db = None
         self.con = None  # 废弃：保留属性避免 AttributeError
+        # 可由外部注入（如 UnifiedDataInterface）的分红数据获取回调
+        # 签名: (stock_code: str, start_date, end_date) -> pd.DataFrame
+        self.dividends_fetcher: Optional[Any] = None
 
     def connect(self):
         """连接数据库（通过连接池）"""
@@ -75,33 +78,37 @@ class FiveFoldAdjustmentManager:
         # 定义需要添加的列
         columns_to_add = [
             # 前复权
-            ('open_front', 'DECIMAL(28,6)'),
-            ('high_front', 'DECIMAL(28,6)'),
-            ('low_front', 'DECIMAL(28,6)'),
-            ('close_front', 'DECIMAL(28,6)'),
+            ("open_front", "DECIMAL(28,6)"),
+            ("high_front", "DECIMAL(28,6)"),
+            ("low_front", "DECIMAL(28,6)"),
+            ("close_front", "DECIMAL(28,6)"),
             # 后复权
-            ('open_back', 'DECIMAL(28,6)'),
-            ('high_back', 'DECIMAL(28,6)'),
-            ('low_back', 'DECIMAL(28,6)'),
-            ('close_back', 'DECIMAL(28,6)'),
+            ("open_back", "DECIMAL(28,6)"),
+            ("high_back", "DECIMAL(28,6)"),
+            ("low_back", "DECIMAL(28,6)"),
+            ("close_back", "DECIMAL(28,6)"),
             # 等比前复权
-            ('open_geometric_front', 'DECIMAL(28,6)'),
-            ('high_geometric_front', 'DECIMAL(28,6)'),
-            ('low_geometric_front', 'DECIMAL(28,6)'),
-            ('close_geometric_front', 'DECIMAL(28,6)'),
+            ("open_geometric_front", "DECIMAL(28,6)"),
+            ("high_geometric_front", "DECIMAL(28,6)"),
+            ("low_geometric_front", "DECIMAL(28,6)"),
+            ("close_geometric_front", "DECIMAL(28,6)"),
             # 等比后复权
-            ('open_geometric_back', 'DECIMAL(28,6)'),
-            ('high_geometric_back', 'DECIMAL(28,6)'),
-            ('low_geometric_back', 'DECIMAL(28,6)'),
-            ('close_geometric_back', 'DECIMAL(28,6)'),
+            ("open_geometric_back", "DECIMAL(28,6)"),
+            ("high_geometric_back", "DECIMAL(28,6)"),
+            ("low_geometric_back", "DECIMAL(28,6)"),
+            ("close_geometric_back", "DECIMAL(28,6)"),
         ]
 
         # 获取现有列
         with self._db.get_write_connection() as con:
-            existing_columns = con.execute("""
+            existing_columns = (
+                con.execute("""
                 SELECT column_name FROM information_schema.columns
                 WHERE table_name = 'stock_daily'
-            """).fetchdf()['column_name'].tolist()
+            """)
+                .fetchdf()["column_name"]
+                .tolist()
+            )
 
             # 先删除已存在的复权列（如果是DOUBLE类型）
             to_drop = []
@@ -109,11 +116,10 @@ class FiveFoldAdjustmentManager:
                 if col_name in existing_columns:
                     col_info = con.execute(
                         "SELECT data_type FROM information_schema.columns"
-                        " WHERE table_name = 'stock_daily' AND column_name = '"
-                        + col_name + "'"
+                        " WHERE table_name = 'stock_daily' AND column_name = '" + col_name + "'"
                     ).fetchone()
 
-                    if col_info and col_info[0] == 'DOUBLE':
+                    if col_info and col_info[0] == "DOUBLE":
                         to_drop.append(col_name)
 
             if to_drop:
@@ -145,7 +151,9 @@ class FiveFoldAdjustmentManager:
         print(f"[OK] 完成，新增 {added_count} 列")
         return True
 
-    def calculate_adjustment(self, df: pd.DataFrame, dividends: Optional[pd.DataFrame] = None) -> dict[str, pd.DataFrame]:
+    def calculate_adjustment(
+        self, df: pd.DataFrame, dividends: Optional[pd.DataFrame] = None
+    ) -> dict[str, pd.DataFrame]:
         """
         计算五维复权数据
 
@@ -162,136 +170,160 @@ class FiveFoldAdjustmentManager:
             return results
 
         df = df.copy()
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'], errors='coerce')
-            df = df[df['date'].notna()]
-            df = df.set_index('date')
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df[df["date"].notna()]
+            df = df.set_index("date")
         else:
-            df.index = pd.to_datetime(df.index, errors='coerce')
+            df.index = pd.to_datetime(df.index, errors="coerce")
             df = df[df.index.notna()]
         df.index = pd.DatetimeIndex(df.index).normalize()
 
-        if dividends is not None and not dividends.empty and 'ex_date' in dividends.columns:
+        if dividends is not None and not dividends.empty and "ex_date" in dividends.columns:
             dividends = dividends.copy()
-            dividends['ex_date'] = pd.to_datetime(dividends['ex_date'], errors='coerce')
-            dividends = dividends[dividends['ex_date'].notna()]
-            dividends['ex_date'] = pd.to_datetime(dividends['ex_date'], errors='coerce').dt.normalize()
+            dividends["ex_date"] = pd.to_datetime(dividends["ex_date"], errors="coerce")
+            dividends = dividends[dividends["ex_date"].notna()]
+            dividends["ex_date"] = pd.to_datetime(
+                dividends["ex_date"], errors="coerce"
+            ).dt.normalize()
 
         # 1. 不复权（原始数据）
-        results['none'] = df.copy()
+        results["none"] = df.copy()
 
         # 如果没有分红数据，所有复权数据与不复权相同
         if dividends is None or dividends.empty:
             # 没有分红数据时，返回原始价格作为复权数据
             # 这样前复权列至少有值（等于原始价格），而不是NULL
-            for adj_type in ['front', 'back', 'geometric_front', 'geometric_back']:
+            for adj_type in ["front", "back", "geometric_front", "geometric_back"]:
                 results[adj_type] = df.copy()
         else:
             # 2. 前复权
-            results['front'] = self._calculate_front_adjustment(df, dividends)
+            results["front"] = self._calculate_front_adjustment(df, dividends)
 
             # 3. 后复权
-            results['back'] = self._calculate_back_adjustment(df, dividends)
+            results["back"] = self._calculate_back_adjustment(df, dividends)
 
             # 4. 等比前复权
-            results['geometric_front'] = self._calculate_geometric_front_adjustment(df, dividends)
+            results["geometric_front"] = self._calculate_geometric_front_adjustment(df, dividends)
 
             # 5. 等比后复权
-            results['geometric_back'] = self._calculate_geometric_back_adjustment(df, dividends)
+            results["geometric_back"] = self._calculate_geometric_back_adjustment(df, dividends)
 
         return results
 
-    def _calculate_front_adjustment(self, df: pd.DataFrame, dividends: pd.DataFrame) -> pd.DataFrame:
-        """
-        计算前复权数据
+    def _calculate_front_adjustment(
+        self, df: pd.DataFrame, dividends: pd.DataFrame
+    ) -> pd.DataFrame:
+        """计算前复权数据（以当前最新价格为基准，历史价格向下调整）。
 
-        前复权原理：以当前价格为基准，历史价格按照分红比例进行调整
-        公式：复权后价格 = 原始价格 × 累计复权因子
+        算法（单次从右向左扫描，每个除权事件仅应用一次）：
+        1. 遍历各除权日，计算该事件的调整系数：
+               factor = (prev_close - cash_per_share) / (prev_close × (1 + bonus_ratio/10))
+           其中 prev_close = 除权前最后一个交易日收盘价，bonus_ratio = 每10股送转合计。
+        2. 按日期降序扫描交易日序列，当扫过某个除权日时将 factor 纳入累积乘积；
+           每个除权事件只被累积一次，避免指数级放大。
+        3. 将累积系数乘以各日 OHLC，得到前复权价格。
         """
         df_adj = df.copy()
+        sorted_dates = df.index.sort_values()  # 升序
 
-        # 合并分红数据
-        dividends_sorted = dividends.sort_values('ex_date')
+        # ── 计算每个除权事件的调整系数 ──────────────────────────────────────
+        div_events: list[tuple] = []  # (ex_date_ts, factor)
+        for _, div_row in dividends.sort_values("ex_date").iterrows():
+            ex_date_ts = pd.Timestamp(div_row["ex_date"])
+            pre_dates = sorted_dates[sorted_dates < ex_date_ts]
+            if pre_dates.empty:
+                continue
+            prev_close = float(df.loc[pre_dates[-1], "close"])
+            if prev_close <= 0:
+                continue
+            cash = float(div_row.get("dividend_per_share") or 0)
+            bonus = float(div_row.get("bonus_ratio") or 0)  # 每10股送转合计
+            # 前复权：历史价格应下调 → factor < 1
+            # factor = (prev_close - cash) / (prev_close × (1 + bonus/10))
+            numerator = prev_close - cash
+            denominator = prev_close * (1.0 + bonus / 10.0)
+            if denominator <= 0 or numerator <= 0:
+                continue
+            factor = numerator / denominator
+            div_events.append((ex_date_ts, factor))
 
-        # 计算累计复权因子（从后往前）
-        cumulative_factor = 1.0
-        adjustment_factors = pd.Series(index=df.index, dtype=float)
+        if not div_events:
+            return df_adj  # 无有效除权事件，返回原始数据
 
-        for idx in reversed(df.index):
-            # 检查这一天或之后是否有分红
-            future_dividends_sorted = dividends_sorted[dividends_sorted['ex_date'] > idx]
+        # 按除权日从新到旧排列，方便在从右向左扫描中逐步弹出
+        div_events.sort(key=lambda x: x[0], reverse=True)
 
-            if not future_dividends_sorted.empty:
-                # 计算复权因子
-                for _, div_row in future_dividends_sorted.iterrows():
-                    # 现金分红
-                    if pd.notna(div_row.get('dividend_per_share')):
-                        dividend = pd.to_numeric(div_row['dividend_per_share'], errors='coerce')
-                        # 前复权因子 = (1 - 后续分红 / 之前收盘价)
-                        prev_close = float(cast(Any, df.loc[idx, 'close']))
-                        if pd.notna(dividend) and prev_close > 0:
-                            cumulative_factor *= (1 - dividend / prev_close)
+        # ── 从右向左单次扫描，每个除权事件恰好消费一次 ─────────────────────
+        running_factor = 1.0
+        div_ptr = 0
+        adj_factors: dict = {}
 
-                    # 送股/转增
-                    if pd.notna(div_row.get('bonus_ratio')):
-                        bonus = div_row['bonus_ratio']
-                        # 10送X股，比例是 X/10
-                        bonus_ratio = bonus / 10.0
-                        cumulative_factor *= (1 + bonus_ratio)
+        for date in sorted_dates[::-1]:  # 降序
+            # 将所有除权日 > 当前 date 的事件纳入累积（仅一次）
+            while div_ptr < len(div_events) and div_events[div_ptr][0] > date:
+                running_factor *= div_events[div_ptr][1]
+                div_ptr += 1
+            adj_factors[date] = running_factor
 
-            adjustment_factors[idx] = cumulative_factor
-
-        # 应用复权因子
-        for col in ['open', 'high', 'low', 'close']:
-            df_adj[col] = df[col] * adjustment_factors
+        factor_series = pd.Series(adj_factors)
+        for col in ["open", "high", "low", "close"]:
+            if col in df_adj.columns:
+                df_adj[col] = (df[col] * factor_series).round(4)
 
         return df_adj
 
     def _calculate_back_adjustment(self, df: pd.DataFrame, dividends: pd.DataFrame) -> pd.DataFrame:
-        """
-        计算后复权数据
+        """计算后复权数据（以历史最早价格为基准，除权后的价格向上还原）。
 
-        后复权原理：以历史价格为基准，当前价格按照分红比例进行调整
+        算法：
+        1. 按时间正序扫描，在每个除权日当天累积"上调系数"。
+        2. 上调系数 = prev_close / (prev_close - cash) × (1 + bonus/10)
+           cash_adj 使历史价格不变，除权后价格放大；bonus_adj 同理将除权后价格放大。
+        3. 最终价格 = raw × (max_factor / factor_at_date)
+           这样除权前日期的因子比值为最大值，除权后的因子比值趋近于1。
         """
         df_adj = df.copy()
+        sorted_dates = df.index.sort_values()  # 升序
 
-        # 合并分红数据
-        dividends_sorted = dividends.sort_values('ex_date')
+        dividends_sorted = dividends.sort_values("ex_date")
 
-        # 计算累计复权因子（从前往后）
+        # ── 正序扫描，在除权日累积"回调系数" ────────────────────────────────
         cumulative_factor = 1.0
-        adjustment_factors = pd.Series(index=df.index, dtype=float)
+        adjustment_factors: dict = {}
 
-        for idx in df.index:
-            # 检查这一天是否有分红
-            day_dividends_sorted = dividends_sorted[dividends_sorted['ex_date'] == idx]
+        for date in sorted_dates:
+            day_divs = dividends_sorted[dividends_sorted["ex_date"] == date]
+            for _, div_row in day_divs.iterrows():
+                prev_close = float(df.loc[date, "close"]) if date in df.index else 0.0
+                cash = float(div_row.get("dividend_per_share") or 0)
+                bonus = float(div_row.get("bonus_ratio") or 0)
+                if prev_close <= 0:
+                    continue
+                # 后复权：除权后价格需向上放大
+                # 现金分红：multiplier = prev_close / (prev_close - cash)  > 1
+                # 送转股：multiplier = (1 + bonus/10)  > 1
+                multiplier = 1.0
+                denominator = prev_close - cash
+                if denominator > 0:
+                    multiplier *= prev_close / denominator
+                if bonus > 0:
+                    multiplier *= 1.0 + bonus / 10.0
+                cumulative_factor *= multiplier
+            adjustment_factors[date] = cumulative_factor
 
-            if not day_dividends_sorted.empty:
-                for _, div_row in day_dividends_sorted.iterrows():
-                    # 现金分红
-                    if pd.notna(div_row.get('dividend_per_share')):
-                        dividend = pd.to_numeric(div_row['dividend_per_share'], errors='coerce')
-                        prev_close = float(cast(Any, df.loc[idx, 'close'] if idx in df.index else df['close'].iloc[0]))
-                        if pd.notna(dividend) and prev_close > 0:
-                            # 后复权因子 = (1 - 分红 / 除权前收盘价)
-                            cumulative_factor *= (1 - dividend / prev_close)
+        factor_series = pd.Series(adjustment_factors)
+        final_factor = factor_series.iloc[-1] if len(factor_series) > 0 else 1.0
 
-                    # 送股/转增
-                    if pd.notna(div_row.get('bonus_ratio')):
-                        bonus = div_row['bonus_ratio']
-                        bonus_ratio = bonus / 10.0
-                        cumulative_factor *= (1 + bonus_ratio)
-
-            adjustment_factors[idx] = cumulative_factor
-
-        # 应用复权因子（后复权是累计的，需要用最终的因子）
-        final_factor = adjustment_factors.iloc[-1]
-        for col in ['open', 'high', 'low', 'close']:
-            df_adj[col] = df[col] * (final_factor / adjustment_factors)
+        for col in ["open", "high", "low", "close"]:
+            if col in df_adj.columns:
+                df_adj[col] = (df[col] * (final_factor / factor_series)).round(4)
 
         return df_adj
 
-    def _calculate_geometric_front_adjustment(self, df: pd.DataFrame, dividends: pd.DataFrame) -> pd.DataFrame:
+    def _calculate_geometric_front_adjustment(
+        self, df: pd.DataFrame, dividends: pd.DataFrame
+    ) -> pd.DataFrame:
         """
         计算等比前复权数据
 
@@ -305,9 +337,10 @@ class FiveFoldAdjustmentManager:
 
         # 计算等比复权因子（几何平均）
         # 使用对数变换避免跳空
-        for col in ['open', 'high', 'low', 'close']:
+        for col in ["open", "high", "low", "close"]:
             # 计算收益率
             returns = df_front[col].pct_change()
+            returns = returns.fillna(0.0)  # 停牌日/首行视为0涨跌，保持等比连续性
             # 累计乘积（等比）
             cumulative_return = (1 + returns).cumprod()
             # 应用等比复权
@@ -316,7 +349,9 @@ class FiveFoldAdjustmentManager:
 
         return df_adj
 
-    def _calculate_geometric_back_adjustment(self, df: pd.DataFrame, dividends: pd.DataFrame) -> pd.DataFrame:
+    def _calculate_geometric_back_adjustment(
+        self, df: pd.DataFrame, dividends: pd.DataFrame
+    ) -> pd.DataFrame:
         """
         计算等比后复权数据
         """
@@ -326,9 +361,10 @@ class FiveFoldAdjustmentManager:
         df_back = self._calculate_back_adjustment(df, dividends)
 
         # 计算等比复权因子（几何平均）
-        for col in ['open', 'high', 'low', 'close']:
+        for col in ["open", "high", "low", "close"]:
             # 计算收益率
             returns = df_back[col].pct_change()
+            returns = returns.fillna(0.0)  # 停牌日/首行视为0涨跌，保持等比连续性
             # 累计乘积（等比）
             cumulative_return = (1 + returns).cumprod()
             # 应用等比复权
@@ -351,26 +387,34 @@ class FiveFoldAdjustmentManager:
 
         try:
             # 获取不复权数据作为基准
-            df_none = adjusted_data_dict['none'].copy()
+            df_none = adjusted_data_dict["none"].copy()
 
             # 添加各种复权类型的列
             for adj_type, df_adj in adjusted_data_dict.items():
-                if adj_type == 'none':
+                if adj_type == "none":
                     continue
 
                 # 映射列名
                 col_mapping = {
-                    'front': ('open_front', 'high_front', 'low_front', 'close_front'),
-                    'back': ('open_back', 'high_back', 'low_back', 'close_back'),
-                    'geometric_front': ('open_geometric_front', 'high_geometric_front',
-                                       'low_geometric_front', 'close_geometric_front'),
-                    'geometric_back': ('open_geometric_back', 'high_geometric_back',
-                                      'low_geometric_back', 'close_geometric_back'),
+                    "front": ("open_front", "high_front", "low_front", "close_front"),
+                    "back": ("open_back", "high_back", "low_back", "close_back"),
+                    "geometric_front": (
+                        "open_geometric_front",
+                        "high_geometric_front",
+                        "low_geometric_front",
+                        "close_geometric_front",
+                    ),
+                    "geometric_back": (
+                        "open_geometric_back",
+                        "high_geometric_back",
+                        "low_geometric_back",
+                        "close_geometric_back",
+                    ),
                 }
 
                 target_cols = col_mapping.get(adj_type)
                 if target_cols:
-                    for i, price_col in enumerate(['open', 'high', 'low', 'close']):
+                    for i, price_col in enumerate(["open", "high", "low", "close"]):
                         if price_col in df_adj.columns:
                             df_none[target_cols[i]] = df_adj[price_col]
 
@@ -379,9 +423,9 @@ class FiveFoldAdjustmentManager:
                 con.execute("BEGIN")
                 try:
                     con.execute(f"DELETE FROM stock_daily WHERE stock_code = ?", [stock_code])
-                    con.register('temp_df', df_none)
+                    con.register("temp_df", df_none)
                     con.execute("INSERT INTO stock_daily SELECT * FROM temp_df")
-                    con.unregister('temp_df')
+                    con.unregister("temp_df")
                     con.execute("COMMIT")
                 except Exception:
                     con.execute("ROLLBACK")
@@ -393,14 +437,13 @@ class FiveFoldAdjustmentManager:
         except Exception as e:
             print(f"[ERROR] 保存失败: {e}")
             import traceback
+
             traceback.print_exc()
             return False
 
-    def get_data_with_adjustment(self,
-                                stock_code: str,
-                                start_date: str,
-                                end_date: str,
-                                adjust_type: str = 'none') -> pd.DataFrame:
+    def get_data_with_adjustment(
+        self, stock_code: str, start_date: str, end_date: str, adjust_type: str = "none"
+    ) -> pd.DataFrame:
         """
         获取指定复权类型的数据
 
@@ -421,26 +464,38 @@ class FiveFoldAdjustmentManager:
             return pd.DataFrame()
 
         # 检查复权列是否存在，如果不存在则先添加
-        if adjust_type != 'none':
+        if adjust_type != "none":
             with self._db.get_read_connection() as con:
-                existing_columns = con.execute("""
+                existing_columns = (
+                    con.execute("""
                     SELECT column_name
                     FROM information_schema.columns
                     WHERE table_name = 'stock_daily'
-                """).fetchdf()['column_name'].tolist()
+                """)
+                    .fetchdf()["column_name"]
+                    .tolist()
+                )
 
             # 根据复权类型确定需要检查的列
             required_cols = []
-            if adjust_type == 'front':
-                required_cols = ['open_front', 'high_front', 'low_front', 'close_front']
-            elif adjust_type == 'back':
-                required_cols = ['open_back', 'high_back', 'low_back', 'close_back']
-            elif adjust_type == 'geometric_front':
-                required_cols = ['open_geometric_front', 'high_geometric_front',
-                             'low_geometric_front', 'close_geometric_front']
-            elif adjust_type == 'geometric_back':
-                required_cols = ['open_geometric_back', 'high_geometric_back',
-                             'low_geometric_back', 'close_geometric_back']
+            if adjust_type == "front":
+                required_cols = ["open_front", "high_front", "low_front", "close_front"]
+            elif adjust_type == "back":
+                required_cols = ["open_back", "high_back", "low_back", "close_back"]
+            elif adjust_type == "geometric_front":
+                required_cols = [
+                    "open_geometric_front",
+                    "high_geometric_front",
+                    "low_geometric_front",
+                    "close_geometric_front",
+                ]
+            elif adjust_type == "geometric_back":
+                required_cols = [
+                    "open_geometric_back",
+                    "high_geometric_back",
+                    "low_geometric_back",
+                    "close_geometric_back",
+                ]
 
             # 检查是否所有需要的列都存在
             missing_cols = [col for col in required_cols if col not in existing_columns]
@@ -450,18 +505,26 @@ class FiveFoldAdjustmentManager:
                 self.add_adjustment_columns()
 
         # 根据复权类型选择列
-        if adjust_type == 'none':
-            price_cols = ['open', 'high', 'low', 'close']
-        elif adjust_type == 'front':
-            price_cols = ['open_front', 'high_front', 'low_front', 'close_front']
-        elif adjust_type == 'back':
-            price_cols = ['open_back', 'high_back', 'low_back', 'close_back']
-        elif adjust_type == 'geometric_front':
-            price_cols = ['open_geometric_front', 'high_geometric_front',
-                         'low_geometric_front', 'close_geometric_front']
-        elif adjust_type == 'geometric_back':
-            price_cols = ['open_geometric_back', 'high_geometric_back',
-                         'low_geometric_back', 'close_geometric_back']
+        if adjust_type == "none":
+            price_cols = ["open", "high", "low", "close"]
+        elif adjust_type == "front":
+            price_cols = ["open_front", "high_front", "low_front", "close_front"]
+        elif adjust_type == "back":
+            price_cols = ["open_back", "high_back", "low_back", "close_back"]
+        elif adjust_type == "geometric_front":
+            price_cols = [
+                "open_geometric_front",
+                "high_geometric_front",
+                "low_geometric_front",
+                "close_geometric_front",
+            ]
+        elif adjust_type == "geometric_back":
+            price_cols = [
+                "open_geometric_back",
+                "high_geometric_back",
+                "low_geometric_back",
+                "close_geometric_back",
+            ]
 
         # 构建查询
         query = (
@@ -480,17 +543,17 @@ class FiveFoldAdjustmentManager:
             df = self._db.execute_read_query(query, (stock_code, start_date, end_date))
 
             # 如果指定的复权列不存在或不完整，尝试自动修复后回退到不复权
-            if df.empty or df['open'].isna().all():
-                if adjust_type != 'none':
+            if df.empty or df["open"].isna().all():
+                if adjust_type != "none":
                     # 尝试自动修复：读取原始数据并重新计算复权列
                     self._try_repair_adjustment(stock_code, start_date, end_date)
                     print(f"[WARNING] {adjust_type} 数据不存在，回退到不复权数据")
-                    return self.get_data_with_adjustment(stock_code, start_date, end_date, 'none')
+                    return self.get_data_with_adjustment(stock_code, start_date, end_date, "none")
 
             # 设置 DatetimeIndex（按 date 列），确保 _check_missing_trading_days 能正确判断
-            if 'date' in df.columns and not df.empty:
-                df['date'] = pd.to_datetime(df['date'], errors='coerce')
-                df = df.set_index('date')
+            if "date" in df.columns and not df.empty:
+                df["date"] = pd.to_datetime(df["date"], errors="coerce")
+                df = df.set_index("date")
 
             return df
 
@@ -519,7 +582,21 @@ class FiveFoldAdjustmentManager:
                 return  # 已有有效数据，无需修复
 
             print(f"  [AUTO-REPAIR] 检测到 {stock_code} 复权列全 NULL，重新计算...")
-            adjusted = self.calculate_adjustment(raw_df)
+
+            # 尝试获取分红数据——如果调用方注入了 dividends_fetcher 则使用它
+            dividends: pd.DataFrame = pd.DataFrame()
+            _fetcher = getattr(self, "dividends_fetcher", None)
+            if _fetcher is not None:
+                try:
+                    _min_date = raw_df["date"].min() if "date" in raw_df.columns else start_date
+                    _max_date = raw_df["date"].max() if "date" in raw_df.columns else end_date
+                    _fetched = _fetcher(stock_code, _min_date, _max_date)
+                    if _fetched is not None and not _fetched.empty:
+                        dividends = _fetched
+                except Exception as _div_err:
+                    print(f"  [AUTO-REPAIR] 获取分红数据失败（不阻断）: {_div_err}")
+
+            adjusted = self.calculate_adjustment(raw_df, dividends=dividends)
             if not adjusted:
                 return
 
@@ -527,12 +604,16 @@ class FiveFoldAdjustmentManager:
                 "front": ("open_front", "high_front", "low_front", "close_front"),
                 "back": ("open_back", "high_back", "low_back", "close_back"),
                 "geometric_front": (
-                    "open_geometric_front", "high_geometric_front",
-                    "low_geometric_front", "close_geometric_front",
+                    "open_geometric_front",
+                    "high_geometric_front",
+                    "low_geometric_front",
+                    "close_geometric_front",
                 ),
                 "geometric_back": (
-                    "open_geometric_back", "high_geometric_back",
-                    "low_geometric_back", "close_geometric_back",
+                    "open_geometric_back",
+                    "high_geometric_back",
+                    "low_geometric_back",
+                    "close_geometric_back",
                 ),
             }
 
@@ -547,10 +628,12 @@ class FiveFoldAdjustmentManager:
                         if price_col not in df_adj.columns:
                             continue
                         # 逐行 UPDATE（数据量小，日线通常 < 2000 行）
-                        update_df = pd.DataFrame({
-                            "date": df_adj.index,
-                            "val": df_adj[price_col].values,
-                        })
+                        update_df = pd.DataFrame(
+                            {
+                                "date": df_adj.index,
+                                "val": df_adj[price_col].values,
+                            }
+                        )
                         for _, row in update_df.iterrows():
                             if pd.notna(row["val"]):
                                 con.execute(
@@ -588,8 +671,8 @@ def test_fivefold_adjustment():
 
     # 测试查询
     print("[2] 测试数据查询...")
-    df_none = manager.get_data_with_adjustment('511380.SH', '2024-01-01', '2024-01-31', 'none')
-    df_front = manager.get_data_with_adjustment('511380.SH', '2024-01-01', '2024-01-31', 'front')
+    df_none = manager.get_data_with_adjustment("511380.SH", "2024-01-01", "2024-01-31", "none")
+    df_front = manager.get_data_with_adjustment("511380.SH", "2024-01-01", "2024-01-31", "front")
 
     print(f"  不复权数据: {len(df_none)} 条")
     print(f"  前复权数据: {len(df_front)} 条")

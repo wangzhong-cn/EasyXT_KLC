@@ -445,14 +445,21 @@ class DataManager:
                 break
 
         if not active_source:
-            active_source = DataSource.MOCK
+            return {
+                'active_source': 'none',
+                'source_status': {s.value: status for s, status in self.source_status.items()},
+                'qmt_connected': self.source_status[DataSource.QMT]['connected'],
+                'xt_available': self.source_status[DataSource.QMT]['available'],
+                'data_source': 'none',
+                'status_message': self._get_status_message(None)
+            }
 
         return {
             'active_source': active_source.value,
             'source_status': {s.value: status for s, status in self.source_status.items()},
             'qmt_connected': self.source_status[DataSource.QMT]['connected'],
             'xt_available': self.source_status[DataSource.QMT]['available'],
-            'data_source': 'real' if active_source != DataSource.MOCK else 'mock',
+            'data_source': 'real',
             'status_message': self._get_status_message(active_source)
         }
 
@@ -469,7 +476,7 @@ class DataManager:
         elif active_source == DataSource.AKSHARE:
             return "[OK] 已连接到AKShare，使用真实市场数据"
         else:
-            return "[INFO] 使用模拟数据"
+            return "[ERROR] 当前没有任何真实数据源可用"
 
     def set_preferred_source(self, source: DataSource):
         """设置首选数据源"""
@@ -522,8 +529,8 @@ class DataManager:
         # 如果强制指定数据源
         if force_source:
             print(f"[TARGET] 强制使用数据源: {force_source.value.upper()}")
-            if period != '1d' and force_source in {DataSource.DUCKDB, DataSource.LOCAL}:
-                print(f"[WARNING] {force_source.value.upper()} 仅支持日线，当前周期 {period}")
+            if period != '1d' and force_source == DataSource.LOCAL:
+                print(f"[WARNING] LOCAL 本地缓存仅支持日线，当前周期 {period}")
                 self.last_source = force_source.value
                 self.last_data_info['source'] = force_source.value
                 return pd.DataFrame()
@@ -537,7 +544,7 @@ class DataManager:
             if (self.source_status[source]['available'] and
                 self.source_status[source]['connected']):
 
-                if period != '1d' and source in {DataSource.DUCKDB, DataSource.LOCAL}:
+                if period != '1d' and source == DataSource.LOCAL:
                     continue
 
                 print(f"[LINK] 尝试数据源: {source.value.upper()}")
@@ -561,12 +568,12 @@ class DataManager:
                     print(f"[WARNING] {source.value.upper()} 获取数据失败: {e}，尝试下一个数据源")
                     continue
 
-        # 如果所有数据源都失败，使用模拟数据
-        print("[INFO] 所有数据源失败，使用模拟数据")
-        data = self._get_data_from_source(DataSource.MOCK, stock_code, start_date, end_date, period, adjust)
-        self.last_source = DataSource.MOCK.value
-        self.last_data_info['source'] = DataSource.MOCK.value
-        return data
+        # 如果所有数据源都失败，抛出异常（严禁 mock 降级 — 铁律0）
+        raise RuntimeError(
+            f"所有数据源不可用，无法获取 {stock_code} 数据。"
+            f"请检查 QMT/AKShare/QStock 连接状态，或确保 DuckDB 缓存有数据。"
+            f"可用数据源状态: {self.source_status}"
+        )
 
     def _save_to_local_cache(self, stock_code: str, data: pd.DataFrame, period: str):
         """保存数据到本地缓存"""
@@ -603,7 +610,7 @@ class DataManager:
                             start_date: str, end_date: str, period: str, adjust: str = 'none') -> pd.DataFrame:
         """从指定数据源获取数据（支持复权）"""
         if source == DataSource.DUCKDB:
-            return self._get_duckdb_data(stock_code, start_date, end_date, adjust)
+            return self._get_duckdb_data(stock_code, start_date, end_date, period, adjust)
         elif source == DataSource.LOCAL:
             return self._get_local_data(stock_code, start_date, end_date, period, adjust)
         elif source == DataSource.QMT:
@@ -612,11 +619,13 @@ class DataManager:
             return self._get_qstock_data(stock_code, start_date, end_date, period)
         elif source == DataSource.AKSHARE:
             return self._get_akshare_data(stock_code, start_date, end_date, period)
-        else:  # DataSource.MOCK
-            return self._generate_mock_data(stock_code, start_date, end_date)
+        else:
+            # 任何未列出的数据源都抛出异常（严格禁止 mock — 铁律0）
+            raise RuntimeError(f"不支持的数据源: {source}，模拟数据生成已被禁用")
 
-    def _get_duckdb_data(self, stock_code: str, start_date: str, end_date: str, adjust: str = 'none') -> pd.DataFrame:
-        """从DuckDB数据库获取数据（高性能）"""
+    def _get_duckdb_data(self, stock_code: str, start_date: str, end_date: str,
+                         period: str = '1d', adjust: str = 'none') -> pd.DataFrame:
+        """从DuckDB数据库获取数据（支持日线/分钟线/自定义周期）"""
         try:
             if not self._duckdb_enabled:
                 return pd.DataFrame()
@@ -625,15 +634,44 @@ class DataManager:
 
             # 通过连接管理器获取只读连接，自动处理 WAL 自愈与重试
             with get_db_manager(self.duckdb_path).get_read_connection() as con:
-                # 构建SQL查询
-                query = f"""
-                    SELECT date, open, high, low, close, volume, amount
-                    FROM stock_daily
-                    WHERE stock_code = '{stock_code}'
-                      AND date >= '{start_date}'
-                      AND date <= '{end_date}'
-                    ORDER BY date
-                """
+                if period == '1d':
+                    query = f"""
+                        SELECT date, open, high, low, close, volume, amount
+                        FROM stock_daily
+                        WHERE stock_code = '{stock_code}'
+                          AND date >= '{start_date}'
+                          AND date <= '{end_date}'
+                        ORDER BY date
+                    """
+                elif period == '1m':
+                    query = f"""
+                        SELECT time AS date, open, high, low, close, volume, amount
+                        FROM stock_1m
+                        WHERE stock_code = '{stock_code}'
+                          AND time >= '{start_date}'
+                          AND time <= '{end_date}'
+                        ORDER BY time
+                    """
+                elif period == '5m':
+                    query = f"""
+                        SELECT time AS date, open, high, low, close, volume, amount
+                        FROM stock_5m
+                        WHERE stock_code = '{stock_code}'
+                          AND time >= '{start_date}'
+                          AND time <= '{end_date}'
+                        ORDER BY time
+                    """
+                else:
+                    # 自定义聚合周期（15m/30m/60m/5d/10d/25d等）从 custom_period_bars 读取
+                    query = f"""
+                        SELECT bar_time AS date, open, high, low, close, volume, amount
+                        FROM custom_period_bars
+                        WHERE stock_code = '{stock_code}'
+                          AND period = '{period}'
+                          AND bar_time >= '{start_date}'
+                          AND bar_time <= '{end_date}'
+                        ORDER BY bar_time
+                    """
 
                 # 执行查询
                 df = con.execute(query).df()
@@ -650,11 +688,11 @@ class DataManager:
                 df = self._standardize_columns(df)
                 df = self._clean_data(df)
 
-                print(f"[OK] DuckDB获取 {len(df)} 条数据")
+                print(f"[OK] DuckDB({period})获取 {len(df)} 条数据")
                 return df
 
         except Exception as e:
-            print(f"[ERROR] DuckDB查询失败: {e}")
+            print(f"[ERROR] DuckDB查询失败(period={period}): {e}")
             return pd.DataFrame()
 
     def _get_local_data(self, stock_code: str, start_date: str, end_date: str, period: str = '1d', adjust: str = 'none') -> pd.DataFrame:

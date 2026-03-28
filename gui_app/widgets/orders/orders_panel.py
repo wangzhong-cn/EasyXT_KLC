@@ -7,7 +7,6 @@ OrdersPanel  — QWidget，内含「当日委托」/「当日成交」两个子 
 
 from __future__ import annotations
 
-import copy
 from typing import Any
 
 from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
@@ -53,46 +52,7 @@ _TRADE_COLUMNS: list[tuple[str, str]] = [
 # 已撤/废单 → 灰色显示；已成订单保持方向颜色
 _DONE_STATUSES = {"已撤", "部撤", "废单"}
 
-# Demo 委托数据
-_DEMO_ORDERS: list[dict[str, Any]] = [
-    {"order_id": 10001, "time": "09:30:00", "code": "600000.SH", "name": "浦发银行",
-     "order_type": "买入", "volume": 1000, "price": 8.520, "traded_volume": 1000,
-     "status": "已成", "remark": ""},
-    {"order_id": 10002, "time": "09:35:22", "code": "000001.SZ", "name": "平安银行",
-     "order_type": "买入", "volume": 2000, "price": 11.300, "traded_volume": 2000,
-     "status": "已成", "remark": ""},
-    {"order_id": 10003, "time": "10:05:58", "code": "601318.SH", "name": "中国平安",
-     "order_type": "买入", "volume": 500, "price": 42.100, "traded_volume": 500,
-     "status": "已成", "remark": ""},
-    {"order_id": 10004, "time": "14:00:00", "code": "300750.SZ", "name": "宁德时代",
-     "order_type": "买入", "volume": 100, "price": 195.800, "traded_volume": 100,
-     "status": "已成", "remark": ""},
-    {"order_id": 10005, "time": "14:30:15", "code": "000858.SZ", "name": "五粮液",
-     "order_type": "卖出", "volume": 200, "price": 165.700, "traded_volume": 0,
-     "status": "已撤", "remark": "手动撤单"},
-    {"order_id": 10006, "time": "14:55:00", "code": "000858.SZ", "name": "五粮液",
-     "order_type": "卖出", "volume": 200, "price": 165.200, "traded_volume": 100,
-     "status": "部成", "remark": ""},
-]
-
-# Demo 成交数据
-_DEMO_TRADES: list[dict[str, Any]] = [
-    {"time": "09:30:05", "code": "600000.SH", "name": "浦发银行",
-     "order_type": "买入", "volume": 1000, "price": 8.520, "amount": 8520.0,
-     "order_id": 10001, "remark": ""},
-    {"time": "09:35:30", "code": "000001.SZ", "name": "平安银行",
-     "order_type": "买入", "volume": 2000, "price": 11.300, "amount": 22600.0,
-     "order_id": 10002, "remark": ""},
-    {"time": "10:06:02", "code": "601318.SH", "name": "中国平安",
-     "order_type": "买入", "volume": 500, "price": 42.100, "amount": 21050.0,
-     "order_id": 10003, "remark": ""},
-    {"time": "14:00:08", "code": "300750.SZ", "name": "宁德时代",
-     "order_type": "买入", "volume": 100, "price": 195.800, "amount": 19580.0,
-     "order_id": 10004, "remark": ""},
-    {"time": "14:56:12", "code": "000858.SZ", "name": "五粮液",
-     "order_type": "卖出", "volume": 100, "price": 165.200, "amount": 16520.0,
-     "order_id": 10006, "remark": ""},
-]
+# Demo 委托/成交数据已移除 — 所有数据必须来自 QMT 真实交易接口
 
 # 颜色常量
 _BUY_COLOR  = QColor(220, 60,  60)   # 买入 — 红
@@ -184,7 +144,7 @@ class OrdersPanel(QWidget):
     - 「当日委托」Tab：10 列，账户 Combo + 刷新按钮 + 全撤按钮 + 底部汇总
     - 「当日成交」Tab：9 列，自动随刷新联动
     - 双击委托/成交行代码列 → ``symbol_clicked`` 信号（供外部跳转 K 线图）
-    - 数据为内置 Demo；TODO: 接入 easy_xt.get_api().trade.get_orders/get_trades()
+    - 严禁内置 Demo 数据；等待 QMT 真实委托/成交数据注入
     """
 
     symbol_clicked = pyqtSignal(str)
@@ -221,7 +181,7 @@ class OrdersPanel(QWidget):
         hl.addWidget(QLabel("账户:"))
         self._account_combo = QComboBox()
         self._account_combo.setMinimumWidth(150)
-        self._account_combo.addItem("演示账户", "demo")
+        self._account_combo.addItem("待连接账户", "pending")
         hl.addWidget(self._account_combo)
         hl.addStretch()
 
@@ -317,20 +277,16 @@ class OrdersPanel(QWidget):
     # ── 槽函数 ────────────────────────────────────────────────────────────────
 
     def _on_refresh(self) -> None:
-        import datetime
-        orders = copy.deepcopy(_DEMO_ORDERS)
-        trades = copy.deepcopy(_DEMO_TRADES)
-        self._orders_model.load(orders)
-        self._trades_model.load(trades)
-        self._update_order_footer(orders)
-        self._update_trade_footer(trades)
-        ts = datetime.datetime.now().strftime("%H:%M:%S")
-        self._status_label.setText(f"更新 {ts}")
-        self._trade_count_lbl.setText(f"共 {len(trades)} 笔成交")
+        self._orders_model.load([])
+        self._trades_model.load([])
+        self._update_order_footer([])
+        self._update_trade_footer([])
+        self._status_label.setText("等待 QMT 委托/成交数据")
+        self._trade_count_lbl.setText("")
 
     def _on_cancel_all(self) -> None:
         # TODO: 对接真实撤单 API
-        self._status_label.setText("全撤已发送（Demo）")
+        self._status_label.setText("等待 QMT 撤单接口")
 
     def _on_order_double_clicked(self, index: QModelIndex) -> None:
         row = index.row()

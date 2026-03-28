@@ -1,0 +1,180 @@
+Return code: 1
+=== STDOUT ===
+============================= test session starts =============================
+platform win32 -- Python 3.13.7, pytest-8.4.2, pluggy-1.6.0 -- C:\Python313\python.exe
+cachedir: .pytest_cache
+rootdir: D:\EasyXT_KLC
+configfile: pytest.ini
+plugins: anyio-4.9.0, asyncio-1.1.0, cov-7.0.0
+asyncio: mode=Mode.AUTO, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 35 items
+
+tests/test_udi_hotpaths.py::TestResultCacheGetPut::test_miss_returns_none PASSED [  2%]
+tests/test_udi_hotpaths.py::TestResultCacheGetPut::test_hit_returns_dataframe_copy PASSED [  5%]
+tests/test_udi_hotpaths.py::TestResultCacheGetPut::test_put_stores_copy_of_input PASSED [  8%]
+tests/test_udi_hotpaths.py::TestResultCacheGetPut::test_ttl_expiry_returns_none PASSED [ 11%]
+tests/test_udi_hotpaths.py::TestResultCacheGetPut::test_entry_just_within_ttl_is_valid PASSED [ 14%]
+tests/test_udi_hotpaths.py::TestResultCacheGetPut::test_lru_eviction_at_max_entries PASSED [ 17%]
+tests/test_udi_hotpaths.py::TestResultCacheGetPut::test_put_updates_existing_key PASSED [ 20%]
+tests/test_udi_hotpaths.py::TestResultCacheGetPut::test_memory_path_disables_cache PASSED [ 22%]
+tests/test_udi_hotpaths.py::TestResultCacheInvalidate::test_invalidate_removes_matching_entries PASSED [ 25%]
+tests/test_udi_hotpaths.py::TestResultCacheInvalidate::test_invalidate_nonexistent_prefix_is_noop PASSED [ 28%]
+tests/test_udi_hotpaths.py::TestResultCacheInvalidate::test_invalidate_different_period_untouched PASSED [ 31%]
+tests/test_udi_hotpaths.py::TestResultCacheThreadSafety::test_concurrent_put_get_no_corruption PASSED [ 34%]
+tests/test_udi_hotpaths.py::TestGetListingDate::test_fallback_when_no_connection PASSED [ 37%]
+tests/test_udi_hotpaths.py::TestGetListingDate::test_fallback_when_xtquant_disabled_and_no_duckdb_data PASSED [ 40%]
+tests/test_udi_hotpaths.py::TestGetListingDate::test_returns_earliest_date_from_duckdb FAILED [ 42%]
+tests/test_udi_hotpaths.py::TestGetListingDate::test_duckdb_exception_falls_back PASSED [ 45%]
+tests/test_udi_hotpaths.py::TestGetListingDate::test_xtquant_opendate_used_when_available PASSED [ 48%]
+tests/test_udi_hotpaths.py::TestGetListingDate::test_xtquant_createdate_used_as_fallback_within_path1 PASSED [ 51%]
+tests/test_udi_hotpaths.py::TestGetListingDate::test_xtquant_exception_falls_through_to_duckdb FAILED [ 54%]
+tests/test_udi_hotpaths.py::TestGetListingDate::test_result_is_cached_in_memory FAILED [ 57%]
+tests/test_udi_hotpaths.py::TestGetListingDate::test_listing_date_boundary_equals_start_date FAILED [ 60%]
+tests/test_udi_hotpaths.py::TestReadCachedCustomBars::test_miss_when_table_not_created PASSED [ 62%]
+tests/test_udi_hotpaths.py::TestReadCachedCustomBars::test_miss_when_no_data_in_table PASSED [ 65%]
+tests/test_udi_hotpaths.py::TestReadCachedCustomBars::test_hit_returns_dataframe_with_datetime_index FAILED [ 68%]
+tests/test_udi_hotpaths.py::TestReadCachedCustomBars::test_miss_on_adj_factor_hash_mismatch PASSED [ 71%]
+tests/test_udi_hotpaths.py::TestReadCachedCustomBars::test_legacy_grace_case_empty_hash_with_no_adj_expected FAILED [ 74%]
+tests/test_udi_hotpaths.py::TestReadCachedCustomBars::test_hit_with_no_hash_validation_when_expected_empty FAILED [ 77%]
+tests/test_udi_hotpaths.py::TestReadCachedCustomBars::test_miss_when_con_is_none PASSED [ 80%]
+tests/test_udi_hotpaths.py::TestSaveAndReadRoundTrip::test_save_then_read_same_data FAILED [ 82%]
+tests/test_udi_hotpaths.py::TestSaveAndReadRoundTrip::test_overwrite_replaces_old_data FAILED [ 85%]
+tests/test_udi_hotpaths.py::TestSaveAndReadRoundTrip::test_different_adjust_types_stored_separately FAILED [ 88%]
+tests/test_udi_hotpaths.py::TestSaveAndReadRoundTrip::test_save_skips_empty_dataframe PASSED [ 91%]
+tests/test_udi_hotpaths.py::TestSaveAndReadRoundTrip::test_save_skips_when_con_none PASSED [ 94%]
+tests/test_udi_hotpaths.py::TestSaveCustomBarsEdgeCases::test_missing_amount_column_auto_filled FAILED [ 97%]
+tests/test_udi_hotpaths.py::TestSaveCustomBarsEdgeCases::test_index_renamed_from_custom_name FAILED [100%]
+
+================================== FAILURES ===================================
+__________ TestGetListingDate.test_returns_earliest_date_from_duckdb __________
+tests\test_udi_hotpaths.py:285: in test_returns_earliest_date_from_duckdb
+    udi.con.execute(
+E   _duckdb.CatalogException: Catalog Error: Table with name stock_daily does not exist!
+E   Did you mean "duckdb_constraints"?
+______ TestGetListingDate.test_xtquant_exception_falls_through_to_duckdb ______
+tests\test_udi_hotpaths.py:360: in test_xtquant_exception_falls_through_to_duckdb
+    udi.con.execute(
+E   _duckdb.CatalogException: Catalog Error: Table with name stock_daily does not exist!
+E   Did you mean "duckdb_constraints"?
+_____________ TestGetListingDate.test_result_is_cached_in_memory ______________
+tests\test_udi_hotpaths.py:377: in test_result_is_cached_in_memory
+    udi.con.execute(
+E   _duckdb.CatalogException: Catalog Error: Table with name stock_daily does not exist!
+E   Did you mean "duckdb_constraints"?
+_______ TestGetListingDate.test_listing_date_boundary_equals_start_date _______
+tests\test_udi_hotpaths.py:398: in test_listing_date_boundary_equals_start_date
+    udi.con.execute(
+E   _duckdb.CatalogException: Catalog Error: Table with name stock_daily does not exist!
+E   Did you mean "duckdb_constraints"?
+___ TestReadCachedCustomBars.test_hit_returns_dataframe_with_datetime_index ___
+tests\test_udi_hotpaths.py:445: in test_hit_returns_dataframe_with_datetime_index
+    assert result is not None
+E   assert None is not None
+------------------------------ Captured log call ------------------------------
+WARNING  data_manager.unified_data_interface:unified_data_interface.py:3524 custom_period_bars 写入失败: Catalog Error: Table with name custom_period_bars does not exist!
+Did you mean "duckdb_tables or pg_constraint"?
+
+LINE 1: DELETE FROM custom_period_bars WHERE stock_code = ? AND period = ? AND...
+                    ^
+_ TestReadCachedCustomBars.test_legacy_grace_case_empty_hash_with_no_adj_expected _
+tests\test_udi_hotpaths.py:472: in test_legacy_grace_case_empty_hash_with_no_adj_expected
+    assert result is not None
+E   assert None is not None
+------------------------------ Captured log call ------------------------------
+WARNING  data_manager.unified_data_interface:unified_data_interface.py:3524 custom_period_bars 写入失败: Catalog Error: Table with name custom_period_bars does not exist!
+Did you mean "duckdb_tables or pg_constraint"?
+
+LINE 1: DELETE FROM custom_period_bars WHERE stock_code = ? AND period = ? AND...
+                    ^
+_ TestReadCachedCustomBars.test_hit_with_no_hash_validation_when_expected_empty _
+tests\test_udi_hotpaths.py:484: in test_hit_with_no_hash_validation_when_expected_empty
+    assert result is not None
+E   assert None is not None
+------------------------------ Captured log call ------------------------------
+WARNING  data_manager.unified_data_interface:unified_data_interface.py:3524 custom_period_bars 写入失败: Catalog Error: Table with name custom_period_bars does not exist!
+Did you mean "duckdb_tables or pg_constraint"?
+
+LINE 1: DELETE FROM custom_period_bars WHERE stock_code = ? AND period = ? AND...
+                    ^
+___________ TestSaveAndReadRoundTrip.test_save_then_read_same_data ____________
+tests\test_udi_hotpaths.py:509: in test_save_then_read_same_data
+    assert result is not None
+E   assert None is not None
+------------------------------ Captured log call ------------------------------
+WARNING  data_manager.unified_data_interface:unified_data_interface.py:3524 custom_period_bars 写入失败: Catalog Error: Table with name custom_period_bars does not exist!
+Did you mean "duckdb_tables or pg_constraint"?
+
+LINE 1: DELETE FROM custom_period_bars WHERE stock_code = ? AND period = ? AND...
+                    ^
+__________ TestSaveAndReadRoundTrip.test_overwrite_replaces_old_data __________
+tests\test_udi_hotpaths.py:535: in test_overwrite_replaces_old_data
+    assert result is not None
+E   assert None is not None
+------------------------------ Captured log call ------------------------------
+WARNING  data_manager.unified_data_interface:unified_data_interface.py:3524 custom_period_bars 写入失败: Catalog Error: Table with name custom_period_bars does not exist!
+Did you mean "duckdb_tables or pg_constraint"?
+
+LINE 1: DELETE FROM custom_period_bars WHERE stock_code = ? AND period = ? AND...
+                    ^
+WARNING  data_manager.unified_data_interface:unified_data_interface.py:3524 custom_period_bars 写入失败: Catalog Error: Table with name custom_period_bars does not exist!
+Did you mean "duckdb_tables or pg_constraint"?
+
+LINE 1: DELETE FROM custom_period_bars WHERE stock_code = ? AND period = ? AND...
+                    ^
+___ TestSaveAndReadRoundTrip.test_different_adjust_types_stored_separately ____
+tests\test_udi_hotpaths.py:559: in test_different_adjust_types_stored_separately
+    assert r_pre is not None
+E   assert None is not None
+------------------------------ Captured log call ------------------------------
+WARNING  data_manager.unified_data_interface:unified_data_interface.py:3524 custom_period_bars 写入失败: Catalog Error: Table with name custom_period_bars does not exist!
+Did you mean "duckdb_tables or pg_constraint"?
+
+LINE 1: DELETE FROM custom_period_bars WHERE stock_code = ? AND period = ? AND...
+                    ^
+WARNING  data_manager.unified_data_interface:unified_data_interface.py:3524 custom_period_bars 写入失败: Catalog Error: Table with name custom_period_bars does not exist!
+Did you mean "duckdb_tables or pg_constraint"?
+
+LINE 1: DELETE FROM custom_period_bars WHERE stock_code = ? AND period = ? AND...
+                    ^
+_____ TestSaveCustomBarsEdgeCases.test_missing_amount_column_auto_filled ______
+tests\test_udi_hotpaths.py:600: in test_missing_amount_column_auto_filled
+    assert result is not None
+E   assert None is not None
+------------------------------ Captured log call ------------------------------
+WARNING  data_manager.unified_data_interface:unified_data_interface.py:3524 custom_period_bars 写入失败: Catalog Error: Table with name custom_period_bars does not exist!
+Did you mean "duckdb_tables or pg_constraint"?
+
+LINE 1: DELETE FROM custom_period_bars WHERE stock_code = ? AND period = ? AND...
+                    ^
+_______ TestSaveCustomBarsEdgeCases.test_index_renamed_from_custom_name _______
+tests\test_udi_hotpaths.py:612: in test_index_renamed_from_custom_name
+    assert result is not None
+E   assert None is not None
+------------------------------ Captured log call ------------------------------
+WARNING  data_manager.unified_data_interface:unified_data_interface.py:3524 custom_period_bars 写入失败: Catalog Error: Table with name custom_period_bars does not exist!
+Did you mean "duckdb_tables or pg_constraint"?
+
+LINE 1: DELETE FROM custom_period_bars WHERE stock_code = ? AND period = ? AND...
+                    ^
+-------------------------- Captured stdout teardown ---------------------------
+
+[conftest cleanup] Found running QThread: _XtdataExecutorThread
+=========================== short test summary info ===========================
+FAILED tests/test_udi_hotpaths.py::TestGetListingDate::test_returns_earliest_date_from_duckdb - _duckdb.CatalogException: Catalog Error: Table with name stock_daily does not exist!
+Did you mean "duckdb_constraints"?
+FAILED tests/test_udi_hotpaths.py::TestGetListingDate::test_xtquant_exception_falls_through_to_duckdb - _duckdb.CatalogException: Catalog Error: Table with name stock_daily does not exist!
+Did you mean "duckdb_constraints"?
+FAILED tests/test_udi_hotpaths.py::TestGetListingDate::test_result_is_cached_in_memory - _duckdb.CatalogException: Catalog Error: Table with name stock_daily does not exist!
+Did you mean "duckdb_constraints"?
+FAILED tests/test_udi_hotpaths.py::TestGetListingDate::test_listing_date_boundary_equals_start_date - _duckdb.CatalogException: Catalog Error: Table with name stock_daily does not exist!
+Did you mean "duckdb_constraints"?
+FAILED tests/test_udi_hotpaths.py::TestReadCachedCustomBars::test_hit_returns_dataframe_with_datetime_index - assert None is not None
+FAILED tests/test_udi_hotpaths.py::TestReadCachedCustomBars::test_legacy_grace_case_empty_hash_with_no_adj_expected - assert None is not None
+FAILED tests/test_udi_hotpaths.py::TestReadCachedCustomBars::test_hit_with_no_hash_validation_when_expected_empty - assert None is not None
+FAILED tests/test_udi_hotpaths.py::TestSaveAndReadRoundTrip::test_save_then_read_same_data - assert None is not None
+FAILED tests/test_udi_hotpaths.py::TestSaveAndReadRoundTrip::test_overwrite_replaces_old_data - assert None is not None
+FAILED tests/test_udi_hotpaths.py::TestSaveAndReadRoundTrip::test_different_adjust_types_stored_separately - assert None is not None
+FAILED tests/test_udi_hotpaths.py::TestSaveCustomBarsEdgeCases::test_missing_amount_column_auto_filled - assert None is not None
+FAILED tests/test_udi_hotpaths.py::TestSaveCustomBarsEdgeCases::test_index_renamed_from_custom_name - assert None is not None
+======================== 12 failed, 23 passed in 2.18s ========================
+=== STDERR ===

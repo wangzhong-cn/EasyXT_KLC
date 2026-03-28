@@ -43,3 +43,7 @@ class Events:
     DATA_COVERAGE_UPDATED = "data_coverage_updated"
     # 批量下载进度（payload: current, total, stock_code, period, status）
     BULK_DOWNLOAD_PROGRESS = "bulk_download_progress"
+    # 多源交叉验证完成（payload: stock_code, consistent, consistency_rate, max_diff_pct, source）
+    DATA_QUALITY_UPDATED = "data_quality_updated"
+    # 交叉验证批次完成（payload: total, passed, failed, results_list）
+    CROSS_VALIDATION_BATCH_DONE = "cross_validation_batch_done"

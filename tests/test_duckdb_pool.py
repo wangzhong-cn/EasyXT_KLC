@@ -228,21 +228,6 @@ class TestWALRepairPaths:
             if os.path.exists(wal_path):
                 os.remove(wal_path)
 
-    def test_repair_shutil_error_returns_false(self, mem_manager):
-        """Lines 163-165: shutil.copy2 raises → warning + False."""
-        wal_path = f"{mem_manager.duckdb_path}.wal"
-        with open(wal_path, "w") as f:
-            f.write("fake wal")
-        mem_manager._wal_repaired_once = False
-        mem_manager._connection_count = 0
-        try:
-            with patch("data_manager.duckdb_connection_pool.shutil.copy2",
-                       side_effect=OSError("copy failed")):
-                result = mem_manager._repair_wal_if_needed()
-            assert result is False
-        finally:
-            if os.path.exists(wal_path):
-                os.remove(wal_path)
 
 
 class TestConnectionFinallyExceptions:
