@@ -1,0 +1,38 @@
+{
+  "version": "2026.04.02.1",
+  "maintainer": "easyxt-governance",
+  "rules": [
+    {
+      "rule_id": "tick_mismatch_repair",
+      "match_reason": "tick_mismatch",
+      "severity": "warning",
+      "sla_impact": "monitor",
+      "recommended_action": "trigger_repair_then_open_workbench",
+      "business_meaning": "tick 聚合无法解释分钟 bar，优先修复并回看主图确认。"
+    },
+    {
+      "rule_id": "cross_source_conflict_traceability",
+      "match_reason": "cross_source_conflict",
+      "severity": "critical",
+      "sla_impact": "gate_block",
+      "recommended_action": "open_traceability_and_hold_publish",
+      "business_meaning": "跨源冲突会直接降低可用性，应先排除数据源或对账口径问题。"
+    },
+    {
+      "rule_id": "lineage_incomplete_replay",
+      "match_reason": "lineage_incomplete",
+      "severity": "warning",
+      "sla_impact": "monitor",
+      "recommended_action": "trigger_replay_and_review_lineage",
+      "business_meaning": "回执链不完整会削弱审计闭环，应补 replay/repair 链路。"
+    },
+    {
+      "rule_id": "contract_failed_traceability",
+      "match_reason": "contract_failed",
+      "severity": "critical",
+      "sla_impact": "gate_block",
+      "recommended_action": "open_traceability_and_stop_publish",
+      "business_meaning": "时间戳/周期契约失败代表数据结构异常，应暂停放行。"
+    }
+  ]
+}

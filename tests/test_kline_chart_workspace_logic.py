@@ -165,6 +165,7 @@ def _make_stub(**overrides):
     stub._format_time_column = _t.MethodType(KLineChartWorkspace._format_time_column, stub)
     stub._format_time_str = _t.MethodType(KLineChartWorkspace._format_time_str, stub)
     stub._is_thread_running = _t.MethodType(KLineChartWorkspace._is_thread_running, stub)
+    stub._safe_thread_wait = _t.MethodType(KLineChartWorkspace._safe_thread_wait, stub)
     return stub
 
 
@@ -500,11 +501,11 @@ class TestComputeInitialRange:
         assert (end_ts - start_ts).days <= 6
 
     def test_daily_span_is_3_months(self):
+        # 1D 日线已改为加载全量历史（不再截断至最近3个月）
+        # 以保证左对齐黄金标准从首日起完整显示
         start, end = self._run(("2020-01-01", "2024-06-30"), "1d")
-        start_ts = pd.Timestamp(start)
-        end_ts = pd.Timestamp(end)
-        diff_months = (end_ts.year - start_ts.year) * 12 + (end_ts.month - start_ts.month)
-        assert diff_months <= 3
+        assert start == "2020-01-01"  # 直接返回 full_start
+        assert "2024-06-30" in end
 
     def test_weekly_span_is_2_years(self):
         start, end = self._run(("2020-01-01", "2024-06-30"), "1w")
@@ -888,25 +889,22 @@ class TestEnsureRealtimeApi:
             mock_cls.assert_not_called()
 
     def test_creates_connector_when_needed(self):
+        # _ensure_realtime_api 已禁用实时接入：始终置 realtime_api=None，不创建连接器
         mock_thread = MagicMock()
         mock_thread.isRunning.return_value = False
         stub = _make_stub(test_mode=False, realtime_api=None, _realtime_connect_thread=mock_thread)
-        mock_connector = MagicMock()
-        with patch("gui_app.widgets.kline_chart_workspace._RealtimeConnectThread",
-                   return_value=mock_connector):
+        with patch("gui_app.widgets.kline_chart_workspace._RealtimeConnectThread") as mock_cls:
             KLineChartWorkspace._ensure_realtime_api(stub)
-            mock_connector.setParent.assert_called_once_with(stub)
-            mock_connector.ready.connect.assert_called_once_with(stub._on_realtime_ready)
-            mock_connector.error_occurred.connect.assert_called_once_with(stub._on_realtime_error)
-            mock_connector.start.assert_called_once()
+            mock_cls.assert_not_called()
+            assert stub.realtime_api is None
 
     def test_connector_stored_on_stub(self):
+        # 禁用后：不存储连接器，_realtime_connect_thread 保持原值，realtime_api 置为 None
         stub = _make_stub(test_mode=False, realtime_api=None, _realtime_connect_thread=None)
-        mock_connector = MagicMock()
-        with patch("gui_app.widgets.kline_chart_workspace._RealtimeConnectThread",
-                   return_value=mock_connector):
+        with patch("gui_app.widgets.kline_chart_workspace._RealtimeConnectThread") as mock_cls:
             KLineChartWorkspace._ensure_realtime_api(stub)
-            assert stub._realtime_connect_thread is mock_connector
+            mock_cls.assert_not_called()
+            assert stub.realtime_api is None
 
 
 class TestThreadSafetyHelpers:
@@ -1086,6 +1084,40 @@ class TestRealtimeBarConstruction:
         assert float(stub.last_data.iloc[-1]["high"]) == 111.30
         assert float(stub.last_data.iloc[-1]["low"]) == 111.10
 
+    def test_intraday_same_bar_matches_timestamp_last_time(self):
+        stub = _make_stub()
+        self._bind_realtime_methods(stub)
+        stub.period_combo = MagicMock()
+        stub.period_combo.currentText.return_value = "5m"
+        stub.realtime_last_total_volume = 1000.0
+        stub.last_data = pd.DataFrame(
+            [
+                {
+                    "time": pd.Timestamp("2026-03-17 14:35:00"),
+                    "open": 111.20,
+                    "high": 111.30,
+                    "low": 111.10,
+                    "close": 111.25,
+                    "volume": 3000.0,
+                }
+            ]
+        )
+        stub.chart_adapter = MagicMock()
+        stub.chart = None
+        stub._request_subchart_update = MagicMock()
+        stub._update_orderbook = MagicMock()
+        quote = {
+            "price": 111.22,
+            "high": 119.90,
+            "low": 80.00,
+            "volume": 1010.0,
+            "time": "2026-03-17 14:34:59",
+        }
+        KLineChartWorkspace._apply_realtime_quote(stub, quote, "000988.SZ")
+        assert len(stub.last_data) == 1
+        assert float(stub.last_data.iloc[-1]["high"]) == 111.30
+        assert float(stub.last_data.iloc[-1]["low"]) == 111.10
+
     def test_intraday_ignores_after_hours_quote(self):
         stub = _make_stub()
         self._bind_realtime_methods(stub)
@@ -1170,7 +1202,7 @@ class TestFallbackBarConstruction:
         quote = {"price": 111.12, "time": "2026-03-17 14:59:31"}
         bar = KLineChartWorkspace._build_bar_from_quote(stub, quote, "5m")
         assert bar is not None
-        assert str(bar["time"]).endswith("14:55:00")
+        assert str(bar["time"]).endswith("15:00:00")
 
 
 # ---------------------------------------------------------------------------

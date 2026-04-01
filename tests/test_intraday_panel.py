@@ -17,7 +17,8 @@ def test_intraday_model_load_and_update() -> None:
 def test_intraday_panel_symbol_and_quote(qapp) -> None:
     panel = IntradayPanel()
     panel.set_symbol("600000.SH")
-    assert panel._model.rowCount() == 30
+    # 演示数据已移除，等待真实行情数据推送
+    assert panel._model.rowCount() == 0
     panel.update_quote({"symbol": "600000.SH", "price": 9.8, "change_pct": -1.2, "volume": 2000})
     assert panel._status.text().startswith("联动中:")
 

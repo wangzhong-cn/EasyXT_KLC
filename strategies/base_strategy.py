@@ -237,9 +237,22 @@ class BaseStrategy(ABC):
         direction: str,
         signal_id: str = "",
         returns: list[float] | None = None,
+        asset_type: str = "stock",
+        offset: str = "open",
     ) -> str | None:
         """
         提交委托（依赖底层的 TradeAPI 执行前置风控拦截及审计写入）。
+
+        Args:
+            context:     策略上下文
+            code:       标的代码
+            volume:     委托数量（股票=股，期货=手）
+            price:      委托价格
+            direction:  "buy" | "sell"
+            signal_id:  信号 ID
+            returns:    收益序列（用于绩效归因）
+            asset_type: 资产类型（默认 stock，future/option/conversion 可选）
+            offset:     期货开平标志（open/close/close_today/close_history）
 
         Returns:
             order_id（字符串）或 None（风控拒单/错误）。
@@ -248,20 +261,18 @@ class BaseStrategy(ABC):
             self.logger.error("submit_order: context.executor 未设置")
             return None
 
-        # executor_submit_order 返回 OrderResponse(order_id, status, msg)
         res = context.executor.submit_order(
             code=code,
             volume=volume,
             price=price,
             direction=direction,
             signal_id=signal_id,
+            asset_type=asset_type,
+            offset=offset,
         )
 
         if not res:
-            # 被拒单或发生错误，底层 TradeAPI 已经抛出了错误或警告日志，且记录了 audit_trail
-            self.logger.warning(f"委托失败被拦截 [{direction} {code} x{volume}]: {res.msg}")
-            # 如果需要，这里可以构造一个风险触发事件发送给 on_risk
-            # self.on_risk(context, ...)
+            self.logger.warning(f"委托失败被拦截 [{direction} {code} x{volume}]: {res}")
             return None
 
-        return str(res.order_id)
+        return str(res)

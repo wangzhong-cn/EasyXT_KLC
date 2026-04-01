@@ -13,10 +13,10 @@ from __future__ import annotations
 import logging
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import groupby
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -52,6 +52,9 @@ class BacktestConfig:
     min_trade_unit: int = 100  # 最小交易单位（股）
     fill_on: str = "next_open"  # 成交时机：next_open | current_close
     allow_short: bool = False  # A 股默认不允许做空
+    # ── 多资产支持 ──
+    asset_type: str = "stock"  # stock | future | option | convertible
+    future_contract_multiplier: dict[str, int] = field(default_factory=dict)  # code → 合约乘数（如 {"rb2501.SF": 10}）
     # ── Tick 模式专用 ──
     tick_latency_ticks: int = 0  # tick 延迟（tick 数）
     tick_slippage_bps: float = 0.0  # tick 滑点（基点）
@@ -61,6 +64,7 @@ class BacktestConfig:
     tick_max_wait_ticks: int = 0  # 最大等待 tick 数（0=不超时）
     tick_cancel_retry_max: int = 0  # 撤单重试次数
     tick_cancel_retry_price_bps: float = 0.0  # 重试价格调整（基点）
+    tick_cancel_retry_guard_bps: float = 0.0  # 重挂累计追价上限（基点）
 
 
 # ---------------------------------------------------------------------------
@@ -136,20 +140,23 @@ class _Executor:
         price: float,
         direction: str,
         signal_id: str = "",
+        asset_type: str = "stock",
+        offset: str = "open",
     ) -> str:
         """提交一笔订单（异步——将在下一 bar 开盘成交）。
 
         Args:
-            code:      股票代码
-            volume:    委托数量（股）
-            price:     委托价格（参考价，实际按 fill_on 规则成交）
-            direction: "buy" | "sell"
-            signal_id: 关联信号 ID（可选）
+            code:        标的代码
+            volume:      委托数量（股票=股，期货=手）
+            price:       委托价格（参考价，实际按 fill_on 规则成交）
+            direction:   "buy" | "sell"
+            signal_id:   关联信号 ID（可选）
+            asset_type:  资产类型（默认 stock，future/option/conversion 可选）
+            offset:      期货开平标志（open/close/close_today/close_history）
 
         Returns:
             order_id 字符串（空字符串表示委托被过滤）
         """
-        # A 股最小交易单位约束
         volume_int = int(volume // self._config.min_trade_unit) * self._config.min_trade_unit
         if volume_int <= 0:
             return ""
@@ -166,6 +173,8 @@ class _Executor:
                 "filled_price": 0.0,
                 "filled_volume": 0,
                 "error_msg": "",
+                "asset_type": asset_type,
+                "offset": offset,
             }
         )
         return order_id
@@ -247,7 +256,7 @@ class BacktestEngine:
         events: list[tuple[pd.Timestamp, str, dict]] = []
         for code, df in data.items():
             for ts, row in df.iterrows():
-                events.append((pd.Timestamp(ts), code, row.to_dict()))
+                events.append((pd.Timestamp(cast(Any, ts)), code, row.to_dict()))
         events.sort(key=lambda x: x[0])
 
         # ── 运行时状态 ─────────────────────────────────────────────────
@@ -524,7 +533,7 @@ class BacktestEngine:
             if code not in codes:
                 continue
             for ts, row in df.iterrows():
-                tick_events.append((pd.Timestamp(ts), code, row.to_dict()))
+                tick_events.append((pd.Timestamp(cast(Any, ts)), code, row.to_dict()))
         tick_events.sort(key=lambda x: x[0])
 
         # ── 运行时状态 ───────────────────────────────────────────────
@@ -597,25 +606,42 @@ class BacktestEngine:
                 if cfg.tick_max_wait_ticks > 0 and waited > cfg.tick_max_wait_ticks:
                     retry_count = order.get("_retry_count", 0)
                     if retry_count < cfg.tick_cancel_retry_max:
-                        order["_retry_count"] = retry_count + 1
-                        adj = order["price"] * cfg.tick_cancel_retry_price_bps / 10_000
+                        base_price = float(order.get("_origin_price") or order.get("price") or 0.0)
+                        current_price = float(order.get("price") or 0.0)
+                        adj = current_price * cfg.tick_cancel_retry_price_bps / 10_000
+                        next_price = current_price
                         if order["direction"] == "buy":
-                            order["price"] += adj
+                            next_price = current_price + adj
                         else:
-                            order["price"] -= adj
-                        order["_tick_index"] = tick_index
-                        still_pending.append(order)
+                            next_price = current_price - adj
+                        guard_bps = max(float(cfg.tick_cancel_retry_guard_bps), 0.0)
+                        guard_blocked = False
+                        if base_price > 0 and guard_bps > 0:
+                            if order["direction"] == "buy":
+                                max_price = base_price * (1.0 + guard_bps / 10_000)
+                                guard_blocked = next_price > max_price
+                            else:
+                                min_price = base_price * (1.0 - guard_bps / 10_000)
+                                guard_blocked = next_price < min_price
+                        if guard_blocked:
+                            order["status"] = "cancelled"
+                            order["error_msg"] = "retry_guard_blocked"
+                        else:
+                            order["_retry_count"] = retry_count + 1
+                            order["price"] = next_price
+                            order["_tick_index"] = tick_index
+                            still_pending.append(order)
                         od = OrderData(
                             order_id=order["order_id"],
                             signal_id=order.get("signal_id", ""),
                             code=code,
                             direction=order["direction"],
                             volume=order["volume"],
-                            price=order["price"],
+                            price=float(order.get("price") or 0.0),
                             status="cancelled",
                             filled_volume=0,
                             filled_price=0.0,
-                            error_msg="timeout",
+                            error_msg=str(order.get("error_msg") or "timeout"),
                         )
                         _re_exec = _Executor(cfg)
                         try:
@@ -785,6 +811,7 @@ class BacktestEngine:
                 if not blocked:
                     order["_tick_index"] = tick_index
                     order["_retry_count"] = 0
+                    order["_origin_price"] = float(order.get("price") or 0.0)
                     order["_remaining_volume"] = int(order["volume"])
                     order["_total_filled"] = 0
                     pending_queue.append(order)
@@ -1014,8 +1041,11 @@ class BacktestEngine:
         direction = order["direction"]
         volume = int(order["volume"])
         cfg = self.config
+        asset_type = order.get("asset_type", "stock")
 
-        # 成交价：开盘价 + 滑点
+        multiplier = cfg.future_contract_multiplier.get(code, 1)
+        contract_vol = volume * multiplier
+
         open_price = float(bar.get("open") or bar.get("Open") or 0.0)
         if open_price <= 0:
             order["status"] = "rejected"
@@ -1027,10 +1057,38 @@ class BacktestEngine:
         fill_price = open_price + slippage if direction == "buy" else open_price - slippage
         fill_price = max(fill_price, 0.01)
 
-        trade_value = fill_price * volume
+        trade_value = fill_price * contract_vol
         commission = trade_value * cfg.commission_rate
+        stamp = 0.0
 
-        if direction == "buy":
+        if asset_type == "future":
+            margin_rate = 0.12
+            required_margin = trade_value * margin_rate
+            if direction == "buy":
+                if cash < required_margin + commission:
+                    order["status"] = "rejected"
+                    order["error_msg"] = "insufficient_margin"
+                    order["_cash_after"] = cash
+                    return
+                cash -= required_margin + commission
+                if code not in positions:
+                    positions[code] = _Position(code)
+                positions[code].buy(volume, fill_price)
+            else:
+                pos = positions.get(code)
+                avail = pos.quantity if pos else 0
+                actual_vol = min(volume, avail)
+                if actual_vol <= 0:
+                    order["status"] = "rejected"
+                    order["error_msg"] = "no_position"
+                    order["_cash_after"] = cash
+                    return
+                released_margin = fill_price * actual_vol * multiplier * margin_rate
+                proceeds = released_margin - commission
+                cash += proceeds
+                positions[code].sell(actual_vol)
+                contract_vol = actual_vol * multiplier
+        elif direction == "buy":
             stamp = 0.0
             total_cost = trade_value + commission
             if cash < total_cost:
@@ -1042,7 +1100,7 @@ class BacktestEngine:
             if code not in positions:
                 positions[code] = _Position(code)
             positions[code].buy(volume, fill_price)
-        else:  # sell
+        else:
             stamp = trade_value * cfg.stamp_duty
             pos = positions.get(code)
             avail = pos.quantity if pos else 0
@@ -1062,15 +1120,17 @@ class BacktestEngine:
         order["filled_volume"] = volume
         order["_cash_after"] = cash
 
+        executed_vol = contract_vol if asset_type == "future" else volume
         trades_list.append(
             {
                 "datetime": ts,
                 "code": code,
                 "direction": direction,
-                "volume": volume,
+                "volume": executed_vol,
                 "price": fill_price,
                 "commission": commission,
-                "stamp": stamp,
+                "stamp": stamp if asset_type == "stock" else 0.0,
+                "asset_type": asset_type,
             }
         )
 
@@ -1202,7 +1262,7 @@ class BacktestEngine:
                     start_date,
                     end_date,
                     period=period,
-                    adjust_type=adjust,
+                    adjust=adjust,
                 )
                 if df is None or (hasattr(df, "empty") and df.empty):
                     self._logger.warning("空数据 %s %s~%s", code, start_date, end_date)

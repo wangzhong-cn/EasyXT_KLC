@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from data_manager.governance_metadata import build_governance_snapshot
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EVIDENCE = PROJECT_ROOT / "artifacts" / "stability_evidence_30d.json"
 DEFAULT_OUT = PROJECT_ROOT / "artifacts" / "peak_release_gate_latest.json"
@@ -17,6 +19,7 @@ def evaluate_peak_release_gate(
     fail_consecutive_days: int,
     max_period_validation_failed_items: int,
     release_env: str = "",
+    governance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     peak_ready = bool(evidence.get("peak_ready", False))
     consec = int(evidence.get("consecutive_compliant_days", 0) or 0)
@@ -32,6 +35,9 @@ def evaluate_peak_release_gate(
         level = "warn"
     else:
         level = "fail"
+    governance_payload = governance if isinstance(governance, dict) else {}
+    if not governance_payload:
+        governance_payload = build_governance_snapshot(trade_date=evidence.get("generated_at"))
     return {
         "level": level,
         "release_env": str(release_env or ""),
@@ -44,6 +50,7 @@ def evaluate_peak_release_gate(
         "period_validation_failed_items": period_failed_items,
         "max_period_validation_failed_items": int(max_period_validation_failed_items),
         "period_validation_gate_pass": period_validation_pass,
+        "governance": governance_payload,
     }
 
 
@@ -72,6 +79,7 @@ def main() -> int:
                 fail_consecutive_days=max(1, args.fail_consecutive_days),
                 max_period_validation_failed_items=max(0, args.max_period_validation_failed_items),
                 release_env=str(args.release_env or ""),
+                governance=(evidence.get("governance") if isinstance(evidence, dict) else {}),
             )
     args.out_json.parent.mkdir(parents=True, exist_ok=True)
     args.out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

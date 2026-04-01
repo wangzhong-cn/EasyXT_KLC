@@ -8,6 +8,7 @@ import importlib
 import importlib.util
 import os
 import sys
+import threading
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -43,6 +44,7 @@ class DataManager:
         preferred_source: Optional[DataSource] = None,
         use_local_cache: bool = True,
         defer_checks: bool = False,
+        verbose: Optional[bool] = None,
     ):
         """
         初始化数据管理器
@@ -53,6 +55,7 @@ class DataManager:
         """
         self.preferred_source = preferred_source
         self.use_local_cache = use_local_cache
+        self.verbose = self._resolve_verbose_flag(verbose)
         self.last_source: Optional[str] = None
         self.last_data_info: dict[str, Any] = {}
 
@@ -64,9 +67,9 @@ class DataManager:
         self._duckdb_enabled = False  # 标记DuckDB是否可用
         if importlib.util.find_spec("duckdb") is not None:
             self._duckdb_enabled = True
-            print("[OK] DuckDB数据库已启用 (只读模式)")
+            self._emit("[OK] DuckDB数据库已启用 (只读模式)")
         else:
-            print("[INFO] DuckDB未安装，跳过DuckDB数据源")
+            self._emit("[INFO] DuckDB未安装，跳过DuckDB数据源")
 
         self.local_data_manager = None
         if self.use_local_cache:
@@ -94,7 +97,7 @@ class DataManager:
                 if LocalDataManagerWithAdjustment is not None:
                     self.local_data_manager = LocalDataManagerWithAdjustment()
             except Exception as e:
-                print(f"[INFO] 本地缓存初始化失败: {str(e)[:120]}")
+                self._emit(f"[INFO] 本地缓存初始化失败: {str(e)[:120]}")
             finally:
                 # 清理 101因子 版本，恢复项目根 data_manager
                 for k in list(sys.modules.keys()):
@@ -115,6 +118,21 @@ class DataManager:
 
         # 显示初始化状态
         self._print_initialization_status()
+
+    @staticmethod
+    def _resolve_verbose_flag(verbose: Optional[bool]) -> bool:
+        if verbose is not None:
+            return bool(verbose)
+        return str(os.environ.get("EASYXT_DATA_MANAGER_VERBOSE", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _emit(self, message: str) -> None:
+        if getattr(self, "verbose", False):
+            print(message)
 
     def _build_initial_status(self) -> dict[DataSource, dict[str, Any]]:
         status = {}
@@ -270,6 +288,19 @@ class DataManager:
 
     def _check_qstock_status(self) -> dict[str, Any]:
         """检查QStock状态"""
+        if threading.current_thread() is not threading.main_thread():
+            if importlib.util.find_spec("qstock") is None:
+                return {
+                    'available': False,
+                    'connected': False,
+                    'message': 'qstock模块未安装'
+                }
+            return {
+                'available': True,
+                'connected': False,
+                'message': 'QStock后台线程跳过活体验证'
+            }
+
         try:
             qs = importlib.import_module("qstock")
 
@@ -327,6 +358,12 @@ class DataManager:
                 'message': 'qstock模块未安装'
             }
         except Exception as e:
+            if "signal only works in main thread" in str(e):
+                return {
+                    'available': True,
+                    'connected': False,
+                    'message': 'QStock需在主线程检测，已跳过活体验证'
+                }
             return {
                 'available': False,
                 'connected': False,
@@ -399,8 +436,8 @@ class DataManager:
 
     def _print_initialization_status(self):
         """打印初始化状态"""
-        print("[DATA] 多数据源管理器初始化完成")
-        print("=" * 50)
+        self._emit("[DATA] 多数据源管理器初始化完成")
+        self._emit("=" * 50)
 
         for source in DataSource:
             status = self.source_status[source]
@@ -419,20 +456,20 @@ class DataManager:
                     icon = "[ERROR]"
                     color_status = "不可用"
 
-            print(f"   {icon} {source.value.upper():<8}: {color_status} - {status['message']}")
+            self._emit(f"   {icon} {source.value.upper():<8}: {color_status} - {status['message']}")
 
-        print("=" * 50)
+        self._emit("=" * 50)
 
         # 显示当前可用的数据源
         available_sources = [s.value.upper() for s in self.source_priority
                            if self.source_status[s]['available'] and self.source_status[s]['connected']]
 
         if available_sources:
-            print(f"[TARGET] 可用数据源: {' → '.join(available_sources)}")
+            self._emit(f"[TARGET] 可用数据源: {' → '.join(available_sources)}")
         else:
-            print("[INFO] 仅模拟数据可用")
+            self._emit("[INFO] 仅模拟数据可用")
 
-        print("=" * 50)
+        self._emit("=" * 50)
 
     def get_connection_status(self) -> dict[str, Any]:
         """获取连接状态信息"""
@@ -486,7 +523,7 @@ class DataManager:
 
     def refresh_source_status(self):
         """刷新所有数据源状态"""
-        print("[RELOAD] 刷新数据源状态...")
+        self._emit("[RELOAD] 刷新数据源状态...")
         self.source_status = self._check_all_sources()
         self._print_initialization_status()
 
@@ -1022,7 +1059,7 @@ class DataManager:
 
         # 4. 删除异常波动的数据（日涨跌幅超过20%）
         if 'close' in df.columns and len(df) > 1:
-            returns = df['close'].pct_change()
+            returns = df['close'].pct_change(fill_method=None)
             normal_mask = (returns.abs() <= 0.2) | returns.isna()
             df = cast(pd.DataFrame, df.loc[normal_mask])
 
@@ -1115,7 +1152,7 @@ class DataManager:
             report_issues.append('存在缺失值')
 
         if 'close' in df.columns:
-            returns = df['close'].pct_change().dropna()
+            returns = df['close'].pct_change(fill_method=None).dropna()
             if (returns.abs() > 0.2).any():
                 report_issues.append('存在异常波动（单日涨跌幅>20%）')
 
@@ -1155,12 +1192,16 @@ class DataManager:
         # 只对存在的列进行重采样
         available_agg = {k: v for k, v in agg_dict.items() if k in df.columns}
 
-        resampled = df.resample(freq).agg(cast(Any, available_agg))
+        normalized_freq = freq
+        if isinstance(freq, str) and freq.endswith('H'):
+            normalized_freq = f"{freq[:-1]}h" if len(freq) > 1 else 'h'
+
+        resampled = df.resample(normalized_freq).agg(cast(Any, available_agg))
 
         # 删除空值行
         resampled = resampled.dropna()
 
-        print(f"[DATA] 数据重采样完成: {len(df)} -> {len(resampled)} 条记录 (频率: {freq})")
+        print(f"[DATA] 数据重采样完成: {len(df)} -> {len(resampled)} 条记录 (频率: {normalized_freq})")
 
         return resampled
 

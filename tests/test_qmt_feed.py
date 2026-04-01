@@ -13,6 +13,7 @@ QmtFeed 单元测试（不依赖 QMT 运行环境）。
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 from contextlib import contextmanager
 from unittest.mock import MagicMock, call, patch
@@ -125,6 +126,26 @@ class TestIsAvailable:
                 sys.modules["xtquant"] = orig_xt
             if orig_xd is not None:
                 sys.modules["xtquant.xtdata"] = orig_xd
+
+    def test_fix_xtquant_path_appends_without_prepending_external_site_packages(self, monkeypatch):
+        import core.qmt_feed as qf
+
+        monkeypatch.setattr(qf, "_XTQUANT_PATH_FIXED", False)
+        original_path = ["ENV_FIRST"]
+        monkeypatch.setattr(qf.sys, "path", original_path)
+
+        def _fake_isdir(path):
+            return path == r"C:\Users\wangzhong\miniconda3\Lib\site-packages\xtquant"
+
+        def _fake_getsize(_path):
+            return 100
+
+        monkeypatch.setattr(qf.os.path, "isdir", _fake_isdir)
+        monkeypatch.setattr(qf.os.path, "getsize", _fake_getsize)
+
+        assert qf._fix_xtquant_path() is True
+        assert qf.sys.path[0] == "ENV_FIRST"
+        assert qf.sys.path[-1] == r"C:\Users\wangzhong\miniconda3\Lib\site-packages"
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +291,26 @@ class TestOnTick:
         finally:
             import core.api_server as real_api
             sys.modules["core.api_server"] = real_api
+
+    def test_on_tick_diag_log_disabled_by_default(self):
+        mock_api = MagicMock()
+        feed = QmtFeed()
+        self._inject_state(feed, "000001.SZ")
+        with patch.dict(os.environ, {}, clear=False):
+            with patch("core.qmt_feed.log.warning") as mock_warning:
+                with patch.dict("sys.modules", {"core.api_server": mock_api}):
+                    feed._on_tick("000001.SZ", "tick", {"000001.SZ": {"lastPrice": 12.5}})
+        mock_warning.assert_not_called()
+
+    def test_on_tick_diag_log_enabled_via_env(self):
+        mock_api = MagicMock()
+        feed = QmtFeed()
+        self._inject_state(feed, "000001.SZ")
+        with patch.dict(os.environ, {"EASYXT_QMT_DIAG": "1"}, clear=False):
+            with patch("core.qmt_feed.log.warning") as mock_warning:
+                with patch.dict("sys.modules", {"core.api_server": mock_api}):
+                    feed._on_tick("000001.SZ", "tick", {"000001.SZ": {"lastPrice": 12.5}})
+        assert any("[DIAG] qmt_feed._on_tick" in str(call.args[0]) for call in mock_warning.call_args_list)
 
 
 # ---------------------------------------------------------------------------

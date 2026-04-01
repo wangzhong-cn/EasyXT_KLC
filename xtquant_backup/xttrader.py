@@ -493,6 +493,43 @@ class XtQuantTrader(object):
         self.async_client.cancelOrderStockWithSeq(seq, req)
         return seq
 
+    def order_future(self, account, future_code, order_type, order_volume, price_type, price, strategy_name='',
+                     order_remark=''):
+        """
+        期货委托（需期货账户）。
+
+        :param account:       期货账号
+        :param future_code:   期货合约代码，如 "rb2501.SF"
+        :param order_type:    委托类型（见 xtconstant.FUTURE_* 常量）
+        :param order_volume:  委托手数
+        :param price_type:    报价类型（见 xtconstant.FIX_PRICE / MARKET_PEER_PRICE_FIRST）
+        :param price:         报价价格（0=市价）
+        :param strategy_name: 策略名称
+        :param order_remark:  委托备注
+        :return:              成功返回委托号（>0），失败返回-1
+        """
+        try:
+            import xtquant.XTTrader.XTQC as XTQC
+        except ImportError:
+            return -1
+        req = XTQC.OrderFutureReq()
+        req.m_nAccountType = getattr(account, 'account_type', 1)
+        req.m_strAccountID = getattr(account, 'account_id', '')
+        req.m_strFutureCode = future_code
+        req.m_nOrderType = order_type
+        req.m_nOrderVolume = order_volume
+        req.m_nPriceType = price_type
+        req.m_dPrice = price
+        req.m_strStrategyName = strategy_name
+        req.m_strOrderRemark = order_remark
+        seq = self.async_client.nextSeq()
+        self.queuing_order_seq.add(seq)
+        resp = self.common_op_sync_with_seq(
+            seq,
+            (self.async_client.orderFutureWithSeq, seq, req)
+        )
+        return getattr(resp, 'order_id', -1)
+
     def cancel_order_stock_sysid(self, account, market, sysid):
         """
         :param account:证券账号

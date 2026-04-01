@@ -14,23 +14,98 @@
 你完全无需感知，第二天打开软件时，数据已经是最新状态。
 """
 
+import importlib
 import json
 import logging
-import importlib
 import os
 import sys
 import threading
 import time
 from datetime import date, datetime
 from datetime import time as dt_time
-from zoneinfo import ZoneInfo
-
-_SH = ZoneInfo('Asia/Shanghai')
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
-import duckdb
-schedule = importlib.import_module("schedule")
+import pandas as pd
+
+from data_manager.period_registry import build_period_runtime_contracts
+
+_SH = ZoneInfo("Asia/Shanghai")
+
+_SCHEDULE_IMPORT_OK = True
+try:
+    schedule = importlib.import_module("schedule")
+except ModuleNotFoundError:
+    _SCHEDULE_IMPORT_OK = False
+
+    class _FallbackScheduleJob:
+        def __init__(self, scheduler: "_FallbackScheduleModule"):
+            self._scheduler = scheduler
+            self._unit = "day"
+            self._at_time: str | None = None
+
+        @property
+        def day(self) -> "_FallbackScheduleJob":
+            self._unit = "day"
+            return self
+
+        @property
+        def hour(self) -> "_FallbackScheduleJob":
+            self._unit = "hour"
+            return self
+
+        def at(self, hhmm: str) -> "_FallbackScheduleJob":
+            self._at_time = str(hhmm).strip()
+            return self
+
+        def do(self, func, *args, **kwargs):
+            self._scheduler._jobs.append(
+                {
+                    "unit": self._unit,
+                    "at_time": self._at_time,
+                    "func": func,
+                    "args": args,
+                    "kwargs": kwargs,
+                    "last_run_date": None,
+                    "last_run_at": None,
+                }
+            )
+            return self
+
+    class _FallbackScheduleModule:
+        def __init__(self) -> None:
+            self._jobs: list[dict[str, object]] = []
+
+        def every(self) -> _FallbackScheduleJob:
+            return _FallbackScheduleJob(self)
+
+        def run_pending(self) -> None:
+            now = datetime.now(tz=_SH)
+            current_hhmm = now.strftime("%H:%M")
+            for job in self._jobs:
+                unit = str(job.get("unit") or "day")
+                if unit == "day":
+                    at_time = str(job.get("at_time") or "").strip()
+                    if at_time != current_hhmm:
+                        continue
+                    if job.get("last_run_date") == now.date():
+                        continue
+                    job["last_run_date"] = now.date()
+                elif unit == "hour":
+                    last_run_at = job.get("last_run_at")
+                    if isinstance(last_run_at, datetime):
+                        if (now - last_run_at).total_seconds() < 3600:
+                            continue
+                    job["last_run_at"] = now
+                func = job.get("func")
+                if callable(func):
+                    func(*job.get("args", ()), **job.get("kwargs", {}))
+
+        def clear(self) -> None:
+            self._jobs.clear()
+
+    schedule = _FallbackScheduleModule()
 
 # 添加父目录到路径
 sys.path.insert(0, str(Path(__file__).parent))
@@ -47,6 +122,12 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+if not _SCHEDULE_IMPORT_OK:
+    logger.warning(
+        "schedule 包未安装，auto_data_updater 已回退到内置轻量调度器；"
+        "建议将运行环境补齐 schedule 依赖以获得标准调度行为"
+    )
 
 
 def _shift_time(hhmm: str, minutes: int) -> str:
@@ -362,6 +443,18 @@ class AutoDataUpdater:
         优先级：XTQuant get_instrument_detail → DuckDB stock_daily 最早记录 → '1990-01-01'。
         返回 'YYYY-MM-DD' 字符串。
         """
+        if self.interface is not None:
+            helper = getattr(self.interface, "get_listing_date", None)
+            if callable(helper):
+                try:
+                    dt_value = helper(stock_code)
+                    if isinstance(dt_value, (str, date, datetime)):
+                        dt_str = pd.to_datetime(dt_value, errors="coerce")
+                        if pd.notna(dt_str):
+                            return dt_str.strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+
         # 1. XTQuant 在线获取（OpenDate 为股票 IPO 日，CreateDate 为期货上市日）
         try:
             from xtquant import xtdata
@@ -625,13 +718,15 @@ class AutoDataUpdater:
     # 依赖关系说明：
     #   intraday_derived（需要 1m 基础数据）: 15m / 30m / 60m
     #   daily_derived   （需要 1d 基础数据）: 2d / 3d / 5d / 10d / 25d
-    _PRECOMPUTE_PERIODS: list[str] = ["15m", "30m", "60m", "5d", "10d"]
+    _PERIOD_RUNTIME_CONTRACTS = build_period_runtime_contracts(
+        base_path=Path(__file__).resolve().parents[1]
+    )
+    _PRECOMPUTE_PERIODS: list[str] = list(_PERIOD_RUNTIME_CONTRACTS["precompute_periods"])
 
     # 各预计算周期所需的基础数据库周期（用于依赖检查）
-    _PRECOMPUTE_BASE_PERIOD: dict[str, str] = {
-        "15m": "1m", "30m": "1m", "60m": "1m",
-        "2d": "1d", "3d": "1d", "5d": "1d", "10d": "1d", "25d": "1d",
-    }
+    _PRECOMPUTE_BASE_PERIOD: dict[str, str] = dict(
+        _PERIOD_RUNTIME_CONTRACTS["precompute_base_period"]
+    )
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         """子类注册时验证 _PRECOMPUTE_BASE_PERIOD 中的基础周期均已在 ALL_PERIODS 内。
@@ -672,8 +767,8 @@ class AutoDataUpdater:
             try:
                 _tbl = {
                     "1d": "stock_daily",
-                    "1m": "stock_minute_1m",
-                    "5m": "stock_minute_5m",
+                    "1m": "stock_1m",
+                    "5m": "stock_5m",
                 }.get(base_period)
                 if _tbl is None:
                     return True  # 未知周期，乐观通过
@@ -896,10 +991,113 @@ class AutoDataUpdater:
                 return
 
             # 执行更新
-            self.update_all_stocks()
+            update_result = self.update_all_stocks()
+            success_codes = [
+                str(item.get("stock_code"))
+                for item in update_result.get("results", [])
+                if item.get("success") and item.get("stock_code")
+            ]
+            if success_codes:
+                self._run_golden_1d_repair_task(success_codes)
 
         except Exception as e:
             logger.error(f"更新任务执行失败: {e}", exc_info=True)
+
+    def _run_golden_1d_repair_task(
+        self,
+        stock_codes: Optional[list[str]] = None,
+        force_full: bool = False,
+    ) -> dict[str, object]:
+        """执行黄金标准 1D 后台修复编排。
+
+        顺序：
+        1. 重新审计本地事实
+        2. 将可自动修复项入 backfill 队列
+        3. 对 manual_review / blocked 状态做持久化标记
+        4. best-effort 重放 backfill 死信队列
+        """
+        enabled = str(os.environ.get("EASYXT_GOLDEN_1D_REPAIR_ENABLED", "1")).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not enabled:
+            logger.debug("golden_1d repair orchestration 已禁用，跳过")
+            return {"status": "disabled", "processed": 0, "queued_tasks": 0}
+
+        self.initialize_interface()
+        if self.interface is None:
+            logger.warning("golden_1d repair orchestration 跳过：UnifiedDataInterface 未初始化")
+            return {"status": "interface_unavailable", "processed": 0, "queued_tasks": 0}
+
+        symbols = list(dict.fromkeys([code for code in (stock_codes or []) if code]))
+        if not symbols:
+            symbols = self._get_all_stock_codes()
+        limit = max(
+            1,
+            int(os.environ.get("EASYXT_GOLDEN_1D_REPAIR_SYMBOL_LIMIT", "25") or 25),
+        )
+        symbols = symbols[:limit]
+        if not symbols:
+            logger.info("golden_1d repair orchestration: 无候选标的，跳过")
+            return {"status": "empty", "processed": 0, "queued_tasks": 0}
+
+        try:
+            from data_manager.golden_1d_audit import Golden1dAuditor
+            from data_manager.golden_1d_repair_orchestrator import Golden1DRepairOrchestrator
+
+            auditor = Golden1dAuditor(db_path=self.duckdb_path)
+            orchestrator = Golden1DRepairOrchestrator(auditor=auditor, interface=self.interface)
+        except Exception:
+            logger.exception("golden_1d repair orchestration 初始化失败")
+            return {"status": "init_failed", "processed": 0, "queued_tasks": 0}
+
+        processed = 0
+        queued_tasks = 0
+        status_counts: dict[str, int] = {}
+        failures: list[str] = []
+
+        for symbol in symbols:
+            try:
+                result = orchestrator.audit_and_schedule(symbol, force_full=force_full)
+                processed += 1
+                queued_tasks += int(result.queued_tasks)
+                status_key = str(result.status)
+                status_counts[status_key] = int(status_counts.get(status_key, 0)) + 1
+            except Exception as exc:
+                failures.append(f"{symbol}:{exc}")
+                logger.warning("golden_1d repair orchestration 失败 %s: %s", symbol, exc)
+
+        replay_result = {"replayed": 0, "remaining": 0}
+        try:
+            self.interface._ensure_backfill_scheduler()
+            scheduler = getattr(self.interface, "_backfill_scheduler", None)
+            replay_limit = max(
+                1,
+                int(os.environ.get("EASYXT_BACKFILL_DEADLETTER_REPLAY_LIMIT", "20") or 20),
+            )
+            if scheduler is not None and hasattr(scheduler, "replay_dead_letters"):
+                replay_result = scheduler.replay_dead_letters(limit=replay_limit)
+        except Exception:
+            logger.exception("golden_1d repair dead-letter replay 失败")
+
+        logger.info(
+            "golden_1d repair orchestration 完成: processed=%d queued_tasks=%d statuses=%s dead_letter=%s failures=%d",
+            processed,
+            queued_tasks,
+            status_counts,
+            replay_result,
+            len(failures),
+        )
+        return {
+            "status": "ok" if not failures else "partial",
+            "processed": processed,
+            "queued_tasks": queued_tasks,
+            "statuses": status_counts,
+            "dead_letter": replay_result,
+            "failures": failures[:10],
+        }
 
     def _run_quarantine_replay_task(self) -> None:
         """定时执行隔离队列重放，并上报成功率（由 schedule 调用）。"""

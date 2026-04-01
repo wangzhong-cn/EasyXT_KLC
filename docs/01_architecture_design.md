@@ -2,8 +2,8 @@
 
 > 🏗️ 完整的量化交易平台架构设计
 
-**版本**: v3.0  
-**最后更新**: 2026-02-23  
+**版本**: v3.0
+**最后更新**: 2026-02-23
 **状态**: ✅ 规划完成
 
 ---
@@ -20,6 +20,45 @@
 ---
 
 ## 架构概览
+
+## 2026-03 架构校正（当前默认执行路线）
+
+> 本节对本文档中“前端仅 PyQt5 / 数据库仅 DuckDB”的旧默认描述进行校正。
+
+### 当前默认路线
+
+- **前端壳**：Tauri 增量替换，PyQt 进入 legacy / 兼容层
+- **主写状态**：SQLite (WAL)
+- **只读分析引擎**：DuckDB
+- **零运维扩展**：SQLite 分片 + DuckDB 多文件联邦查询
+- **一致性保险**：影子文件原子同步 + `last_good_version`
+
+### 为什么要校正
+
+当前阶段的主要问题已经不是“功能是否存在”，而是“前端能否稳定观察、验证并信任系统行为”。
+因此，架构优先级从“继续深化 PyQt 面板”切换为：
+
+1. 建立可观察前端
+2. 建立单一主写状态
+3. 将 DuckDB 收敛为稳定只读模型
+4. 用 shadow 原子同步发布版本
+
+### 需要结合阅读的文档
+
+- [Tauri 增量替换蓝图](05_tauri_incremental_replacement_blueprint.md)
+- [双引擎状态契约](06_dual_engine_state_contract.md)
+
+### 推荐阅读顺序（当前主线）
+
+如果你是第一次接触当前主线，推荐按下面顺序阅读：
+
+1. `01_architecture_design.md` —— 看总线和默认技术方向
+2. `05_tauri_incremental_replacement_blueprint.md` —— 看当前执行蓝图
+3. `06_dual_engine_state_contract.md` —— 看 SQLite / DuckDB 权责边界
+4. `08_gui_app_legacy_freeze.md` —— 看旧壳冻结红线
+5. `11_state_backup_restore_protocol.md` / `12_duckdb_federation_read_planner.md` —— 看状态层落地协议
+
+> 说明：本文后续部分仍保留一部分 2026-02 的历史描述，用于解释旧架构背景；实际默认路线以上述 2026-03 校正链路为准。
 
 ### 整体架构图
 
@@ -411,15 +450,15 @@ class EasyXTPlugin:
     def __init__(self):
         self.name = "MyPlugin"
         self.version = "1.0.0"
-    
+
     def on_load(self, app):
         """插件加载时调用"""
         pass
-    
+
     def on_unload(self):
         """插件卸载时调用"""
         pass
-    
+
     def get_features(self):
         """返回插件功能"""
         return []
@@ -431,11 +470,11 @@ class EasyXTPlugin:
 
 ### 架构特点
 
-✅ **保护性**: 所有现有功能 100% 保留  
-✅ **模块化**: 清晰的模块边界和接口  
-✅ **扩展性**: 支持插件和自定义扩展  
-✅ **性能**: 多层次性能优化  
-✅ **安全**: 完善的安全机制  
+✅ **保护性**: 所有现有功能 100% 保留
+✅ **模块化**: 清晰的模块边界和接口
+✅ **扩展性**: 支持插件和自定义扩展
+✅ **性能**: 多层次性能优化
+✅ **安全**: 完善的安全机制
 
 ### 下一步
 
@@ -445,5 +484,5 @@ class EasyXTPlugin:
 
 ---
 
-**EasyXT 量化交易平台**  
+**EasyXT 量化交易平台**
 *让量化交易更简单，让策略开发更高效*

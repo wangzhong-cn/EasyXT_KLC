@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "python3 .github/hooks/post_edit_regression_hint.py",
+        "windows": "python .github\\hooks\\post_edit_regression_hint.py",
+        "timeout": 10
+      }
+    ]
+  }
+}

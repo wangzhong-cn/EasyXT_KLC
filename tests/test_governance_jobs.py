@@ -50,6 +50,72 @@ _WM_AUDIT_OK = {"entries": [], "anomalies": []}
 _WM_APPROVAL_OK = {"approved": True, "gate_pass": True, "reason": "ok"}
 
 
+def _valid_rebuild_payload() -> dict:
+    return {
+        "ok": True,
+        "rebuild_id": "rb-001",
+        "audit_receipt": {
+            "status": "success",
+            "receipt_hash": "hash-001",
+            "target_periods": ["1m", "1d"],
+            "governance": {
+                "session_profile_id": "CN_A",
+                "session_profile_version": "2026.04.01",
+                "auction_policy": "standard",
+                "period_registry_version": "2026.04.01",
+                "threshold_registry_version": "2026.04.01",
+                "period_metadata": {
+                    "1m": {
+                        "period_code": "1m",
+                        "period_family": "base",
+                        "threshold_version": "2026.04.01",
+                    },
+                    "1d": {
+                        "period_code": "1d",
+                        "period_family": "base",
+                        "threshold_version": "2026.04.01",
+                    },
+                },
+            },
+        },
+    }
+
+
+def test_validate_rebuild_receipt_accepts_complete_governance_payload():
+    result = governance_jobs._validate_rebuild_receipt(_valid_rebuild_payload())
+    assert result["valid"] is True
+    assert result["governance_valid"] is True
+    assert result["missing_governance_fields"] == []
+    assert result["missing_period_metadata_periods"] == []
+
+
+def test_validate_rebuild_receipt_requires_governance_payload():
+    payload = _valid_rebuild_payload()
+    payload["audit_receipt"] = {
+        "status": "success",
+        "receipt_hash": "hash-001",
+        "target_periods": ["1m", "1d"],
+        "governance": {
+            "session_profile_id": "CN_A",
+            "session_profile_version": "2026.04.01",
+            "auction_policy": "standard",
+            "period_registry_version": "2026.04.01",
+            "threshold_registry_version": "2026.04.01",
+            "period_metadata": {
+                "1m": {
+                    "period_code": "1m",
+                    "period_family": "base",
+                    "threshold_version": "2026.04.01",
+                }
+            },
+        },
+    }
+    result = governance_jobs._validate_rebuild_receipt(payload)
+    assert result["valid"] is False
+    assert result["governance_valid"] is False
+    assert result["missing_period_metadata_periods"] == ["1d"]
+
+
 def test_sla_job_outputs_step6_validation():
     fake_ui = SimpleNamespace(
         connect=lambda read_only=False: True,
@@ -196,3 +262,66 @@ def test_strict_strategy_impact_baseline_meta_blocks_when_missing(tmp_path):
                             with patch("tools.governance_jobs._run_batch_multiperiod_rebuild", return_value={"mode": "single", "ok": True}):
                                 rc = governance_jobs.main()
     assert rc == 5
+
+
+def test_strict_rebuild_blocks_when_receipt_governance_missing():
+    fake_ui = SimpleNamespace(
+        connect=lambda read_only=False: True,
+        close=lambda: None,
+        run_multiperiod_rebuild=lambda stock_code, start_date, end_date, periods: {
+            "ok": True,
+            "failed": 0,
+            "rebuild_id": "rb-002",
+            "audit_receipt": {
+                "status": "success",
+                "receipt_hash": "hash-002",
+                "target_periods": ["1m", "1d"],
+                "governance": {
+                    "session_profile_id": "CN_A",
+                    "session_profile_version": "2026.04.01",
+                    "auction_policy": "standard",
+                    "period_registry_version": "2026.04.01",
+                    "threshold_registry_version": "2026.04.01",
+                    "period_metadata": {
+                        "1m": {
+                            "period_code": "1m",
+                            "period_family": "base",
+                            "threshold_version": "2026.04.01",
+                        }
+                    },
+                },
+            },
+        },
+    )
+    args_payload = _wm_defaults()
+    args_payload.update(
+        {
+            "job": "rebuild",
+            "limit": 50,
+            "max_retries": 3,
+            "report_date": None,
+            "duckdb_path": None,
+            "strict_sla": False,
+            "strict_dead_letter": False,
+            "strict_strategy_impact": False,
+            "strategy_impact_baseline": None,
+            "strategy_impact_results_dir": None,
+            "strategy_impact_delta_return": 3.0,
+            "strategy_impact_delta_mdd": 1.5,
+            "strategy_impact_enforce_sharpe_sign": False,
+            "strict_strategy_impact_baseline_meta": False,
+            "strict_rebuild": True,
+            "stock_code": "000001.SZ",
+            "start_date": "2026-03-01",
+            "end_date": "2026-03-31",
+            "periods": "1m,1d",
+        }
+    )
+    args = SimpleNamespace(**args_payload)
+    with patch("tools.governance_jobs.argparse.ArgumentParser.parse_args", return_value=args):
+        with patch("tools.governance_jobs.UnifiedDataInterface", return_value=fake_ui):
+            with patch("tools.governance_jobs._summarize_watermark_events", return_value=_WM_QUALITY_OK):
+                with patch("tools.governance_jobs._summarize_watermark_profile_audit", return_value=_WM_AUDIT_OK):
+                    with patch("tools.governance_jobs._validate_watermark_profile_approval", return_value=_WM_APPROVAL_OK):
+                        rc = governance_jobs.main()
+    assert rc == 7

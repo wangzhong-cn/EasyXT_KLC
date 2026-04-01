@@ -40,6 +40,28 @@ def test_settlement_model_columns() -> None:
 def test_positions_panel_refresh_and_emit(qapp) -> None:
     panel = PositionsPanel()
     panel._on_refresh()
+    # 演示数据已移除，_on_refresh 后持仓列表为空（等待 QMT 真实数据注入）
+    assert panel._pos_model.rowCount() == 0
+
+    # 通过 update_positions 注入测试数据后，验证双击信号
+    panel.update_positions(
+        [
+            {
+                "code": "600519.SH",
+                "name": "贵州茅台",
+                "volume": 10,
+                "can_use_volume": 10,
+                "cost_price": 1700.0,
+                "current_price": 1750.0,
+                "market_value": 17500.0,
+                "pnl": 500.0,
+                "pnl_pct": 2.94,
+                "today_pnl": 100.0,
+                "account_id": "demo",
+            }
+        ],
+        "demo",
+    )
     assert panel._pos_model.rowCount() > 0
     emitted: list[str] = []
     panel.symbol_clicked.connect(lambda s: emitted.append(s))

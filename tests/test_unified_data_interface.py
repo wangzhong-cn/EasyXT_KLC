@@ -25,6 +25,7 @@ def _make_udi(**kwargs) -> Any:
         duckdb_path=":memory:",
         eager_init=False,
         silent_init=True,
+        xtdata_call_mode="direct",
     )
     defaults.update(kwargs)
     return UnifiedDataInterface(**defaults)
@@ -437,6 +438,7 @@ class TestGetStockData:
     def test_step6_cache_stale_hard_violation_triggers_quarantine(self):
         ohlcv = self._make_ohlcv()
         udi = self._make_udi_with_mock_duckdb(ohlcv)
+        udi._step6_validate_sample_rate = 1.0  # 确保本测试总是触发验证
         fake_result = MagicMock()
         fake_result.pass_gate = False
         fake_result.violations = [MagicMock(severity="hard", detail="close<=0")]
@@ -691,6 +693,11 @@ class TestGetStockData:
         assert isinstance(result, pd.DataFrame)
         assert not result.empty
         assert len(result) == 1
+        assert result["period_code"].iloc[0] == "1M"
+        assert result["period_family"].iloc[0] == "natural_calendar"
+        assert result["alignment"].iloc[0] == "calendar_right"
+        assert result["anchor"].iloc[0] == "period_end"
+        assert "threshold_version" in result.columns
 
     def test_dat_cache_path_auto_save_and_success_status(self, monkeypatch):
         monkeypatch.setenv("EASYXT_STEP6_VALIDATE_SAMPLE_RATE", "0")
@@ -775,6 +782,9 @@ class TestReadFromDuckDB:
 
     def test_missing_table_returns_empty(self):
         udi, mock_con = self._make_udi_with_con()
+        # 清除类级 _known_tables 缓存，避免跨测试污染
+        from data_manager.unified_data_interface import UnifiedDataInterface
+        UnifiedDataInterface._known_tables.clear()
         # information_schema.tables returns 0 → table not found
         mock_con.execute.return_value.fetchone.return_value = (0,)
         result = udi._read_from_duckdb(
@@ -974,7 +984,10 @@ class TestReadFromQmtEndDateFix:
 
     def _make_udi(self):
         from data_manager.unified_data_interface import UnifiedDataInterface
-        return UnifiedDataInterface(duckdb_path=":memory:", eager_init=False, silent_init=True)
+        return UnifiedDataInterface(
+            duckdb_path=":memory:", eager_init=False, silent_init=True,
+            xtdata_call_mode="direct",
+        )
 
     def _run_qmt(self, period: str, end_date: str):
         """调用 _read_from_qmt，通过 sys.modules 注入 mock xtdata，返回捕获的参数"""
@@ -1114,7 +1127,11 @@ class TestReadFromQmtEdgeCases:
         assert result is None
 
     def test_qmt_dict_without_target_symbol_returns_none(self):
-        """download 成功但 DAT 直读返回空 → None"""
+        """download 成功但 DAT 直读返回空 → None。
+
+        该用例只验证 `_read_from_qmt_locked()` 内部的 DAT 空返回分支，
+        避免受 `_read_from_qmt()` 外层调度包装的跨测试状态污染影响。
+        """
         import types
 
         udi = _make_udi()
@@ -1124,7 +1141,7 @@ class TestReadFromQmtEdgeCases:
         fake_xtquant.xtdata = mock_xtdata  # type: ignore[attr-defined]
         with patch.dict("sys.modules", {"xtquant": fake_xtquant, "xtquant.xtdata": mock_xtdata}):
             with patch("data_manager.dat_binary_reader.read_dat", return_value=pd.DataFrame()):
-                result = udi._read_from_qmt("000001.SZ", "2024-01-01", "2024-01-31", "1d")
+                result = udi._read_from_qmt_locked("000001.SZ", "2024-01-01", "2024-01-31", "1d")
         assert result is None
 
     def test_qmt_missing_volume_amount_filled_with_zero(self):

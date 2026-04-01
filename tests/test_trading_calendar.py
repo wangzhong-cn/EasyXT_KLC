@@ -603,6 +603,42 @@ class TestDataIntegrityCheckerBasic:
             checker.batch_check_integrity(['000001.SZ'], '2023-01-01', '2023-06-30')
         mock_ci.assert_called_once_with('000001.SZ', '2023-01-01', '2023-06-30')
 
+    def test_batch_check_integrity_silent_by_default(self, capsys):
+        """默认不向 stdout 打进度。"""
+        from unittest.mock import MagicMock, patch
+        checker = self._make_checker()
+        checker._stdout_enabled = False
+        checker._logger = MagicMock()
+        fake_report = {
+            'stock_code': '000001.SZ',
+            'check_range': ('2023-01-01', '2023-12-31'),
+            'missing_trading_days': 0,
+            'completeness_ratio': 1.0,
+            'quality_report': {'errors': 0, 'warnings': 0, 'issues': []},
+            'status': 'PASS',
+        }
+        with patch.object(checker, 'check_integrity', return_value=fake_report):
+            checker.batch_check_integrity(['000001.SZ'], '2023-01-01', '2023-12-31')
+        assert capsys.readouterr().out == ''
+
+    def test_batch_check_integrity_verbose_restores_stdout(self, capsys):
+        """verbose 开启时仍向 stdout 回显进度。"""
+        from unittest.mock import MagicMock, patch
+        checker = self._make_checker()
+        checker._stdout_enabled = True
+        checker._logger = MagicMock()
+        fake_report = {
+            'stock_code': '000001.SZ',
+            'check_range': ('2023-01-01', '2023-12-31'),
+            'missing_trading_days': 0,
+            'completeness_ratio': 1.0,
+            'quality_report': {'errors': 0, 'warnings': 0, 'issues': []},
+            'status': 'PASS',
+        }
+        with patch.object(checker, 'check_integrity', return_value=fake_report):
+            checker.batch_check_integrity(['000001.SZ'], '2023-01-01', '2023-12-31')
+        assert '检查进度' in capsys.readouterr().out
+
     # ------------------------------------------------------------------
     # generate_integrity_report
     # ------------------------------------------------------------------

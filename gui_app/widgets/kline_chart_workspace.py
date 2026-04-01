@@ -295,10 +295,6 @@ class _RealtimeQuoteWorker(QThread):
 
             # 若 api 单例尚未初始化完成，快速返回避免阻塞 Worker（㊶修复）
             if easy_xt.api is None:
-                import logging
-
-                _logger = logging.getLogger(__name__)
-                _logger.warning(f"[DIAG] _fetch_quote_from_easyxt: easy_xt.api is None - skipping")
                 return None
 
             api = easy_xt.api
@@ -348,13 +344,6 @@ class _RealtimeQuoteWorker(QThread):
             full_tick = broker.get_full_tick([symbol]) or {}
             tick = full_tick.get(symbol) or next(iter(full_tick.values()), None)
 
-            # 调试日志：追踪数据来源
-            import logging
-
-            _logger = logging.getLogger(__name__)
-            _logger.warning(
-                f"[DIAG] _fetch_quote_from_xtdata price={tick.get('lastPrice') if tick else None} source=xtdata"
-            )
             if not isinstance(tick, dict):
                 return None
             price = float(tick.get("lastPrice") or tick.get("last_price") or tick.get("price") or 0)
@@ -503,13 +492,6 @@ class _WsMarketQuoteWorker(QThread):
                             raw = await asyncio.wait_for(ws.recv(), timeout=self._RECV_TIMEOUT)
                             try:
                                 msg = json.loads(raw)
-                                # 调试日志：追踪 WebSocket 数据来源
-                                import logging
-
-                                _logger = logging.getLogger(__name__)
-                                _logger.warning(
-                                    f"[DIAG] WS recv price={msg.get('price')} source={msg.get('source', 'unknown')}"
-                                )
                             except Exception:
                                 continue
                             self.quote_ready.emit(msg, self.symbol)
@@ -550,7 +532,7 @@ class _PeriodOverflowStrip(QWidget):
     避免拥挤变形。内部使用 setGeometry 手动定位，不依赖 QLayout。
     """
 
-    period_clicked = pyqtSignal(str)   # 用户点击某个周期时发出 (period_key)
+    period_clicked = pyqtSignal(str)  # 用户点击某个周期时发出 (period_key)
 
     _BTN_SS = """
         QPushButton {
@@ -707,11 +689,12 @@ class _PeriodOverflowStrip(QWidget):
         self._update_overflow_state()
 
     def _update_overflow_state(self):
-        visible_set = {k for k in self._keys
-                       if k in self._btns and self._btns[k].isVisible()}
-        in_overflow = (self._current_key and
-                       self._current_key not in visible_set and
-                       self._overflow_btn.isVisible())
+        visible_set = {k for k in self._keys if k in self._btns and self._btns[k].isVisible()}
+        in_overflow = (
+            self._current_key
+            and self._current_key not in visible_set
+            and self._overflow_btn.isVisible()
+        )
         if in_overflow:
             lbl = self._labels.get(self._current_key, self._current_key)
             self._overflow_btn.setText(f"{lbl}»")
@@ -727,8 +710,7 @@ class _PeriodOverflowStrip(QWidget):
         self.period_clicked.emit(key)
 
     def _show_overflow_menu(self):
-        overflow_keys = [k for k in self._keys
-                         if k in self._btns and not self._btns[k].isVisible()]
+        overflow_keys = [k for k in self._keys if k in self._btns and not self._btns[k].isVisible()]
         if not overflow_keys:
             self._overflow_btn.setChecked(False)
             return
@@ -767,50 +749,64 @@ class _PeriodPickerPopup(QWidget):
       applied(list[str])  — 用户点击"应用"后发出已勾选的 key 列表
     """
 
-    applied = pyqtSignal(list)          # list[str] of period keys
+    applied = pyqtSignal(list)  # list[str] of period keys
 
     # ── 全量周期选项池 ────────────────────────────────────────────────────────
     # (显示标签, key, 分组)
     ALL_OPTS: list[tuple[str, str, str]] = [
-        ("分时(Tick)", "tick",  "日内"),
-        ("1 分",       "1m",    "日内"),
-        ("2 分",       "2m",    "日内"),
-        ("5 分",       "5m",    "日内"),
-        ("10 分",      "10m",   "日内"),
-        ("15 分",      "15m",   "日内"),
-        ("20 分",      "20m",   "日内"),
-        ("25 分",      "25m",   "日内"),
-        ("30 分",      "30m",   "日内"),
-        ("50 分",      "50m",   "日内"),
-        ("60 分(1H)",  "60m",   "日内"),
-        ("70 分",      "70m",   "日内"),
-        ("120 分(2H)", "120m",  "日内"),
-        ("125 分",     "125m",  "日内"),
-        ("日线(1D)",   "1d",    "日线&多日"),
-        ("2 日",       "2d",    "日线&多日"),
-        ("3 日",       "3d",    "日线&多日"),
-        ("5 日",       "5d",    "日线&多日"),
-        ("10 日",      "10d",   "日线&多日"),
-        ("25 日",      "25d",   "日线&多日"),
-        ("50 日",      "50d",   "日线&多日"),
-        ("75 日",      "75d",   "日线&多日"),
-        ("周线(1W)",   "1w",    "长周期"),
-        ("月线(1M)",   "1M",    "长周期"),
-        ("2 月",       "2M",    "长周期"),
-        ("3 月",       "3M",    "长周期"),
-        ("5 月",       "5M",    "长周期"),
-        ("季线(1Q)",   "1Q",    "长周期"),
-        ("半年(6M)",   "6M",    "长周期"),
-        ("年线(1Y)",   "1Y",    "长周期"),
-        ("2 年",       "2Y",    "长周期"),
-        ("3 年",       "3Y",    "长周期"),
-        ("5 年",       "5Y",    "长周期"),
-        ("10 年",      "10Y",   "长周期"),
+        ("分时(Tick)", "tick", "日内"),
+        ("1 分", "1m", "日内"),
+        ("2 分", "2m", "日内"),
+        ("5 分", "5m", "日内"),
+        ("10 分", "10m", "日内"),
+        ("15 分", "15m", "日内"),
+        ("20 分", "20m", "日内"),
+        ("25 分", "25m", "日内"),
+        ("30 分", "30m", "日内"),
+        ("50 分", "50m", "日内"),
+        ("60 分(1H)", "60m", "日内"),
+        ("70 分", "70m", "日内"),
+        ("120 分(2H)", "120m", "日内"),
+        ("125 分", "125m", "日内"),
+        ("日线(1D)", "1d", "日线&多日"),
+        ("2 日", "2d", "日线&多日"),
+        ("3 日", "3d", "日线&多日"),
+        ("5 日", "5d", "日线&多日"),
+        ("10 日", "10d", "日线&多日"),
+        ("25 日", "25d", "日线&多日"),
+        ("50 日", "50d", "日线&多日"),
+        ("75 日", "75d", "日线&多日"),
+        ("周线(1W)", "1w", "长周期"),
+        ("月线(1M)", "1M", "长周期"),
+        ("2 月", "2M", "长周期"),
+        ("3 月", "3M", "长周期"),
+        ("5 月", "5M", "长周期"),
+        ("季线(1Q)", "1Q", "长周期"),
+        ("半年(6M)", "6M", "长周期"),
+        ("年线(1Y)", "1Y", "长周期"),
+        ("2 年", "2Y", "长周期"),
+        ("3 年", "3Y", "长周期"),
+        ("5 年", "5Y", "长周期"),
+        ("10 年", "10Y", "长周期"),
     ]
     # 默认常驻周期（用户首次打开时的预选状态）
     DEFAULT_RESIDENT: list[str] = [
-        "1m", "2m", "5m", "10m", "15m", "25m", "30m", "50m",
-        "60m", "70m", "125m", "1d", "2d", "3d", "5d", "1w",
+        "1m",
+        "2m",
+        "5m",
+        "10m",
+        "15m",
+        "25m",
+        "30m",
+        "50m",
+        "60m",
+        "70m",
+        "125m",
+        "1d",
+        "2d",
+        "3d",
+        "5d",
+        "1w",
     ]
 
     _POPUP_SS = """
@@ -871,8 +867,8 @@ class _PeriodPickerPopup(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(self._POPUP_SS)
         self.setFixedWidth(320)
-        self._checkboxes: dict[str, QCheckBox] = {}   # key → QCheckBox
-        self._custom_keys: list[str] = []             # 用户手动添加的自定义周期
+        self._checkboxes: dict[str, QCheckBox] = {}  # key → QCheckBox
+        self._custom_keys: list[str] = []  # 用户手动添加的自定义周期
         self._build_ui()
 
     # ── 构建 UI ──────────────────────────────────────────────────────────────
@@ -978,6 +974,7 @@ class _PeriodPickerPopup(QWidget):
     def _populate_checkboxes(self):
         """按分组生成复选框。"""
         from itertools import groupby
+
         layout = self._scroll_layout
         # 清空
         while layout.count():
@@ -1237,6 +1234,7 @@ class KLineChartWorkspace(QWidget):
         self._pipeline_apply_scheduled = False
         self._pending_pipeline_result: Optional[dict[str, Any]] = None
         self._pipeline_result_lock = threading.Lock()
+        self._is_closed = False  # guard: QTimer callbacks must check before xtdata calls
         self.init_ui()
         self._connect_events()
         self.source_status_ready.connect(self._apply_source_status)
@@ -1492,12 +1490,45 @@ class KLineChartWorkspace(QWidget):
             thread_obj.requestInterruption()
             thread_obj.quit()
 
+    def _safe_thread_wait(self, thread_obj: "QThread", msecs: int) -> bool:
+        """轮询替代 QThread.wait()，防止 Windows 下 wait() 永久挂起。
+
+        使用 time.sleep 轮询 isRunning()，不依赖 QThread.wait() 的超时实现，
+        避免 Windows 上 wait() 永久阻塞以及辅助线程积累耗尽资源的问题。
+
+        返回 True 表示线程在超时内停止，False 表示超时。
+        """
+        import time as _time
+
+        if not self._is_thread_running(thread_obj):
+            return True
+        _deadline = _time.monotonic() + msecs / 1000.0
+        _interval = 0.02  # 20ms 轮询间隔
+        while _time.monotonic() < _deadline:
+            if not self._is_thread_running(thread_obj):
+                return True
+            _time.sleep(_interval)
+        return not self._is_thread_running(thread_obj)
+
     def _drain_owned_threads(self) -> None:
+        import time as _time
+
+        _t0 = _time.monotonic()
+        _MAX_DRAIN_S = 5.0  # 全局超时
+
         try:
             owned_threads = [t for t in self.findChildren(QThread) if t is not None]
         except Exception:
             owned_threads = []
+
         for t in owned_threads:
+            if _time.monotonic() - _t0 > _MAX_DRAIN_S:
+                try:
+                    if self._is_thread_running(t):
+                        t.terminate()
+                except Exception:
+                    pass
+                continue
             if not self._is_thread_running(t):
                 continue
             try:
@@ -1509,9 +1540,13 @@ class KLineChartWorkspace(QWidget):
             except Exception:
                 pass
             try:
-                if not t.wait(800):
-                    t.terminate()
-                    t.wait(300)
+                _elapsed = _time.monotonic() - _t0
+                _wait_ms = min(800, max(50, int((_MAX_DRAIN_S - _elapsed) * 1000)))
+                if not self._safe_thread_wait(t, _wait_ms):
+                    try:
+                        t.terminate()
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -1524,6 +1559,8 @@ class KLineChartWorkspace(QWidget):
 
     def _update_data_status_label(self):
         """后台查询当前标的+周期的本地数据范围，更新状态标签。"""
+        if getattr(self, "_is_closed", False):
+            return
         if not hasattr(self, "_data_status_label"):
             return
         symbol = self.symbol_input.text().strip() if self.symbol_input is not None else ""
@@ -1551,7 +1588,10 @@ class KLineChartWorkspace(QWidget):
                     import pandas as _pd
                     from data_manager.unified_data_interface import UnifiedDataInterface
 
-                    iface = UnifiedDataInterface(duckdb_path=self._duckdb_path)
+                    iface = UnifiedDataInterface(
+                        duckdb_path=self._duckdb_path,
+                        xtdata_call_mode="direct",
+                    )
                     df = iface.get_data_coverage(
                         stock_codes=[self._symbol],
                         periods=[self._period],
@@ -1563,6 +1603,21 @@ class KLineChartWorkspace(QWidget):
                     if not val:
                         self.result_ready.emit("本地: 无数据")
                         return
+                    gate_status = iface.get_latest_gate_status(self._symbol, self._period)
+                    gate_suffix = ""
+                    if gate_status:
+                        quality = str(gate_status.get("quality_grade") or "").strip()
+                        replayable = bool(gate_status.get("replayable"))
+                        lineage_complete = bool(gate_status.get("lineage_complete"))
+                        gate_parts: list[str] = []
+                        if quality:
+                            gate_parts.append(quality)
+                        if replayable:
+                            gate_parts.append("可回放")
+                        if lineage_complete:
+                            gate_parts.append("血缘完整")
+                        if gate_parts:
+                            gate_suffix = " [" + " / ".join(gate_parts) + "]"
                     # ── 黄金标准1D完备性检查：首日左对齐验证 ──────────────────
                     if self._period == "1d" and not self.isInterruptionRequested():
                         try:
@@ -1577,7 +1632,10 @@ class KLineChartWorkspace(QWidget):
                                 ):
                                     # 用交易日计数（精确），而非自然日
                                     try:
-                                        from data_manager.smart_data_detector import get_trading_calendar
+                                        from data_manager.smart_data_detector import (
+                                            get_trading_calendar,
+                                        )
+
                                         _cal = get_trading_calendar()
                                         _td_list = _cal.get_trading_days(
                                             _pd.Timestamp(listing_date).date(),
@@ -1588,20 +1646,19 @@ class KLineChartWorkspace(QWidget):
                                         gap_label = f"⚠️缺首日起{gap_days}个交易日"
                                     except Exception:
                                         gap_days = int(
-                                            (_pd.Timestamp(first_stored) - _pd.Timestamp(listing_date)).days
+                                            (
+                                                _pd.Timestamp(first_stored)
+                                                - _pd.Timestamp(listing_date)
+                                            ).days
                                         )
                                         gap_label = f"⚠️缺首日起{gap_days}天"
-                                    self.result_ready.emit(
-                                        f"本地: {val} {gap_label}"
-                                    )
-                                    self.gap_found.emit(
-                                        self._symbol, listing_date, first_stored
-                                    )
+                                    self.result_ready.emit(f"本地: {val}{gate_suffix} {gap_label}")
+                                    self.gap_found.emit(self._symbol, listing_date, first_stored)
                                     return
                         except Exception:
                             pass
                     # ─────────────────────────────────────────────────────────
-                    self.result_ready.emit(f"本地: {val}" if val else "本地: 无数据")
+                    self.result_ready.emit(f"本地: {val}{gate_suffix}" if val else "本地: 无数据")
                 except Exception:
                     self.result_ready.emit("本地: --")
 
@@ -1627,7 +1684,10 @@ class KLineChartWorkspace(QWidget):
         adjust = self._get_adjust_key()
         today = pd.Timestamp.today().strftime("%Y-%m-%d")
         self._logger.info(
-            "1D黄金标准缺口: %s 首日%s → 本地起始%s，触发多源历史回补", symbol, listing_date, first_stored
+            "1D黄金标准缺口: %s 首日%s → 本地起始%s，触发多源历史回补",
+            symbol,
+            listing_date,
+            first_stored,
         )
         # 延迟 800ms 发起回补请求（让首屏数据先完成渲染）
         QTimer.singleShot(
@@ -1656,14 +1716,12 @@ class KLineChartWorkspace(QWidget):
         if rate < 0:
             color, status = "#555", "未验证"
         elif rate >= 0.99:
-            color, status = "#4CAF50", f"优质 {rate*100:.1f}%"
+            color, status = "#4CAF50", f"优质 {rate * 100:.1f}%"
         elif rate >= 0.90:
-            color, status = "#FFC107", f"注意 {rate*100:.1f}%"
+            color, status = "#FFC107", f"注意 {rate * 100:.1f}%"
         else:
-            color, status = "#F44336", f"异常 {rate*100:.1f}%"
-        self._quality_dot_label.setStyleSheet(
-            f"color:{color}; font-size:12px; padding:0 2px;"
-        )
+            color, status = "#F44336", f"异常 {rate * 100:.1f}%"
+        self._quality_dot_label.setStyleSheet(f"color:{color}; font-size:12px; padding:0 2px;")
         tooltip = (
             f"数据质量: {status}\n"
             f"对照源: {source}\n"
@@ -2280,12 +2338,15 @@ class KLineChartWorkspace(QWidget):
         # 订阅 Events.DATA_QUALITY_UPDATED，实时感知多源交叉验证结果
         self._quality_dot_label = QLabel("●")
         self._quality_dot_label.setStyleSheet("color:#555; font-size:12px; padding:0 2px;")
-        self._quality_dot_label.setToolTip("数据质量: 未验证\n(灰)未验证 (绿)≥99%一致 (黄)≥90% (红)<90%")
+        self._quality_dot_label.setToolTip(
+            "数据质量: 未验证\n(灰)未验证 (绿)≥99%一致 (黄)≥90% (红)<90%"
+        )
         layout.addWidget(self._quality_dot_label)
         # 延迟连接（确保 signal_bus 已初始化）
         try:
             from core.signal_bus import signal_bus as _sb
             from core.events import Events as _Ev
+
             if hasattr(_Ev, "DATA_QUALITY_UPDATED"):
                 _sb.subscribe(_Ev.DATA_QUALITY_UPDATED, self._on_data_quality_updated)
         except Exception:
@@ -2493,9 +2554,13 @@ class KLineChartWorkspace(QWidget):
         # 恢复选中状态：先取当前 period，再 fallback 到 1d
         current_period = self.period_combo.currentText() or "1d"
         self._period_strip.set_current(
-            current_period if current_period in self._period_buttons_map else
-            ("1d" if "1d" in self._period_buttons_map else
-             (self._resident_period_keys[0] if self._resident_period_keys else ""))
+            current_period
+            if current_period in self._period_buttons_map
+            else (
+                "1d"
+                if "1d" in self._period_buttons_map
+                else (self._resident_period_keys[0] if self._resident_period_keys else "")
+            )
         )
 
         # 同步 picker 弹窗复选框（含自定义周期）
@@ -3214,7 +3279,7 @@ class KLineChartWorkspace(QWidget):
         symbol = self._normalize_symbol(self.symbol_input.text().strip())
         if not symbol:
             return
-        port = int(os.environ.get("EASYXT_API_PORT", "8000"))
+        port = int(os.environ.get("EASYXT_API_PORT", "8765"))
         reconnect_initial_s = float(os.environ.get("EASYXT_WS_RECONNECT_INITIAL", "1.5"))
         reconnect_max_s = float(os.environ.get("EASYXT_WS_RECONNECT_MAX", "15"))
         reconnect_factor = float(os.environ.get("EASYXT_WS_RECONNECT_FACTOR", "1.8"))
@@ -3237,9 +3302,9 @@ class KLineChartWorkspace(QWidget):
         self._ws_quote_worker = None
         w.stop()
         if self._is_thread_running(w):
-            if not w.wait(2000):  # asyncio recv_timeout=1s + WS cleanup，给够 2s
+            if not self._safe_thread_wait(w, 2000):  # asyncio recv_timeout=1s + WS cleanup，给够 2s
                 w.terminate()  # 超时则强制终止，避免 QThread Destroyed while running
-                w.wait(500)
+                self._safe_thread_wait(w, 500)
 
     def _flush_realtime_pipeline(self):
         if self.chart is None and self.chart_adapter is None:
@@ -3545,7 +3610,7 @@ class KLineChartWorkspace(QWidget):
             ).UnifiedDataInterface
             iface = UnifiedDataInterface(duckdb_path=self.duckdb_path, silent_init=True)
             try:
-                iface.connect(read_only=False)
+                iface.connect(read_only=True)
             except Exception:
                 pass
             raw_df = iface.get_stock_data_local(
@@ -3605,7 +3670,15 @@ class KLineChartWorkspace(QWidget):
             return None
         ratio = float(self._realtime_adjust_ratio)
         adjusted = dict(quote)
-        for field in ("price", "open", "high", "low", "prev_close", "last_settlement", "settlement"):
+        for field in (
+            "price",
+            "open",
+            "high",
+            "low",
+            "prev_close",
+            "last_settlement",
+            "settlement",
+        ):
             value = adjusted.get(field)
             if value in (None, ""):
                 continue
@@ -3657,14 +3730,6 @@ class KLineChartWorkspace(QWidget):
             self._emit_realtime_probe(connected=False, reason="market_closed")
             self._stop_ws_quote_worker()
             return
-        # 调试日志：追踪价格来源
-        import logging
-
-        _logger = logging.getLogger(__name__)
-        _logger.warning(
-            f"[DIAG] _on_quote_received price={quote.get('price')} source={quote.get('source', 'unknown')}"
-        )
-
         raw_quote = self._normalize_realtime_quote(quote)
         self._last_raw_realtime_quote = dict(raw_quote)
         self._ws_error_consecutive = 0
@@ -3686,7 +3751,9 @@ class KLineChartWorkspace(QWidget):
             _udi = getattr(self, "data_interface", None)
             if _udi is not None:
                 _sym, _p = symbol, period
-                self.realtime_pipeline.on_bar_close = lambda bar, s=_sym, p=_p: _udi.upsert_realtime_bar(bar, s, p)
+                self.realtime_pipeline.on_bar_close = (
+                    lambda bar, s=_sym, p=_p: _udi.upsert_realtime_bar(bar, s, p)
+                )
             self._last_configure_key = cfg_key
         self.realtime_pipeline.enqueue_quote(chart_quote)
         # Fix-B: WS tick 缺少五档时，异步补齐（防抖 5s，避免频繁调用 xtdata.get_full_tick）
@@ -3865,7 +3932,7 @@ class KLineChartWorkspace(QWidget):
             if self._ws_error_consecutive < max(1, self._ws_error_emit_threshold):
                 return
             # 达到阈值后：输出结构化诊断，方便区分「端口错误/路由不存在/服务未就绪」
-            port = int(os.environ.get("EASYXT_API_PORT", "8000"))
+            port = int(os.environ.get("EASYXT_API_PORT", "8765"))
             ws_url = f"ws://127.0.0.1:{port}/ws/market/{symbol}"
             self._logger.warning(
                 f"WS行情握手持续失败 [{reason_text}] "
@@ -3883,12 +3950,27 @@ class KLineChartWorkspace(QWidget):
         if price <= 0:
             return
         period = self.period_combo.currentText()
+        timestamp_fields = (
+            "source_event_ts_ms",
+            "event_ts_ms",
+            "tick_ts_ms",
+            "trade_time",
+            "tradeTime",
+            "quote_time",
+            "quoteTime",
+            "update_time",
+            "updateTime",
+            "datetime",
+            "time",
+            "timestamp",
+            "ts",
+        )
+        has_explicit_quote_ts = any(quote.get(name) not in (None, "") for name in timestamp_fields)
         quote_ts = self._resolve_quote_timestamp(quote)
         _p = str(period or "").strip()
         _is_intraday = (_p.lower().endswith("m") and _p[:-1].isdigit()) or _p.lower() == "tick"
         if _is_intraday and not self._is_intraday_market_time(quote_ts):
             return
-        bar_time = self._floor_bar_time(period, quote_ts)
         total_volume = float(quote.get("volume") or 0)
         if (
             self.realtime_last_total_volume is None
@@ -3902,11 +3984,20 @@ class KLineChartWorkspace(QWidget):
             return
         last_row = self.last_data.iloc[-1].copy()
         last_time = last_row.get("time")
-        new_ts = self._to_datetime_safe(bar_time)
         last_ts = self._to_datetime_safe(last_time)
+        if _is_intraday and not has_explicit_quote_ts and pd.notna(last_ts):
+            # 部分实时源不携带逐笔时间戳；此时沿用当前最后一根 bar 的时间，
+            # 避免因本机时间或字符串/Timestamp 类型差异误开新 bar。
+            bar_time = last_time
+        else:
+            bar_time = self._floor_bar_time(period, quote_ts)
+        new_ts = self._to_datetime_safe(bar_time)
         if pd.notna(new_ts) and pd.notna(last_ts) and new_ts < last_ts:
             return
-        if last_time == bar_time:
+        same_bar = bool(pd.notna(new_ts) and pd.notna(last_ts) and new_ts == last_ts)
+        if not same_bar:
+            same_bar = last_time == bar_time
+        if same_bar:
             is_daily = period == "1d"
             if is_daily:
                 high = max(float(last_row["high"]), price, float(quote.get("high") or price))
@@ -4037,17 +4128,17 @@ class KLineChartWorkspace(QWidget):
         if pl.endswith("m") and pl[:-1].isdigit():
             n = int(pl[:-1])
             d = ts.strftime("%Y-%m-%d")
-            am_start      = pd.Timestamp(f"{d} 09:30:00")
-            pm_start      = pd.Timestamp(f"{d} 13:00:00")
-            pm_end        = pd.Timestamp(f"{d} 15:00:00")
-            AM_MINUTES    = 120   # 09:30-11:30
-            TOTAL_MINUTES = 240   # 全日总交易分钟数
+            am_start = pd.Timestamp(f"{d} 09:30:00")
+            pm_start = pd.Timestamp(f"{d} 13:00:00")
+            pm_end = pd.Timestamp(f"{d} 15:00:00")
+            AM_MINUTES = 120  # 09:30-11:30
+            TOTAL_MINUTES = 240  # 全日总交易分钟数
             # 计算全日连续交易分钟偏移（午间休市不计入，仅计实际交易时间）
             if ts >= pm_start:
                 elapsed = AM_MINUTES + max(0, int((ts - pm_start).total_seconds()) // 60)
             else:
                 elapsed = max(0, int((ts - am_start).total_seconds()) // 60)
-            bar_num   = elapsed // n
+            bar_num = elapsed // n
             right_min = min((bar_num + 1) * n, TOTAL_MINUTES)
             # 将交易分钟偏移转回真实时刻
             if right_min <= AM_MINUTES:
@@ -4628,6 +4719,8 @@ class KLineChartWorkspace(QWidget):
         end_date: str,
         mode: str,
     ):
+        if getattr(self, "_is_closed", False):
+            return
         if not symbol or (self.chart is None and self.chart_adapter is None):
             return
         try:
@@ -4723,6 +4816,8 @@ class KLineChartWorkspace(QWidget):
                 )
 
     def refresh_chart_data(self):
+        if getattr(self, "_is_closed", False):
+            return
         if self.chart is None and self.chart_adapter is None:
             return
         symbol = self.symbol_input.text().strip()
@@ -5024,7 +5119,9 @@ class KLineChartWorkspace(QWidget):
             _udi2 = getattr(self, "data_interface", None)
             if _udi2 is not None:
                 _sym2, _p2 = symbol, period
-                self.realtime_pipeline.on_bar_close = lambda bar, s=_sym2, p=_p2: _udi2.upsert_realtime_bar(bar, s, p)
+                self.realtime_pipeline.on_bar_close = (
+                    lambda bar, s=_sym2, p=_p2: _udi2.upsert_realtime_bar(bar, s, p)
+                )
             self._last_configure_key = (symbol, period)
             self._set_loaded_range_from_data(merged)
             # 信号评估和盘口快照推到后台线程，避免主线程阻塞
@@ -5096,6 +5193,8 @@ class KLineChartWorkspace(QWidget):
             adjust: 复权类型
             initial_loaded: 是否为首屏数据加载完成后触发
         """
+        if getattr(self, "_is_closed", False):
+            return
         if not symbol or (self.chart is None and self.chart_adapter is None):
             return
 
@@ -5632,9 +5731,12 @@ class KLineChartWorkspace(QWidget):
             self.realtime_timer.stop()
 
     def closeEvent(self, a0):
+        self._is_closed = True  # guard all timer callbacks from xtdata calls
         try:
             self._drain_owned_threads()
             self._backfill_retry_timer.stop()
+            if self._chart_refresh_timer and self._chart_refresh_timer.isActive():
+                self._chart_refresh_timer.stop()
             self._stop_ws_quote_worker()  # WS worker 需先 stop() 再 wait
             if self.update_timer and self.update_timer.isActive():
                 self.update_timer.stop()
@@ -5651,12 +5753,12 @@ class KLineChartWorkspace(QWidget):
             if rct is not None and self._is_thread_running(rct):
                 rct.requestInterruption()
                 rct.quit()
-                if not rct.wait(1000):  # 给实盘连接线程 1s 宽限
+                if not self._safe_thread_wait(rct, 1000):  # 给实盘连接线程 1s 宽限
                     self._logger.warning(
                         "closeEvent: _RealtimeConnectThread 未在 1s 内退出，强制终止"
                     )
                     rct.terminate()
-                    rct.wait(500)
+                    self._safe_thread_wait(rct, 500)
                     # 结构化事件上报：便于后续统计"强杀频率"
                     try:
                         signal_bus.emit(
@@ -5682,20 +5784,21 @@ class KLineChartWorkspace(QWidget):
                     t.quit()
             # Fix 7c/10a: 所有线程共享 3s 总 deadline，避免串行阻塞主线程（原来每线程 3s 可达 24s）
             import time as _time
+
             _deadline_t0 = _time.monotonic()
             _TOTAL_WAIT_MS = 3000
             for t in threads:
                 if self._is_thread_running(t):
                     _elapsed_ms = int((_time.monotonic() - _deadline_t0) * 1000)
                     _remaining = max(50, _TOTAL_WAIT_MS - _elapsed_ms)
-                    t.wait(_remaining)
+                    self._safe_thread_wait(t, _remaining)
             for t in threads:
                 if self._is_thread_running(t):
                     self._logger.warning(
                         "closeEvent: 线程未及时退出，强制终止: %s", type(t).__name__
                     )
                     t.terminate()
-                    t.wait(300)
+                    self._safe_thread_wait(t, 300)
             self._drain_owned_threads()
         finally:
             # native 路径：关闭时保存当前标的的画线
@@ -5708,7 +5811,7 @@ class KLineChartWorkspace(QWidget):
             # 避免下次启动出现 WAL回放异常警告。
             if self.interface is not None:
                 try:
-                    if getattr(self.interface, 'con', None) is not None:
+                    if getattr(self.interface, "con", None) is not None:
                         try:
                             self.interface.con.execute("CHECKPOINT")
                         except Exception:
@@ -5775,7 +5878,10 @@ class _ChartDataLoadThread(QThread):
                         f"[XTTRACE][{threading.current_thread().name}] chart-load-thread iface.connect",
                         flush=True,
                     )
-                iface.connect(read_only=False)
+                iface.connect(
+                    read_only=os.environ.get("EASYXT_CHART_ALLOW_ONLINE_FETCH", "0")
+                    not in ("1", "true", "True")
+                )
             except Exception:
                 pass
             data = None
@@ -5789,6 +5895,7 @@ class _ChartDataLoadThread(QThread):
             # 确保图表首屏立即有内容，不因 QMT 在线请求耗时而空白等待。
             # 仅用于 replace 模式（首屏/换股/换周期），merge（进度滚动）跳过。
             _local_preview_emitted = False
+            _local_preview_data = None
             if online_fetch_enabled and self.mode == "replace":
                 try:
                     _preview = iface.get_stock_data_local(
@@ -5804,19 +5911,22 @@ class _ChartDataLoadThread(QThread):
                         and len(_preview) >= 5
                         and not self.isInterruptionRequested()
                     ):
-                        self.data_ready.emit({
-                            "data": _preview,
-                            "symbol": self.symbol,
-                            "period": self.period,
-                            "adjust": self.adjust,
-                            "start_date": self.start_date,
-                            "end_date": self.end_date,
-                            "mode": self.mode,
-                            "ingestion_status": "local_preview",
-                            "backfill_scheduled": False,
-                            "backfill_pending": False,
-                            "empty_reason": "",
-                        })
+                        _local_preview_data = _preview
+                        self.data_ready.emit(
+                            {
+                                "data": _preview,
+                                "symbol": self.symbol,
+                                "period": self.period,
+                                "adjust": self.adjust,
+                                "start_date": self.start_date,
+                                "end_date": self.end_date,
+                                "mode": self.mode,
+                                "ingestion_status": "local_preview",
+                                "backfill_scheduled": False,
+                                "backfill_pending": False,
+                                "empty_reason": "",
+                            }
+                        )
                         _local_preview_emitted = True
                 except Exception:
                     pass
@@ -5894,6 +6004,11 @@ class _ChartDataLoadThread(QThread):
             if data is not None and not getattr(data, "empty", True):
                 if self.max_bars and len(data) > self.max_bars:
                     data = data.tail(self.max_bars).copy()
+            if (data is None or getattr(data, "empty", True)) and _local_preview_data is not None:
+                data = _local_preview_data
+                if not ingestion_status:
+                    ingestion_status = "local_preview_fallback"
+                empty_reason = ""
             if data is None or getattr(data, "empty", True):
                 data = self._load_parquet_local()
             if data is None or getattr(data, "empty", True):
@@ -6036,7 +6151,7 @@ class _LatestBarLoadThread(QThread):
             ).UnifiedDataInterface
             iface = UnifiedDataInterface(duckdb_path=self.duckdb_path, silent_init=True)
             try:
-                iface.connect(read_only=False)
+                iface.connect(read_only=True)
             except Exception:
                 pass
             data = None
@@ -6190,6 +6305,7 @@ class _DataProcessThread(QThread):
             # 整数时间戳保护：若 time 列为数值型（QMT epoch ms），先换算为 datetime
             if pd.api.types.is_numeric_dtype(data["time"]):
                 from data_manager.timestamp_utils import qmt_ms_to_beijing
+
                 dt_series = qmt_ms_to_beijing(data["time"])
             else:
                 dt_series = pd.to_datetime(data["time"], errors="coerce")
@@ -6200,6 +6316,7 @@ class _DataProcessThread(QThread):
             # 整数时间戳保护：若 time 列为数值型（QMT epoch ms），先换算为 datetime
             if pd.api.types.is_numeric_dtype(data["time"]):
                 from data_manager.timestamp_utils import qmt_ms_to_beijing
+
                 dt_series = qmt_ms_to_beijing(data["time"])
             else:
                 dt_series = pd.to_datetime(data["time"], errors="coerce")

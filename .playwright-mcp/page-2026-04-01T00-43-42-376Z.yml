@@ -1,0 +1,266 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - strong [ref=e6]: EasyXT
+      - generic [ref=e7]: Tauri Shell P0
+    - navigation [ref=e8]:
+      - button "市场" [ref=e9] [cursor=pointer]
+      - button "交易" [ref=e10] [cursor=pointer]
+      - button "研究" [ref=e11] [cursor=pointer]
+      - button "热力图" [ref=e12] [cursor=pointer]
+      - button "结构分析" [ref=e13] [cursor=pointer]
+      - button "数据治理" [ref=e14] [cursor=pointer]
+      - button "同步状态" [ref=e15] [cursor=pointer]
+    - generic [ref=e18]: API only / Qt freeze
+  - generic [ref=e19]:
+    - complementary [ref=e20]:
+      - heading "新壳导航" [level=1] [ref=e21]
+      - paragraph [ref=e22]: "目标：所有新增可视化能力都进入这里，而不是回流到 `gui_app/`。"
+      - generic [ref=e23]:
+        - button "交易工作台 图表居中 + 交易侧栏 + 底部持仓" [ref=e24] [cursor=pointer]:
+          - strong [ref=e25]: 交易工作台
+          - generic [ref=e26]: 图表居中 + 交易侧栏 + 底部持仓
+        - button "结构分析 结构监控 / 信号表 / 回撤 / Bayesian" [ref=e27] [cursor=pointer]:
+          - strong [ref=e28]: 结构分析
+          - generic [ref=e29]: 结构监控 / 信号表 / 回撤 / Bayesian
+        - button "数据治理 路由 / 质量 / 日历 / 溯源 / DuckDB" [ref=e30] [cursor=pointer]:
+          - strong [ref=e31]: 数据治理
+          - generic [ref=e32]: 路由 / 质量 / 日历 / 溯源 / DuckDB
+        - button "热力图 板块 / 行业 / 主题热力视图" [ref=e33] [cursor=pointer]:
+          - strong [ref=e34]: 热力图
+          - generic [ref=e35]: 板块 / 行业 / 主题热力视图
+        - button "观点与脚本 TradingHero / 社区 / 研究卡片流" [ref=e36] [cursor=pointer]:
+          - strong [ref=e37]: 观点与脚本
+          - generic [ref=e38]: TradingHero / 社区 / 研究卡片流
+        - button "同步状态 SQLite / DuckDB / shadow 版本可观察性" [ref=e39] [cursor=pointer]:
+          - strong [ref=e40]: 同步状态
+          - generic [ref=e41]: SQLite / DuckDB / shadow 版本可观察性
+    - generic [ref=e43]:
+      - generic [ref=e44]:
+        - generic [ref=e45]:
+          - heading "交易工作台" [level=2] [ref=e46]
+          - paragraph [ref=e47]: 以专业图表为中心舞台：官方 Pro adapter 已接入 Workbench 主容器，接下来继续增强多图布局、事件桥与交易控件。
+        - generic [ref=e48]:
+          - generic [ref=e49]: 实时
+          - generic [ref=e50]: API 边界优先
+          - generic [ref=e51]: Qt legacy freeze
+      - generic [ref=e52]:
+        - complementary [ref=e53]:
+          - generic [ref=e54]:
+            - generic [ref=e55]:
+              - heading "自选 / 搜索" [level=3] [ref=e56]
+              - generic [ref=e57]: 真实 watchlist / 搜索读模型尚未接线；当前先用主舞台验证标的驱动图表容器与 adapter 运行态。
+              - generic [ref=e58]:
+                - button "000001.SZ CN Equity A 股日线 / Golden 1D / 结构标注" [ref=e59] [cursor=pointer]:
+                  - strong [ref=e60]: 000001.SZ
+                  - generic [ref=e61]: CN Equity
+                  - generic [ref=e62]: A 股日线 / Golden 1D / 结构标注
+                - button "159981.SZ ETF 宽基 / 行业联动" [ref=e63] [cursor=pointer]:
+                  - strong [ref=e64]: 159981.SZ
+                  - generic [ref=e65]: ETF
+                  - generic [ref=e66]: 宽基 / 行业联动
+                - button "BTC/USDT Crypto 主舞台验证标的" [ref=e67] [cursor=pointer]:
+                  - strong [ref=e68]: BTC/USDT
+                  - generic [ref=e69]: Crypto
+                  - generic [ref=e70]: 主舞台验证标的
+                - button "XAUUSD Macro 贵金属图表入口" [ref=e71] [cursor=pointer]:
+                  - strong [ref=e72]: XAUUSD
+                  - generic [ref=e73]: Macro
+                  - generic [ref=e74]: 贵金属图表入口
+            - generic [ref=e75]:
+              - heading "工作区预设" [level=3] [ref=e76]
+              - generic [ref=e77]:
+                - button "标准布局" [ref=e78] [cursor=pointer]
+                - button "专业布局（右）" [ref=e79] [cursor=pointer]
+                - button "双图" [ref=e80] [cursor=pointer]
+                - button "四图" [ref=e81] [cursor=pointer]
+                - button "研究布局" [ref=e82] [cursor=pointer]
+              - generic [ref=e83]: 当前主舞台已经能感知 layout preset，上层布局持久化将在图表工作区存储完成后接入。
+        - main [ref=e84]:
+          - generic [ref=e85]:
+            - generic [ref=e86]:
+              - generic [ref=e87]: 000001.SZ
+              - generic [ref=e88]:
+                - button "1m" [ref=e89] [cursor=pointer]
+                - button "15m" [ref=e90] [cursor=pointer]
+                - button "1h" [ref=e91] [cursor=pointer]
+                - button "1d" [ref=e92] [cursor=pointer]
+                - button "1w" [ref=e93] [cursor=pointer]
+              - generic [ref=e94]:
+                - button "指标" [ref=e95] [cursor=pointer]
+                - button "叠加" [ref=e96] [cursor=pointer]
+                - button "结构" [ref=e97] [cursor=pointer]
+                - button "风控" [ref=e98] [cursor=pointer]
+            - generic [ref=e99]: 图表工作区组件分块加载中…
+        - complementary [ref=e100]:
+          - generic [ref=e101]:
+            - generic [ref=e102]:
+              - heading "交易面板" [level=3] [ref=e103]
+              - generic [ref=e104]:
+                - generic [ref=e105]:
+                  - generic [ref=e106]: 账户
+                  - textbox "账户" [ref=e107]: 待接入真实账户读模型
+                - generic [ref=e108]:
+                  - generic [ref=e109]: 标的
+                  - textbox "标的" [ref=e110]: 000001.SZ
+                - generic [ref=e111]:
+                  - generic [ref=e112]: 报价
+                  - textbox "报价" [ref=e113]: 待接入真实行情
+                - generic [ref=e114]:
+                  - generic [ref=e115]: 周期
+                  - textbox "周期" [ref=e116]: 1d
+              - generic [ref=e117]:
+                - button "买入" [ref=e118]
+                - button "卖出" [ref=e119]
+              - generic [ref=e120]: 交易控件将跟随专业图表主舞台推进，后续统一接到账户 / 报价 / 风控真实链路。
+            - generic [ref=e121]:
+              - heading "图表运行态" [level=3] [ref=e122]
+              - list [ref=e123]:
+                - listitem [ref=e124]:
+                  - generic [ref=e125]: runtime status
+                  - strong [ref=e126]: · —
+                - listitem [ref=e127]:
+                  - generic [ref=e128]: active adapter
+                  - strong [ref=e129]: —
+                - listitem [ref=e130]:
+                  - generic [ref=e131]: target runtime
+                  - strong [ref=e132]: KLineChart Pro 0.1.1
+                - listitem [ref=e133]:
+                  - generic [ref=e134]: bars
+                  - strong [ref=e135]: —
+                - listitem [ref=e136]:
+                  - generic [ref=e137]: annotations
+                  - strong [ref=e138]: —
+                - listitem [ref=e139]:
+                  - generic [ref=e140]: trade marks
+                  - strong [ref=e141]: —
+                - listitem [ref=e142]:
+                  - generic [ref=e143]: layout preset
+                  - strong [ref=e144]: 标准布局
+                - listitem [ref=e145]:
+                  - generic [ref=e146]: toolbar focus
+                  - strong [ref=e147]: 结构
+                - listitem [ref=e148]:
+                  - generic [ref=e149]: bridge panes
+                  - strong [ref=e150]: —
+                - listitem [ref=e151]:
+                  - generic [ref=e152]: last bridge event
+                  - strong [ref=e153]: —
+            - generic [ref=e154]:
+              - heading "事件桥状态" [level=3] [ref=e155]
+              - list [ref=e156]:
+                - listitem [ref=e157]:
+                  - generic [ref=e158]: focused pane
+                  - strong [ref=e159]: —
+                - listitem [ref=e160]:
+                  - generic [ref=e161]: event at
+                  - strong [ref=e162]: —
+                - listitem [ref=e163]:
+                  - generic [ref=e164]: click count
+                  - strong [ref=e165]: —
+                - listitem [ref=e166]:
+                  - generic [ref=e167]: crosshair count
+                  - strong [ref=e168]: —
+                - listitem [ref=e169]:
+                  - generic [ref=e170]: range count
+                  - strong [ref=e171]: —
+              - generic [ref=e173]: 等待 click / crosshair / visible range 事件回写
+            - generic [ref=e174]:
+              - heading "数据质量" [level=3] [ref=e175]
+              - list [ref=e176]:
+                - listitem [ref=e177]:
+                  - generic [ref=e178]: golden status
+                  - strong [ref=e179]: · —
+                - listitem [ref=e180]:
+                  - generic [ref=e181]: missing days
+                  - strong [ref=e182]: —
+                - listitem [ref=e183]:
+                  - generic [ref=e184]: cross source
+                  - strong [ref=e185]: —
+                - listitem [ref=e186]:
+                  - generic [ref=e187]: backfill
+                  - strong [ref=e188]: —
+                - listitem [ref=e189]:
+                  - generic [ref=e190]: repair plan
+                  - strong [ref=e191]: · —
+                - listitem [ref=e192]:
+                  - generic [ref=e193]: audit anchor
+                  - strong [ref=e194]: —
+              - generic [ref=e195]: "`degraded` 不是隐藏态，而是工作台的一等状态：主舞台继续展示 bars，同时把缺失与污染暴露给操作者。"
+            - generic [ref=e196]:
+              - heading "性能专项" [level=3] [ref=e197]
+              - list [ref=e198]:
+                - listitem [ref=e199]:
+                  - generic [ref=e200]: pane count
+                  - strong [ref=e201]: —
+                - listitem [ref=e202]:
+                  - generic [ref=e203]: mounted panes
+                  - strong [ref=e204]: —
+                - listitem [ref=e205]:
+                  - generic [ref=e206]: lazy pending
+                  - strong [ref=e207]: —
+                - listitem [ref=e208]:
+                  - generic [ref=e209]: stress target
+                  - strong [ref=e210]: —
+                - listitem [ref=e211]:
+                  - generic [ref=e212]: last marker apply
+                  - strong [ref=e213]: —
+                - listitem [ref=e214]:
+                  - generic [ref=e215]: last stress run
+                  - strong [ref=e216]: —
+                - listitem [ref=e217]:
+                  - generic [ref=e218]: max marker apply
+                  - strong [ref=e219]: —
+                - listitem [ref=e220]:
+                  - generic [ref=e221]: updated at
+                  - strong [ref=e222]: —
+              - generic [ref=e223]: 主舞台组件已改为动态分块加载；图表运行时再配合双图/四图懒挂载，把首屏压力优先收敛到主 pane。
+            - generic [ref=e224]:
+              - heading "后台修复" [level=3] [ref=e225]
+              - list [ref=e226]:
+                - listitem [ref=e227]:
+                  - generic [ref=e228]: plan status
+                  - strong [ref=e229]: · —
+                - listitem [ref=e230]:
+                  - generic [ref=e231]: queued tasks
+                  - strong [ref=e232]: —
+                - listitem [ref=e233]:
+                  - generic [ref=e234]: failed tasks
+                  - strong [ref=e235]: —
+                - listitem [ref=e236]:
+                  - generic [ref=e237]: task count
+                  - strong [ref=e238]: —
+                - listitem [ref=e239]:
+                  - generic [ref=e240]: generated at
+                  - strong [ref=e241]: —
+              - generic [ref=e242]:
+                - button "立即编排" [ref=e243]
+                - button "强制复审+编排" [ref=e244]
+              - generic [ref=e246]: 暂无 repair plan 细节
+      - generic [ref=e248]:
+        - generic [ref=e249]:
+          - button "持仓" [ref=e250] [cursor=pointer]
+          - button "委托" [ref=e251] [cursor=pointer]
+          - button "成交" [ref=e252] [cursor=pointer]
+          - button "历史" [ref=e253] [cursor=pointer]
+          - button "账户" [ref=e254] [cursor=pointer]
+        - generic [ref=e255]: ◐ 底栏当前只承接容器布局，不展示伪造账户/订单数据；等真实持仓、委托、成交读模型接线后再填充。
+        - generic [ref=e256]:
+          - generic [ref=e257]:
+            - generic [ref=e258]: 主标的
+            - generic [ref=e259]: 图表状态
+            - generic [ref=e260]: 订单链路
+            - generic [ref=e261]: 工作区
+            - generic [ref=e262]: adapter
+          - generic [ref=e263]:
+            - generic [ref=e264]: 000001.SZ
+            - generic [ref=e265]: —
+            - generic [ref=e266]: 等待事件桥
+            - generic [ref=e267]: 标准布局
+            - generic [ref=e268]: · —
+          - generic [ref=e269]:
+            - generic [ref=e270]: 1d
+            - generic [ref=e271]: · —
+            - generic [ref=e272]: — annotations / — marks / —
+            - generic [ref=e273]: —
+            - generic [ref=e274]: —

@@ -49,13 +49,17 @@ class WsBridge:
         self._port: int = 0
 
         self._server_ready = threading.Event()
-        self._client_connected = threading.Event()
+        self._client_connected: dict[str, threading.Event] = {}  # chart_id → connected event
         self._thread: threading.Thread | None = None
         self._stop_event: asyncio.Event | None = None  # created inside event loop
 
         self._pending: dict[int, "asyncio.Future[Any]"] = {}
         self._msg_id: int = 0
         self._handlers: dict[str, list["Callable[..., Any]"]] = {}
+        self._client_lock = threading.Lock()
+
+        # ── 多客户端支持 ──
+        self._clients: dict[str, Any] = {}  # chart_id → websockets.WebSocketServerProtocol
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -69,8 +73,16 @@ class WsBridge:
         return self._port
 
     def wait_connect(self, timeout: float = 5.0) -> bool:
-        """阻塞等待 JS 客户端连接，返回是否在超时内连上。"""
-        return self._client_connected.wait(timeout=timeout)
+        """阻塞等待 JS 客户端连接（chart_id="default"），返回是否在超时内连上。"""
+        return self.wait_connect_for("default", timeout)
+
+    def wait_connect_for(self, chart_id: str, timeout: float = 5.0) -> bool:
+        """阻塞等待指定 chart_id 的 JS 客户端连接。"""
+        evt = self._client_connected.get(chart_id)
+        if evt is None:
+            evt = threading.Event()
+            self._client_connected[chart_id] = evt
+        return evt.wait(timeout=timeout)
 
     def stop(self) -> None:
         """优雅关闭服务端，释放端口和线程。"""
@@ -89,7 +101,9 @@ class WsBridge:
                     pass
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-        self._client_connected.clear()
+        with self._client_lock:
+            self._client_connected.clear()
+            self._clients.clear()
         self._server_ready.clear()
 
     @property
@@ -98,31 +112,48 @@ class WsBridge:
 
     @property
     def is_connected(self) -> bool:
-        return self._ws is not None and self._client_connected.is_set()
+        with self._client_lock:
+            return "default" in self._clients
+
+    def is_connected_to(self, chart_id: str) -> bool:
+        with self._client_lock:
+            return chart_id in self._clients
 
     # ── Sending ───────────────────────────────────────────────────────────────
 
-    def notify(self, method: str, params: "dict[str, Any]") -> None:
+    def notify(self, method: str, params: "dict[str, Any]", chart_id: str = "default") -> None:
         """
         发送 JSON-RPC 通知（无需响应）。非阻塞，可在 Qt 主线程安全调用。
         若未连接则静默忽略。
         """
-        if not self._loop or not self._ws:
+        if not self._loop:
+            return
+        with self._client_lock:
+            ws = self._clients.get(chart_id)
+        if not ws:
             return
         msg = json.dumps({"jsonrpc": "2.0", "method": method, "params": params})
-        asyncio.run_coroutine_threadsafe(self._send_raw(msg), self._loop)
+        asyncio.run_coroutine_threadsafe(self._send_raw(msg, ws), self._loop)
 
     def call_sync(
-        self, method: str, params: "dict[str, Any]", timeout: float = 3.0
+        self,
+        method: str,
+        params: "dict[str, Any]",
+        timeout: float = 3.0,
+        chart_id: str = "default",
     ) -> Any:
         """
         发送 JSON-RPC 请求并阻塞等待响应。仅用于低频操作（截图、获取画线等）。
         超时或失败时抛出 WsBridgeError。
         """
-        if not self._loop or not self._ws:
+        if not self._loop:
             raise WsBridgeError("Not connected")
+        with self._client_lock:
+            ws = self._clients.get(chart_id)
+        if not ws:
+            raise WsBridgeError(f"Not connected to chart_id={chart_id!r}")
         future = asyncio.run_coroutine_threadsafe(
-            self._rpc_call(method, params, timeout), self._loop
+            self._rpc_call(method, params, timeout, ws), self._loop
         )
         try:
             return future.result(timeout=timeout + 1.0)
@@ -186,21 +217,38 @@ class WsBridge:
     async def _handle_client(
         self, ws: Any  # websockets.WebSocketServerProtocol
     ) -> None:
-        self._ws = ws
-        self._client_connected.set()
-        log.debug("WsBridge: client connected from %s", ws.remote_address)
+        chart_id = "default"
         try:
             async for raw in ws:
-                self._dispatch(raw)
+                if chart_id == "default":
+                    try:
+                        msg = json.loads(raw)
+                        cid = msg.get("params", {}).get("chart_id")
+                        if cid and isinstance(cid, str):
+                            chart_id = cid
+                    except (json.JSONDecodeError, Exception):
+                        pass
+                with self._client_lock:
+                    self._clients[chart_id] = ws
+                    evt = self._client_connected.get(chart_id)
+                    if evt is None:
+                        evt = threading.Event()
+                        self._client_connected[chart_id] = evt
+                    evt.set()
+                log.debug("WsBridge: client connected chart_id=%s from %s", chart_id, ws.remote_address)
+                self._dispatch(raw, ws)
         except websockets.exceptions.ConnectionClosed:
             pass
         finally:
-            if self._ws is ws:
-                self._ws = None
-                self._client_connected.clear()
-            log.debug("WsBridge: client disconnected")
+            with self._client_lock:
+                if self._clients.get(chart_id) is ws:
+                    self._clients.pop(chart_id, None)
+                evt = self._client_connected.get(chart_id)
+                if evt:
+                    evt.clear()
+            log.debug("WsBridge: client disconnected (chart_id=%s)", chart_id)
 
-    def _dispatch(self, raw: str) -> None:
+    def _dispatch(self, raw: str, ws: Any = None) -> None:
         """解析收到的 JSON-RPC 消息，路由到对应的 pending future 或事件处理器。"""
         try:
             msg = json.loads(raw)
@@ -251,17 +299,16 @@ class WsBridge:
 
             QTimer.singleShot(0, _invoke)
 
-    async def _send_raw(self, msg: str) -> None:
-        if self._ws:
-            try:
-                await self._ws.send(msg)
-            except Exception:
-                log.debug("WsBridge: send failed (client may have disconnected)")
+    async def _send_raw(self, msg: str, ws: Any) -> None:
+        try:
+            await ws.send(msg)
+        except Exception:
+            log.debug("WsBridge: send failed (client may have disconnected)")
 
     async def _rpc_call(
-        self, method: str, params: "dict[str, Any]", timeout: float
+        self, method: str, params: "dict[str, Any]", timeout: float, ws: Any
     ) -> Any:
-        if self._loop is None or self._ws is None:
+        if self._loop is None:
             raise WsBridgeError("Not connected")
         self._msg_id += 1
         msg_id = self._msg_id
@@ -272,7 +319,7 @@ class WsBridge:
             {"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params}
         )
         try:
-            await self._ws.send(payload)
+            await ws.send(payload)
         except Exception as exc:
             self._pending.pop(msg_id, None)
             raise WsBridgeError(f"send failed: {exc}") from exc

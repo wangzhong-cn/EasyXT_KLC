@@ -302,6 +302,10 @@ def _is_realtime_failure_reason(reason: str) -> bool:
     return any(k in text for k in keys)
 
 
+def _env_truthy(name: str, default: str = "0") -> bool:
+    return str(os.environ.get(name, default)).strip().lower() in ("1", "true", "yes", "on")
+
+
 Events = importlib.import_module("core.events").Events
 signal_bus = importlib.import_module("core.signal_bus").signal_bus
 ThemeManager = importlib.import_module("core.theme_manager").ThemeManager
@@ -433,6 +437,7 @@ class LazyTabLoader:
             "数据管理": self._create_data_manager,
             "因子分析": self._create_factor_analysis,
             "策略管理": self._create_strategy_management,
+            "结构监控": self._create_structure_monitor,
         }
 
         creator = tab_creators.get(tab_name)
@@ -519,6 +524,18 @@ class LazyTabLoader:
             return StrategyGovernancePanel()
         except Exception as e:
             return QLabel(f"策略管理加载失败: {e}")
+
+    def _create_structure_monitor(self) -> QWidget:
+        """创建结构监控面板（N 字结构识别 + 回撤仪表板）"""
+        try:
+            from gui_app.widgets.structure_monitor_panel import StructureMonitorPanel
+
+            data_mode = str(
+                os.environ.get("EASYXT_STRUCTURE_MONITOR_MODE", "api_read_only") or "api_read_only"
+            ).strip()
+            return StructureMonitorPanel(data_mode=data_mode)
+        except Exception as e:
+            return QLabel(f"结构监控加载失败: {e}")
 
     def preload_tabs(self, indices: list):
         """预加载指定的标签页"""
@@ -621,13 +638,17 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         _ensure_writable_duckdb_env()
-        # _logger 必须在所有调用 _p() 的代码之前初始化
+        self._settings = QSettings("EasyXT", "MainWindow")
         self._logger = logging.getLogger(__name__)
         os.environ["EASYXT_CONNECTION_PROBE_MODE"] = "passive"
         os.environ.setdefault("EASYXT_ENABLE_XTDATA_QUOTE_PROBE", "1")
         os.environ.setdefault("EASYXT_RT_XTDATA_ONLY", "1")
         os.environ.setdefault("EASYXT_API_PORT", "8765")
+        os.environ.setdefault("EASYXT_STRUCTURE_MONITOR_MODE", "api_read_only")
         os.environ.setdefault("EASYXT_USE_WS_QUOTE", "1")
+        os.environ.setdefault("EASYXT_CHART_ALLOW_ONLINE_FETCH", "0")
+        os.environ.setdefault("EASYXT_PRIMARY_WRITE_ENGINE", "sqlite")
+        os.environ.setdefault("EASYXT_DUCKDB_SHADOW_INLINE_WRITE", "1")
         os.environ.setdefault("EASYXT_ENABLE_BROKER_WARMUP", "0")
         os.environ.setdefault("EASYXT_ENABLE_XT_LISTING_DATE", "0")
         os.environ.setdefault("EASYXT_ENABLE_QMT_ONLINE", "1")
@@ -733,7 +754,9 @@ class MainWindow(QMainWindow):
         self.signal_bus.subscribe(Events.DATA_REPAIRED, self._on_data_repaired)
         self.signal_bus.subscribe(Events.ENV_CONFIG_SAVED, self._on_env_config_saved)
         if hasattr(Events, "BULK_DOWNLOAD_PROGRESS"):
-            self.signal_bus.subscribe(Events.BULK_DOWNLOAD_PROGRESS, self._on_bulk_download_progress)
+            self.signal_bus.subscribe(
+                Events.BULK_DOWNLOAD_PROGRESS, self._on_bulk_download_progress
+            )
         self._startup_duckdb_health_gate()
         self._p("t0")
         self.init_ui()
@@ -773,6 +796,31 @@ class MainWindow(QMainWindow):
                 "message": str(exc)[:180],
             }
         self._health_check_results["duckdb_gate"] = gate_result
+
+    def _restore_layout(self) -> None:
+        geo = self._settings.value("geometry")
+        if geo:
+            try:
+                self.restoreGeometry(geo)
+            except Exception:
+                self.setGeometry(100, 100, 1200, 800)
+        else:
+            self.setGeometry(100, 100, 1200, 800)
+        ws_state = self._settings.value("windowState")
+        if ws_state:
+            try:
+                self.restoreState(ws_state)
+            except Exception:
+                pass
+
+    def _save_layout(self) -> None:
+        self._settings.setValue("geometry", self.saveGeometry())
+        self._settings.setValue("windowState", self.saveState())
+        if getattr(self, "main_splitter", None) is not None:
+            self._settings.setValue("layout/main_splitter_sizes", self.main_splitter.sizes())
+        if getattr(self, "module_tab_widget", None) is not None:
+            idx = self.module_tab_widget.tab_widget.currentIndex()
+            self._settings.setValue("layout/last_tab_index", idx)
 
     def _init_alerts_rollup(self):
         self._alerts_settings = QSettings("EasyXT", "AlertsMonitor")
@@ -1283,7 +1331,7 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """初始化界面"""
         self.setWindowTitle("EasyXT量化交易策略管理平台")
-        self.setGeometry(100, 100, 1600, 1000)
+        self._restore_layout()
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -1295,14 +1343,28 @@ class MainWindow(QMainWindow):
         from gui_app.widgets.module_tab_widget import ModuleTabWidget
 
         self.chart_workspace = ChartWorkspace(show_operation_panel=False)
-        self.module_tab_widget = ModuleTabWidget()
+        panel_style = self._settings.value("ui/module_panel_style", "tab")
+        if panel_style == "accordion":
+            from gui_app.widgets.accordion_module_widget import AccordionModuleWidget
+            self.module_tab_widget = AccordionModuleWidget()
+        else:
+            self.module_tab_widget = ModuleTabWidget()
         splitter.addWidget(self.chart_workspace)
         splitter.addWidget(self.module_tab_widget)
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
         splitter.setStretchFactor(0, 7)
         splitter.setStretchFactor(1, 3)
-        splitter.setSizes([760, 320])
+        default_sizes = [760, 320]
+        splitter_sizes = self._settings.value("layout/main_splitter_sizes")
+        if splitter_sizes:
+            try:
+                splitter_sizes = [int(v) for v in splitter_sizes]
+                splitter.setSizes(splitter_sizes)
+            except Exception:
+                splitter.setSizes(default_sizes)
+        else:
+            splitter.setSizes(default_sizes)
         main_layout.addWidget(splitter)
         self.main_splitter = splitter
         self._tab_switch_start = None
@@ -1312,10 +1374,9 @@ class MainWindow(QMainWindow):
         self._p("tabs-created")
         self.create_status_bar()
         self._p("statusbar-created")
-        self.setWindowTitle("EasyXT量化交易策略管理平台")
-        self.setGeometry(100, 100, 1200, 800)
         self.setMinimumSize(800, 600)
-        self.module_tab_widget.tab_widget.setCurrentIndex(0)
+        tab_index = int(self._settings.value("layout/last_tab_index", 0))
+        self.module_tab_widget.tab_widget.setCurrentIndex(tab_index)
         self._p("init-ui-complete")
         self._watchdog_last_ts = time.monotonic()
         self._watchdog_timer = QTimer(self)
@@ -1326,6 +1387,10 @@ class MainWindow(QMainWindow):
         self._thread_watermark_timer.setInterval(30000)
         self._thread_watermark_timer.timeout.connect(self._thread_watermark_tick)
         self._thread_watermark_timer.start()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._settings.setValue("geometry", self.saveGeometry())
 
     def _connect_workspace_and_modules(self):
         module_widget = self.module_tab_widget
@@ -1416,18 +1481,20 @@ class MainWindow(QMainWindow):
         now = time.monotonic()
         gap = now - self._watchdog_last_ts
         self._watchdog_last_ts = now
-        # Fix 64: 跳过前 2 次 tick（含初始化和首页加载），避免误报启动耗时
+        # Fix: 跳过前 20 次 tick（约 10 秒），避免误报启动耗时
         if not hasattr(self, "_watchdog_skip_count"):
             self._watchdog_skip_count = 0
-        if self._watchdog_skip_count < 2:
+        if self._watchdog_skip_count < 20:
             self._watchdog_skip_count += 1
             return
         self._watchdog_gap_buffer.append(float(gap))
         if now - self._watchdog_stats_last_emit >= self._watchdog_stats_interval_s:
             self._watchdog_stats_last_emit = now
             self._emit_watchdog_latency_summary()
-        # 正常 500ms 间隔，若 >1.5s 说明主线程被阻塞
-        if gap > 1.5:
+        # 启动阶段跳过更多次 tick，避免误报
+        # Fix: 启动后前 10 秒（约 20 次 tick）不报警
+        # 正常 500ms 间隔，若 >2.0s 说明主线程被阻塞（启动后）
+        if gap > 2.0:
             self._logger.warning("[WATCHDOG] 主线程卡顿 %.1fs （期望≤0.5s）", gap)
 
     @staticmethod
@@ -1552,6 +1619,7 @@ class MainWindow(QMainWindow):
             "数据管理",
             "因子分析",
             "策略管理",
+            "结构监控",
         ]
 
         # 为每个标签页创建占位符
@@ -1749,7 +1817,7 @@ class MainWindow(QMainWindow):
 
     def on_connection_status_clicked(self, event):
         """连接状态标签被点击事件"""
-        print("手动刷新连接状态...")
+        self._emit_runtime_line("手动刷新连接状态...", level="info")
         self._start_connection_check()
 
     def on_service_status_clicked(self, event):
@@ -2207,7 +2275,12 @@ class MainWindow(QMainWindow):
         if line == self._last_backtest_engine_log:
             return
         self._last_backtest_engine_log = line
-        print(line)
+        self._emit_runtime_line(
+            line,
+            level="info",
+            stdout_env="EASYXT_BACKTEST_ENGINE_STDOUT",
+            stdout_default=True,
+        )
 
     def _render_backtest_engine_status(self):
         if not hasattr(self, "backtest_engine_status"):
@@ -2268,15 +2341,16 @@ class MainWindow(QMainWindow):
         level = str(payload.get("level") or "").strip().lower()
         reason = str(payload.get("reason") or "").strip()
         text = f"数据质量告警[{level or 'unknown'}] {stock_code} {period} {reason}".strip()
-        print(f"[DATA_QUALITY_ALERT] {text}")
+        self._emit_runtime_line(f"[DATA_QUALITY_ALERT] {text}", level="warning")
         try:
             if hasattr(self, "status_bar") and self.status_bar is not None:
                 self.status_bar.showMessage(text, 10000)
         except Exception:
             pass
 
-    def _on_bulk_download_progress(self, current=0, total=0, stock_code="",
-                                    period="", status="", **_kw):
+    def _on_bulk_download_progress(
+        self, current=0, total=0, stock_code="", period="", status="", **_kw
+    ):
         """批量下载进度 → 状态栏进度条实时展示。下载完成后自动隐藏。"""
         try:
             bar = getattr(self, "_dl_progress_bar", None)
@@ -2292,10 +2366,13 @@ class MainWindow(QMainWindow):
                 lbl.setVisible(True)
             if current >= total > 0:
                 # 下载完成，3秒后隐藏
-                QTimer.singleShot(3000, lambda: (
-                    bar.setVisible(False),
-                    lbl.setVisible(False),
-                ))
+                QTimer.singleShot(
+                    3000,
+                    lambda: (
+                        bar.setVisible(False),
+                        lbl.setVisible(False),
+                    ),
+                )
         except Exception:
             pass
 
@@ -2303,7 +2380,7 @@ class MainWindow(QMainWindow):
         """数据修复任务排队成功时，在状态栏闪烁提示。"""
         code = str(payload.get("stock_code") or "").strip()
         msg = f"[数据修复] {code} 已加入回填队列" if code else "[数据修复] 修复任务已排队"
-        print(f"[DATA_REPAIRED] {msg}")
+        self._emit_runtime_line(f"[DATA_REPAIRED] {msg}", level="info")
         try:
             if hasattr(self, "status_bar") and self.status_bar is not None:
                 self.status_bar.showMessage(msg, 4000)
@@ -2314,7 +2391,7 @@ class MainWindow(QMainWindow):
         """环境配置保存成功时，在状态栏闪烁提示。"""
         key = str(payload.get("key") or "").strip()
         msg = f"[环境配置] {key} 已写入 .env" if key else "[环境配置] 配置已保存"
-        print(f"[ENV_CONFIG_SAVED] {msg}")
+        self._emit_runtime_line(f"[ENV_CONFIG_SAVED] {msg}", level="info")
         try:
             if hasattr(self, "status_bar") and self.status_bar is not None:
                 self.status_bar.showMessage(msg, 4000)
@@ -2334,7 +2411,12 @@ class MainWindow(QMainWindow):
         if line == self._last_realtime_probe_log:
             return
         self._last_realtime_probe_log = line
-        print(line)
+        self._emit_runtime_line(
+            line,
+            level="info",
+            stdout_env="EASYXT_REALTIME_PIPELINE_STDOUT",
+            stdout_default=False,
+        )
 
     def _render_realtime_pipeline_status(self):
         if not hasattr(self, "realtime_pipeline_status"):
@@ -2723,6 +2805,43 @@ class MainWindow(QMainWindow):
             return "暂无性能数据"
         return "\n".join(lines)
 
+    def _runtime_logger(self):
+        try:
+            logger = object.__getattribute__(self, "__dict__").get("_logger")
+        except Exception:
+            logger = None
+        return logger if logger is not None else logging.getLogger(__name__)
+
+    def _emit_runtime_line(
+        self,
+        line: str,
+        *,
+        level: str = "info",
+        stdout_env: str | None = None,
+        stdout_default: bool = False,
+    ) -> None:
+        logger = self._runtime_logger()
+        log_method = getattr(logger, level, None)
+        if callable(log_method):
+            log_method("%s", line)
+        else:
+            logging.getLogger(__name__).info("%s", line)
+        if stdout_env and _env_truthy(stdout_env, "1" if stdout_default else "0"):
+            print(line)
+
+    def _emit_service_output(self, data: str) -> None:
+        text = str(data or "")
+        if not text:
+            return
+        logger = self._runtime_logger()
+        debug_method = getattr(logger, "debug", None)
+        lines = [line for line in text.splitlines() if line.strip()]
+        if callable(debug_method):
+            for line in lines:
+                debug_method("[SERVICE_STDOUT] %s", line)
+        if _env_truthy("EASYXT_SERVICE_OUTPUT_STDOUT", "0"):
+            print(text, end="")
+
     def update_service_status(self, running: bool):
         if self._service_external_manager and (
             not self.service_process or self.service_process.state() == QProcess.NotRunning
@@ -2843,7 +2962,7 @@ class MainWindow(QMainWindow):
                     "[SERVICE_LOG] 日志恢复，之前抑制 %d 批输出", self._service_log_suppressed
                 )
                 self._service_log_suppressed = 0
-            print(data, end="")
+            self._emit_service_output(data)
 
     def on_service_finished(self):
         self.update_service_status(False)
@@ -3022,6 +3141,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, a0):
         """关闭事件"""
         self._closing = True
+        self._save_layout()
 
         def _stop_child_threads():
             child_threads = []
@@ -3058,7 +3178,9 @@ class MainWindow(QMainWindow):
             self.signal_bus.unsubscribe(Events.DATA_REPAIRED, self._on_data_repaired)
             self.signal_bus.unsubscribe(Events.ENV_CONFIG_SAVED, self._on_env_config_saved)
             if hasattr(Events, "BULK_DOWNLOAD_PROGRESS"):
-                self.signal_bus.unsubscribe(Events.BULK_DOWNLOAD_PROGRESS, self._on_bulk_download_progress)
+                self.signal_bus.unsubscribe(
+                    Events.BULK_DOWNLOAD_PROGRESS, self._on_bulk_download_progress
+                )
         except Exception:
             pass
 

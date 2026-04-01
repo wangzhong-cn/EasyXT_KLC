@@ -62,7 +62,7 @@ class TestInitEnvVarEdgeCases:
     def test_invalid_step6_sample_rate_falls_back_to_1(self, monkeypatch):
         monkeypatch.setenv("EASYXT_STEP6_VALIDATE_SAMPLE_RATE", "bad_value")
         udi = _make_udi()
-        assert udi._step6_validate_sample_rate == 1.0
+        assert udi._step6_validate_sample_rate == 0.05  # 解析失败时回落到内置默认值 0.05
 
     def test_step6_sample_rate_clamped_below_zero(self, monkeypatch):
         monkeypatch.setenv("EASYXT_STEP6_VALIDATE_SAMPLE_RATE", "-0.5")
@@ -1117,6 +1117,64 @@ class TestRunMultiperiodRebuild:
             result = udi.run_multiperiod_rebuild("000001.SZ", "2024-01-01", "2024-01-31", periods=["1w"])
             assert result["ok"] is True
             assert builder.cross_validate.called
+            build_kwargs = builder.build_natural_calendar_bars.call_args.kwargs
+            assert build_kwargs["period_code"] == "1W"
+            assert build_kwargs["period_family"] == "natural_calendar"
+            assert build_kwargs["threshold_version"] == "2026.04.01"
+            receipt_kwargs = udi._write_rebuild_receipt.call_args.kwargs
+            assert receipt_kwargs["session_profile_id"] == "CN_A"
+            assert receipt_kwargs["period_registry_version"] == "2026.04.01"
+            assert receipt_kwargs["threshold_registry_version"] == "2026.04.01"
+            assert receipt_kwargs["period_metadata"]["1w"] == {
+                "period_code": "1W",
+                "period_family": "natural_calendar",
+                "threshold_version": "2026.04.01",
+            }
+        finally:
+            udi.con.close()
+
+    def test_write_rebuild_receipt_includes_governance_metadata(self):
+        udi = _make_udi_with_tables()
+        try:
+            with patch("pathlib.Path.mkdir"), patch("pathlib.Path.write_text"):
+                payload = udi._write_rebuild_receipt(
+                    rebuild_id="rid-1",
+                    stock_code="000001.SZ",
+                    start_date="2024-01-01",
+                    end_date="2024-01-31",
+                    target_periods=["1w"],
+                    persisted_periods=["1d"],
+                    row_stats={"1w": 4},
+                    status="success",
+                    error_message="",
+                    session_profile_id="CN_A",
+                    session_profile_version="2026.04.01",
+                    auction_policy="merged_open_auction",
+                    period_registry_version="2026.04.01",
+                    threshold_registry_version="2026.04.01",
+                    period_metadata={
+                        "1w": {
+                            "period_code": "1W",
+                            "period_family": "natural_calendar",
+                            "threshold_version": "2026.04.01",
+                        }
+                    },
+                )
+            assert payload["receipt_hash"]
+            assert payload["governance"] == {
+                "session_profile_id": "CN_A",
+                "session_profile_version": "2026.04.01",
+                "auction_policy": "merged_open_auction",
+                "period_registry_version": "2026.04.01",
+                "threshold_registry_version": "2026.04.01",
+                "period_metadata": {
+                    "1w": {
+                        "period_code": "1W",
+                        "period_family": "natural_calendar",
+                        "threshold_version": "2026.04.01",
+                    }
+                },
+            }
         finally:
             udi.con.close()
 

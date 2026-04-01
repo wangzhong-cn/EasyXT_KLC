@@ -11,6 +11,7 @@
 """
 
 from datetime import date, timedelta
+import logging
 import os
 import threading
 from typing import Optional
@@ -18,10 +19,22 @@ from typing import Optional
 import pandas as pd
 
 
+log = logging.getLogger(__name__)
+
+
 # ── 模块级单例：TradingCalendar 初始化（_load_holidays n=11000迭代 + 可能触发网络调用）
 # 代价昂贵，进程内只应创建一次。使用双检锁 + 模块级引用实现惰性单例。
 _TRADING_CALENDAR_SINGLETON: "TradingCalendar | None" = None
 _TRADING_CALENDAR_LOCK = threading.Lock()
+
+
+def _stdout_enabled_by_default() -> bool:
+    return str(os.environ.get("EASYXT_SMART_DETECTOR_STDOUT", "0")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def get_trading_calendar() -> "TradingCalendar":
@@ -320,7 +333,7 @@ class SmartDataDetector:
     3. 支持断点续传
     """
 
-    def __init__(self, duckdb_path: Optional[str] = None):
+    def __init__(self, duckdb_path: Optional[str] = None, *, verbose: bool | None = None):
         """
         初始化检测器
 
@@ -329,10 +342,22 @@ class SmartDataDetector:
         """
         from data_manager.duckdb_connection_pool import resolve_duckdb_path
 
+        self._logger = logging.getLogger(__name__)
+        self._stdout_enabled = _stdout_enabled_by_default() if verbose is None else bool(verbose)
         self.duckdb_path = resolve_duckdb_path(duckdb_path)
         self.con = None
         self._manager = None
         self.calendar = TradingCalendar()
+
+    def _emit(self, message: str, *, level: str = 'info', force_stdout: bool = False) -> None:
+        logger = getattr(self, '_logger', log)
+        log_method = getattr(logger, level, None)
+        if callable(log_method):
+            log_method('%s', message)
+        else:
+            logger.info('%s', message)
+        if force_stdout or getattr(self, '_stdout_enabled', _stdout_enabled_by_default()):
+            print(message)
 
     def connect(self):
         """连接数据库"""
@@ -345,7 +370,7 @@ class SmartDataDetector:
             self.con = True  # 连接成功标志
             return True
         except Exception as e:
-            print(f"[ERROR] 数据库连接失败: {e}")
+            self._emit(f"[ERROR] 数据库连接失败: {e}", level='warning')
             self._manager = None
             return False
 
@@ -380,18 +405,18 @@ class SmartDataDetector:
             }
         """
         if not self.con:
-            print("[ERROR] 请先连接数据库")
+            self._emit("[ERROR] 请先连接数据库", level='warning')
             return {}
 
         start_ts = pd.to_datetime(start_date, errors='coerce')
         end_ts = pd.to_datetime(end_date, errors='coerce')
         if pd.isna(start_ts) or pd.isna(end_ts):
-            print(f"[ERROR] 日期格式无效: {start_date} ~ {end_date}")
+            self._emit(f"[ERROR] 日期格式无效: {start_date} ~ {end_date}", level='warning')
             return {}
         start = start_ts.date()
         end = end_ts.date()
         if start > end:
-            print(f"[ERROR] 起始日期晚于结束日期: {start_date} ~ {end_date}")
+            self._emit(f"[ERROR] 起始日期晚于结束日期: {start_date} ~ {end_date}", level='warning')
             return {}
 
         # 1. 查询现有数据
@@ -406,7 +431,7 @@ class SmartDataDetector:
 
         try:
             if self._manager is None:
-                print("[ERROR] 请先连接数据库")
+                self._emit("[ERROR] 请先连接数据库", level='warning')
                 return {}
             with self._manager.get_read_connection() as con:
                 df_existing = con.execute(query, [stock_code, start_date, end_date]).df()
@@ -418,7 +443,7 @@ class SmartDataDetector:
                 existing_dates = existing_series[existing_series.notna()].dt.date.tolist()
 
         except Exception as e:
-            print(f"[ERROR] 查询失败: {e}")
+            self._emit(f"[ERROR] 查询失败: {e}", level='warning')
             return {}
 
         # 2. 计算应该有的交易日
@@ -564,6 +589,41 @@ class SmartDataDetector:
 
         return plan
 
+    def format_missing_report(self, report: dict) -> str:
+        """格式化缺失数据报告文本。"""
+        lines = []
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append(f"数据缺失报告: {report['stock_code']}")
+        lines.append("=" * 60)
+        lines.append(f"检查范围: {report['check_range'][0]} ~ {report['check_range'][1]}")
+        lines.append(f"应有交易日: {report['expected_trading_days']} 天")
+        lines.append("")
+
+        existing = report['existing_data']
+        lines.append("现有数据:")
+        if existing['count'] > 0:
+            lines.append(f"  数据量: {existing['count']} 条")
+            lines.append(f"  日期范围: {existing['first_date']} ~ {existing['last_date']}")
+        else:
+            lines.append("  无数据")
+        lines.append("")
+
+        missing = report['missing_trading_days']
+        lines.append(f"缺失交易日: {len(missing)} 天")
+        lines.append(f"数据完整度: {report['completeness_ratio']*100:.2f}%")
+        lines.append("")
+
+        if report['missing_segments']:
+            lines.append("缺失数据段:")
+            for i, segment in enumerate(report['missing_segments'], 1):
+                lines.append(f"  段 {i}: {segment['start']} ~ {segment['end']} ({segment['days']} 天)")
+        else:
+            lines.append("  数据完整，无缺失")
+
+        lines.append("=" * 60)
+        return "\n".join(lines)
+
     def print_missing_report(self, report: dict):
         """
         打印缺失数据报告
@@ -571,38 +631,7 @@ class SmartDataDetector:
         Args:
             report: 缺失数据报告
         """
-        print()
-        print("=" * 60)
-        print(f"数据缺失报告: {report['stock_code']}")
-        print("=" * 60)
-        print(f"检查范围: {report['check_range'][0]} ~ {report['check_range'][1]}")
-        print(f"应有交易日: {report['expected_trading_days']} 天")
-        print()
-
-        # 现有数据
-        existing = report['existing_data']
-        print("现有数据:")
-        if existing['count'] > 0:
-            print(f"  数据量: {existing['count']} 条")
-            print(f"  日期范围: {existing['first_date']} ~ {existing['last_date']}")
-        else:
-            print("  无数据")
-        print()
-
-        # 缺失数据
-        missing = report['missing_trading_days']
-        print(f"缺失交易日: {len(missing)} 天")
-        print(f"数据完整度: {report['completeness_ratio']*100:.2f}%")
-        print()
-
-        if report['missing_segments']:
-            print("缺失数据段:")
-            for i, segment in enumerate(report['missing_segments'], 1):
-                print(f"  段 {i}: {segment['start']} ~ {segment['end']} ({segment['days']} 天)")
-        else:
-            print("  数据完整，无缺失")
-
-        print("=" * 60)
+        self._emit(self.format_missing_report(report), force_stdout=True)
 
     def close(self):
         """关闭数据库连接"""
@@ -610,44 +639,51 @@ class SmartDataDetector:
         self._manager = None
 
 
-def test_smart_detection():
+def test_smart_detection(verbose: bool = True):
     """测试智能缺失检测功能"""
-    print("=" * 60)
-    print("智能数据缺失检测测试")
-    print("=" * 60)
-    print()
+    logger = logging.getLogger(__name__)
+
+    def _emit(message: str = "") -> None:
+        logger.info('%s', message)
+        if verbose:
+            print(message)
+
+    _emit("=" * 60)
+    _emit("智能数据缺失检测测试")
+    _emit("=" * 60)
+    _emit()
 
     # 创建检测器
-    detector = SmartDataDetector()
+    detector = SmartDataDetector(verbose=verbose)
 
     if not detector.connect():
-        print("[ERROR] 无法连接数据库")
+        _emit("[ERROR] 无法连接数据库")
         return
 
     # 测试单个股票
-    print("[1] 检测 511380.SH 数据缺失...")
+    _emit("[1] 检测 511380.SH 数据缺失...")
     report = detector.detect_missing_data('511380.SH', '2024-01-01', '2025-01-31')
     detector.print_missing_report(report)
 
     # 测试批量检测
-    print()
-    print("[2] 批量检测...")
+    _emit()
+    _emit("[2] 批量检测...")
     stock_codes = ['511380.SH', '511880.SH', '511010.SH']
     plan = detector.get_download_plan(stock_codes, '2024-01-01', '2025-01-31')
 
-    print(f"总标的数: {plan['total_stocks']}")
-    print(f"有缺失的标的: {plan['stocks_with_missing_data']}")
-    print(f"总缺失天数: {plan['total_missing_days']}")
-    print()
+    _emit(f"总标的数: {plan['total_stocks']}")
+    _emit(f"有缺失的标的: {plan['stocks_with_missing_data']}")
+    _emit(f"总缺失天数: {plan['total_missing_days']}")
+    _emit()
 
     # 打印下载任务
-    print("下载任务:")
+    _emit("下载任务:")
     for task in plan['download_tasks']:
-        print(f"  {task['stock_code']}: {len(task['segments'])} 个缺失段")
+        _emit(f"  {task['stock_code']}: {len(task['segments'])} 个缺失段")
 
     detector.close()
-    print()
-    print("[OK] 测试完成")
+    _emit()
+    _emit("[OK] 测试完成")
 
 
 if __name__ == "__main__":

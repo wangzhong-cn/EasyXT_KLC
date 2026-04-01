@@ -71,17 +71,58 @@ try:
     # 注意：FigureCanvasQTAgg 实际上需要 Agg 后端
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
+    from matplotlib import font_manager
     import matplotlib.pyplot as plt
     backend_qt5agg = importlib.import_module("matplotlib.backends.backend_qt5agg")
     FigureCanvas = getattr(backend_qt5agg, "FigureCanvasQTAgg")
     from matplotlib.figure import Figure
-
-    plt.rcParams["font.sans-serif"] = ["SimHei"]  # 支持中文
-    plt.rcParams["axes.unicode_minus"] = False
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
     print("[WARNING] matplotlib未安装，净值曲线将显示为占位符")
+
+_MPL_CJK_FONT_CANDIDATES = [
+    "Microsoft YaHei",
+    "SimHei",
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "WenQuanYi Zen Hei",
+    "Arial Unicode MS",
+    "DejaVu Sans",
+]
+
+
+def _matplotlib_font_candidates(preferred: Optional[str] = None) -> list[str]:
+    preferred_name = str(preferred or "").strip()
+    fonts: list[str] = []
+    if preferred_name in _MPL_CJK_FONT_CANDIDATES:
+        fonts.append(preferred_name)
+    fonts.extend(_MPL_CJK_FONT_CANDIDATES)
+    if preferred_name and preferred_name not in fonts:
+        fonts.append(preferred_name)
+    return list(dict.fromkeys(fonts))
+
+
+def _configure_matplotlib_fonts(preferred: Optional[str] = None) -> str:
+    font_candidates = _matplotlib_font_candidates(preferred)
+    primary_font = "DejaVu Sans"
+    if MATPLOTLIB_AVAILABLE:
+        for font_name in font_candidates:
+            try:
+                font_manager.findfont(font_name, fallback_to_default=False)
+                primary_font = font_name
+                break
+            except Exception:
+                continue
+        ordered_fonts = [primary_font] + [f for f in font_candidates if f != primary_font]
+        plt.rcParams["font.family"] = ["sans-serif"]
+        plt.rcParams["font.sans-serif"] = ordered_fonts
+        plt.rcParams["axes.unicode_minus"] = False
+    return primary_font
+
+
+if MATPLOTLIB_AVAILABLE:
+    _configure_matplotlib_fonts()
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 AdvancedBacktestEngineType: Optional[type[Any]] = None
@@ -1126,7 +1167,7 @@ class PortfolioChart(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._font_family = QFont().family()
+        self._font_family = _configure_matplotlib_fonts(QFont().family())
         self._font_size = max(9, QFont().pointSize())
         palette_color = self.palette().window().color()
         self._bg_color = palette_color.name()
@@ -1157,7 +1198,7 @@ class PortfolioChart(QWidget):
         layout = QVBoxLayout(self)
 
         if MATPLOTLIB_AVAILABLE:
-            plt.rcParams["font.sans-serif"] = [self._font_family]
+            _configure_matplotlib_fonts(self._font_family)
             plt.rcParams["axes.unicode_minus"] = False
             plt.rcParams["font.size"] = self._font_size
             # 创建matplotlib图表

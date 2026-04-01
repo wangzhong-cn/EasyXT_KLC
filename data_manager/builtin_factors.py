@@ -67,7 +67,7 @@ def _momentum_60d(df: pd.DataFrame) -> pd.Series:
 
 def _roc_10d(df: pd.DataFrame) -> pd.Series:
     """10 日涨跌幅（Rate of Change）"""
-    return df["close"].pct_change(10)
+    return df["close"].pct_change(periods=10, fill_method=None)
 
 
 # ---------------------------------------------------------------------------
@@ -76,13 +76,13 @@ def _roc_10d(df: pd.DataFrame) -> pd.Series:
 
 def _volatility_20d(df: pd.DataFrame) -> pd.Series:
     """20 日已实现波动率（日收益率标准差）"""
-    ret = df["close"].pct_change()
+    ret = df["close"].pct_change(fill_method=None)
     return _rolling_std(ret, 20)
 
 
 def _volatility_60d(df: pd.DataFrame) -> pd.Series:
     """60 日已实现波动率"""
-    ret = df["close"].pct_change()
+    ret = df["close"].pct_change(fill_method=None)
     return _rolling_std(ret, 60)
 
 

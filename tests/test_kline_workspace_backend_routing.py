@@ -6,7 +6,7 @@ import pandas as pd
 
 from core.events import Events
 from gui_app.widgets.chart.chart_adapter import KLineChartAdapter
-from gui_app.widgets.kline_chart_workspace import KLineChartWorkspace
+from gui_app.widgets.kline_chart_workspace import KLineChartWorkspace, _ChartDataLoadThread
 
 
 def test_create_chart_widget_routes_to_kline(monkeypatch) -> None:
@@ -242,3 +242,62 @@ def test_watchlist_page_button_sync_state() -> None:
     )
     KLineChartWorkspace._sync_watchlist_page_btn_state(ws, 2)
     assert ws.watchlist_page_btn.checked is True
+
+
+def test_chart_data_loader_uses_local_preview_as_final_fallback(monkeypatch) -> None:
+    preview_df = pd.DataFrame(
+        {
+            "open": [10.0, 10.2, 10.4, 10.6, 10.8],
+            "high": [10.3, 10.5, 10.7, 10.9, 11.1],
+            "low": [9.9, 10.1, 10.3, 10.5, 10.7],
+            "close": [10.1, 10.3, 10.5, 10.7, 10.9],
+            "volume": [100, 120, 130, 140, 150],
+        },
+        index=pd.date_range("2024-01-01", periods=5, freq="D", name="date"),
+    )
+
+    class _FakeIface:
+        def __init__(self, *args, **kwargs):
+            self.con = object()
+
+        def connect(self, read_only=False):
+            return None
+
+        def get_stock_data_local(self, **kwargs):
+            return preview_df.copy()
+
+        def get_stock_data(self, **kwargs):
+            return pd.DataFrame()
+
+        def get_ingestion_status(self, **kwargs):
+            return pd.DataFrame()
+
+        def close(self):
+            return None
+
+    fake_module = cast(Any, type("_M", (), {"UnifiedDataInterface": _FakeIface}))
+    monkeypatch.setattr(
+        "gui_app.widgets.kline_chart_workspace.importlib.import_module",
+        lambda _name: fake_module,
+    )
+
+    loader = _ChartDataLoadThread(
+        duckdb_path="d:/EasyXT_KLC/data/market_data.duckdb",
+        symbol="002460.SZ",
+        start_date="2024-01-01",
+        end_date="2024-01-05",
+        period="1d",
+        adjust="none",
+        max_bars=0,
+        mode="replace",
+    )
+    emitted: list[dict] = []
+    loader.data_ready.connect(lambda payload: emitted.append(payload))
+
+    loader.run()
+
+    assert len(emitted) >= 2
+    assert emitted[0]["ingestion_status"] == "local_preview"
+    assert not emitted[0]["data"].empty
+    assert emitted[-1]["ingestion_status"] == "local_preview_fallback"
+    assert not emitted[-1]["data"].empty

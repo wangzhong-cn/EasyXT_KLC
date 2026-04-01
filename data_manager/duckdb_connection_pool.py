@@ -526,6 +526,7 @@ class DuckDBConnectionManager:
             db_path = getattr(self, 'duckdb_path', ':memory:')
             wal_path = f"{db_path}.wal"
             if db_path != ':memory:' and os.path.exists(db_path):
+                allow_wal_cleanup = True
                 try:
                     _exit_con = duckdb.connect(db_path, read_only=False)
                     try:
@@ -534,24 +535,31 @@ class DuckDBConnectionManager:
                         _exit_con.close()
                     log.debug("进程退出 direct-checkpoint 完成: %s", db_path)
                 except Exception as e:
-                    log.warning("进程退出 direct-checkpoint 失败 (fallback to safe_checkpoint): %s", e)
-                    # 连接失败时（如另一进程仍锁文件）回退到原路径
-                    try:
-                        self._safe_checkpoint("process_exit_fallback")
-                    except Exception:
-                        pass
+                    if self._is_lock_error(e):
+                        allow_wal_cleanup = False
+                        log.debug("进程退出 direct-checkpoint 跳过：数据库仍被占用: %s", e)
+                    else:
+                        log.warning("进程退出 direct-checkpoint 失败 (fallback to safe_checkpoint): %s", e)
+                        # 连接失败时（如另一进程仍锁文件）回退到原路径
+                        try:
+                            self._safe_checkpoint("process_exit_fallback")
+                        except Exception:
+                            pass
                 # Fix 9b: 无论 checkpoint 是否成功，主动删除 WAL 文件，防止下次启动时
                 # "failure while replaying wal file"。
                 # 原因：terminate() 强杀的线程留有孤立 DuckDB 连接（未提交事务），
                 # checkpoint 无法清理这些残留，WAL 下次启动时回放失败。
                 # checkpoint 已将已提交数据写入主文件；WAL 中的孤立事务残留无法恢复，
                 # 等价于启动自愈（_repair_wal_if_needed）的提前版本，避免启动时报齐错误。
-                if os.path.exists(wal_path):
+                if allow_wal_cleanup and os.path.exists(wal_path):
                     try:
                         os.remove(wal_path)
                         log.debug("进程退出时清理 WAL 文件: %s", wal_path)
                     except Exception as _wal_err:
-                        log.warning("进程退出时清理 WAL 失败: %s", _wal_err)
+                        if self._is_lock_error(_wal_err):
+                            log.debug("进程退出时跳过 WAL 清理：文件仍被占用: %s", _wal_err)
+                        else:
+                            log.warning("进程退出时清理 WAL 失败: %s", _wal_err)
         except Exception as e:
             log.warning("进程退出checkpoint失败: %s", e)
 

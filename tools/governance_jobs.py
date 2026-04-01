@@ -643,16 +643,53 @@ def _run_batch_multiperiod_rebuild(
 def _validate_rebuild_receipt(payload: dict[str, object]) -> dict[str, object]:
     receipt = payload.get("audit_receipt") if isinstance(payload, dict) else {}
     receipt = receipt if isinstance(receipt, dict) else {}
+    governance = receipt.get("governance") if isinstance(receipt.get("governance"), dict) else {}
+    governance = governance if isinstance(governance, dict) else {}
+    period_metadata = (
+        governance.get("period_metadata") if isinstance(governance.get("period_metadata"), dict) else {}
+    )
+    period_metadata = period_metadata if isinstance(period_metadata, dict) else {}
     rebuild_id = str(payload.get("rebuild_id") or "")
     ok = bool(payload.get("ok", False))
     status = str(receipt.get("status") or "")
     receipt_hash = str(receipt.get("receipt_hash") or "")
-    valid = bool(rebuild_id) and ok and status == "success" and bool(receipt_hash)
+    required_governance_fields = (
+        "session_profile_id",
+        "session_profile_version",
+        "auction_policy",
+        "period_registry_version",
+        "threshold_registry_version",
+        "period_metadata",
+    )
+    missing_governance_fields = [
+        field
+        for field in required_governance_fields
+        if (
+            field == "period_metadata" and not period_metadata
+        )
+        or (
+            field != "period_metadata" and not str(governance.get(field) or "").strip()
+        )
+    ]
+    target_periods = receipt.get("target_periods") if isinstance(receipt.get("target_periods"), list) else []
+    target_periods = [str(item).strip() for item in target_periods if str(item).strip()]
+    missing_period_metadata_periods = [
+        period for period in target_periods if period not in period_metadata
+    ]
+    governance_valid = not missing_governance_fields and not missing_period_metadata_periods
+    valid = bool(rebuild_id) and ok and status == "success" and bool(receipt_hash) and governance_valid
     return {
         "valid": valid,
         "rebuild_id": rebuild_id,
         "status": status,
         "receipt_hash": receipt_hash,
+        "governance_valid": governance_valid,
+        "missing_governance_fields": missing_governance_fields,
+        "missing_period_metadata_periods": missing_period_metadata_periods,
+        "session_profile_id": str(governance.get("session_profile_id") or ""),
+        "session_profile_version": str(governance.get("session_profile_version") or ""),
+        "period_registry_version": str(governance.get("period_registry_version") or ""),
+        "threshold_registry_version": str(governance.get("threshold_registry_version") or ""),
     }
 
 

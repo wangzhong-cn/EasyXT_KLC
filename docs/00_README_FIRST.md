@@ -2,8 +2,8 @@
 
 > 📚 完整的量化交易平台文档体系
 
-**最后更新**: 2026-02-23  
-**版本**: v3.0 (重构规划版)  
+**最后更新**: 2026-04-02
+**版本**: v3.3 (评估校准版)
 **仓库**: https://gitee.com/TradersTV/easy-xt_-klc
 
 ---
@@ -18,32 +18,53 @@
 | [模块说明](02_modules_overview.md) | 三大核心模块详解 | 所有用户 |
 | [迁移指南](03_migration_guide.md) | 从旧版到新版迁移 | 老用户 |
 | [开发规范](04_development_standards.md) | 代码开发和贡献规范 | 开发者 |
+| [Tauri 增量替换蓝图](05_tauri_incremental_replacement_blueprint.md) | 当前默认执行路线 | 开发者、架构师 |
+| [双引擎状态契约](06_dual_engine_state_contract.md) | SQLite/DuckDB 边界与同步协议 | 开发者、架构师 |
+| [gui_app Legacy Freeze](08_gui_app_legacy_freeze.md) | 旧 Qt 壳冻结与退役规则 | 开发者、架构师 |
+| [前端参考图纸总览](09_frontend_reference_atlas.md) | 参考截图沉淀出的布局与组件模板 | 开发者、设计师 |
+| [Chart Facade v2 草案](10_chart_facade_v2_draft.md) | 图表统一接口与升级闸门 | 开发者、架构师 |
+| [状态主线备份恢复协议](11_state_backup_restore_protocol.md) | SQLite 主状态的 backup/restore/verify 约束 | 开发者、架构师 |
+| [DuckDB 联邦读层 Planner](12_duckdb_federation_read_planner.md) | shard pruning / attach budget / union SQL 规划 | 开发者、架构师 |
+| [Qt / PyQt5 退役执行清单](16_qt_pyqt5_retirement_execution_checklist.md) | Qt 退出主线后的预算护栏、替代优先级与下线条件 | 开发者、架构师 |
+| [gui_app 替代清单与首批迁移 Backlog](17_gui_app_replacement_inventory.md) | 关键 Qt 模块盘点、替代落点与首批 backlog | 开发者、架构师 |
+| [周期 Canonical 契约](18_period_canonical_contract.md) | Tick / 1m / 1d / 派生周期的系统宪法 | 开发者、架构师 |
+| [周期 Canonical 实现蓝图](19_period_canonical_implementation_blueprint.md) | 契约到实现的阶段化落地路径 | 开发者、架构师 |
+| [周期事实与快照目标数据模型](20_period_fact_schema_and_storage_model.md) | 未来因子库 / 结构库 / 回执库的总表设计 | 开发者、架构师 |
+| [EasyXT_KLC 项目全面优化报告（最终全量版）](21_easyxt_klc_final_full_report_2026-04-01.md) | 综合前期审查、当前推进、纠正说明与后续路线图 | 开发者、架构师、管理者 |
+| [EasyXT_KLC 全量评估与行动指南 v2.0](22_easyxt_klc_full_assessment_2026-04-02.md) | 阶段性评估版：制度层落地确认、实测验证与首版优先级路线图 | 开发者、架构师、管理者 |
+| [EasyXT_KLC 全量评估与行动指南 v2.1（校准版）](23_easyxt_klc_full_assessment_calibrated_2026-04-02.md) | 当前推荐阅读：校准七层母本、代码规模、测试口径与残留问题基线 | 开发者、架构师、管理者 |
 
-### 📦 核心模块文档
+### 🧭 当前治理状态
 
-| 模块 | 文档 | 状态 |
-|------|------|------|
-| **交易管理模块** | [交易管理文档](modules/trading_module.md) | ✅ 规划完成 |
-| **数据管理模块** | [数据管理文档](modules/data_module.md) | ✅ 规划完成 |
-| **策略管理模块** | [策略管理文档](modules/strategy_module.md) | ✅ 规划完成 |
+- [文档治理矩阵](13_docs_governance_matrix.md)：当前 docs 保留 / 合并 / 归档 / 删除候选清单（✅ 当前基线）
+- [ADR-0002：Qt 主线退役与迁移预算重分配](adr/ADR-0002-Qt主线退役与迁移预算重分配.md)：正式决议 Qt 退出主线投资（✅ 已接受）
+- [docs/archive/README](archive/README.md)：历史文档归档区说明（✅ 已建立）
 
-### 🔧 技术文档
+### 🧱 当前主线专题文档
 
-| 文档 | 描述 |
-|------|------|
-| [API 参考](technical/api_reference.md) | 完整 API 接口文档 |
-| [数据库设计](technical/database_design.md) | DuckDB 数据库设计 |
-| [UI 设计规范](technical/ui_design_standards.md) | 界面设计规范 |
-| [性能优化指南](technical/performance_optimization.md) | 性能优化最佳实践 |
+- **前端替换主线**： [Tauri 增量替换蓝图](05_tauri_incremental_replacement_blueprint.md)（✅ 当前默认路线）
+- **状态主线契约**： [双引擎状态契约](06_dual_engine_state_contract.md)（✅ 当前权威）
+- **旧壳冻结规则**： [gui_app Legacy Freeze](08_gui_app_legacy_freeze.md)（✅ 已生效）
+- **Qt 退役执行面板**： [Qt / PyQt5 退役执行清单](16_qt_pyqt5_retirement_execution_checklist.md)（✅ 立即执行）
+- **gui_app 替代靶单**： [gui_app 替代清单与首批迁移 Backlog](17_gui_app_replacement_inventory.md)（✅ 初版建立）
+- **前端参考图纸**： [前端参考图纸总览](09_frontend_reference_atlas.md)（✅ 当前参考）
+- **状态恢复底线**： [状态主线备份恢复协议](11_state_backup_restore_protocol.md)（✅ 已落地）
+- **联邦读层**： [DuckDB 联邦读层 Planner](12_duckdb_federation_read_planner.md)（✅ planner + executor）
+- **周期系统宪法**： [周期 Canonical 契约](18_period_canonical_contract.md)（✅ 已建立）
+- **周期实施蓝图**： [周期 Canonical 实现蓝图](19_period_canonical_implementation_blueprint.md)（✅ 已建立）
+- **目标数据模型**： [周期事实与快照目标数据模型](20_period_fact_schema_and_storage_model.md)（✅ 当前数据层总表）
+- **项目总报告**： [EasyXT_KLC 项目全面优化报告（最终全量版）](21_easyxt_klc_final_full_report_2026-04-01.md)（✅ 综合结论与路线图）
+- **全量评估v2.0**： [EasyXT_KLC 全量评估与行动指南 v2.0](22_easyxt_klc_full_assessment_2026-04-02.md)（📌 历史阶段性评估快照）
+- **全量评估v2.1（校准版）**： [EasyXT_KLC 全量评估与行动指南 v2.1（校准版）](23_easyxt_klc_full_assessment_calibrated_2026-04-02.md)（✅ 当前推荐阅读：最新证据口径）
 
-### 📚 用户手册
+### 🛡️ 质量与治理文档
 
-| 文档 | 描述 |
-|------|------|
-| [安装指南](user_manual/installation.md) | 安装和配置指南 |
-| [快速入门](user_manual/quickstart.md) | 5 分钟快速上手 |
-| [使用教程](user_manual/tutorial.md) | 详细使用教程 |
-| [常见问题](user_manual/faq.md) | FAQ 和问题排查 |
+- [开发规范](04_development_standards.md)：日常编码、类型、测试与提交流程
+- [项目开发红线](DEVELOPMENT_RULES.md)：兼容入口页，已统一指向根目录 `development_rules.md`
+- [P0 门禁清单](p0_gate_checklist.md)：当前稳定性与放行门槛
+- [稳定性回归门禁](stability_regression_gate.md)：回归套件分组与执行口径
+- [数据基础设施 SLO/SLI](data_infra_slo_sli_spec.md)：质量治理模板与指标字典
+- [数据血缘规范](lineage_spec.md)：lineage 字段与数据主路径规范
 
 ---
 
@@ -57,9 +78,10 @@ D:\EasyXT_KLC\
 │   ├── 02_modules_overview.md     # 模块概览
 │   ├── 03_migration_guide.md      # 迁移指南
 │   ├── 04_development_standards.md # 开发规范
-│   ├── modules/                   # 模块文档
-│   ├── technical/                 # 技术文档
-│   └── user_manual/               # 用户手册
+│   ├── adr/                       # 架构决策记录
+│   ├── archive/                   # 历史归档区（治理中）
+│   ├── assets/                    # 参考图纸与原始资产目录说明
+│   └── drill_reports/             # 演练记录 / open incidents
 │
 ├── gui_app/                        # 🖥️ GUI 应用（保留）
 │   ├── main_window.py             # 主窗口（保留）
@@ -149,7 +171,7 @@ D:\EasyXT_KLC\
 ## 🔗 相关链接
 
 - **Gitee 仓库**: https://gitee.com/TradersTV/easy-xt_-klc
-- **GitHub 仓库**: https://github.com/quant-king299/EasyXT
+- **GitHub 仓库**: https://github.com/wangzhong-cn/EasyXT_KLC
 - **知识星球**: quant-king299
 - **官方网站**: ptqmt.com
 
@@ -168,8 +190,8 @@ D:\EasyXT_KLC\
 
 欢迎通过以下方式反馈：
 
-- 📧 Email: quant-king299@proton.me
-- 💬 知识星球：quant-king299
+- 📧 Email: wan_zhon@foxmail.com
+- 💬 知识星球：
 - 🐛 Issue: Gitee Issue 追踪
 
 ---
@@ -190,30 +212,39 @@ D:\EasyXT_KLC\
 
 ---
 
-**EasyXT 量化交易平台**  
+**EasyXT 量化交易平台**
 *让量化交易更简单，让策略开发更高效*
 
 ---
 
 ## 📚 文档阅读顺序建议
 
-### 第一次使用
+### 第一次进入仓库
 
-1. 📖 [快速入门](user_manual/quickstart.md) - 5 分钟上手
-2. 📖 [安装指南](user_manual/installation.md) - 安装和配置
-3. 📖 [使用教程](user_manual/tutorial.md) - 详细教程
+1. 📖 [文档治理矩阵](13_docs_governance_matrix.md) - 了解当前 canonical 文档边界
+2. 📖 [架构设计](01_architecture_design.md) - 看清总线与当前默认路线
+3. 📖 [Tauri 增量替换蓝图](05_tauri_incremental_replacement_blueprint.md) - 进入实际执行主线
 
 ### 开发者
 
 1. 📖 [架构设计](01_architecture_design.md) - 了解整体架构
-2. 📖 [开发规范](04_development_standards.md) - 代码规范
-3. 📖 [API 参考](technical/api_reference.md) - 接口文档
+2. 📖 [Tauri 增量替换蓝图](05_tauri_incremental_replacement_blueprint.md) - 当前默认执行路线
+3. 📖 [双引擎状态契约](06_dual_engine_state_contract.md) - 明确 SQLite/DuckDB 权责边界
+4. 📖 [gui_app Legacy Freeze](08_gui_app_legacy_freeze.md) - 旧壳收口规则
+5. 📖 [Qt / PyQt5 退役执行清单](16_qt_pyqt5_retirement_execution_checklist.md) - 预算护栏与退役步骤
+6. 📖 [前端参考图纸总览](09_frontend_reference_atlas.md) - 新前端目标态模板
+7. 📖 [Chart Facade v2 草案](10_chart_facade_v2_draft.md) - 图表统一接口草案
+8. 📖 [状态主线备份恢复协议](11_state_backup_restore_protocol.md) - 恢复底线与 verify 协议
+9. 📖 [DuckDB 联邦读层 Planner](12_duckdb_federation_read_planner.md) - 联邦读层第一版执行边界
+10. 📖 [gui_app 替代清单与首批迁移 Backlog](17_gui_app_replacement_inventory.md) - 具体迁移对象与优先级
+11. 📖 [开发规范](04_development_standards.md) - 代码规范
 
 ### 老用户迁移
 
 1. 📖 [迁移指南](03_migration_guide.md) - 迁移步骤
-2. 📖 [模块说明](02_modules_overview.md) - 新功能说明
-3. 📖 [常见问题](user_manual/faq.md) - 问题排查
+2. 📖 [Tauri 增量替换蓝图](05_tauri_incremental_replacement_blueprint.md) - 新默认路线
+3. 📖 [双引擎状态契约](06_dual_engine_state_contract.md) - 数据层约束
+4. 📖 [状态主线备份恢复协议](11_state_backup_restore_protocol.md) - 备份/恢复/校验底线
 
 ---
 

@@ -276,7 +276,7 @@ class DataContractValidator:
             try:
                 close_series = df[c].dropna()
                 if len(close_series) > 1:
-                    pct_chg = close_series.pct_change().abs()
+                    pct_chg = close_series.pct_change(fill_method=None).abs()
                     mask = pct_chg > velocity_limit
                     velocity_violation_count = int(mask.sum())
                     velocity_violation_pct = velocity_violation_count / len(close_series)

@@ -133,13 +133,19 @@ class RiskAnalyzer:
         except Exception:
             return 0.0
 
+    def _safe_sample_std(self, values: np.ndarray) -> float:
+        """对小样本安全计算样本标准差，避免 ddof=1 触发 RuntimeWarning。"""
+        if values.size < 2:
+            return 0.0
+        return float(np.std(values, ddof=1))
+
     def _calculate_volatility(self, returns: list[float], periods_per_year: int = 252) -> float:
         """计算年化波动率"""
         if len(returns) < 2:
             return 0.0
 
         returns_array = np.array(returns)
-        daily_vol = np.std(returns_array, ddof=1)
+        daily_vol = self._safe_sample_std(returns_array)
         annualized_vol = daily_vol * np.sqrt(periods_per_year)
 
         return annualized_vol
@@ -246,7 +252,7 @@ class RiskAnalyzer:
         # 计算下行波动率
         negative_returns = returns_array[returns_array < 0]
         if len(negative_returns) > 0:
-            downside_deviation = np.std(negative_returns, ddof=1) * np.sqrt(252)
+            downside_deviation = self._safe_sample_std(negative_returns) * np.sqrt(252)
         else:
             downside_deviation = 0.0
 
@@ -305,7 +311,7 @@ class RiskAnalyzer:
 
         # 信息比率
         if len(excess_returns) > 1:
-            tracking_error = np.std(excess_returns, ddof=1) * np.sqrt(252)
+            tracking_error = self._safe_sample_std(excess_returns) * np.sqrt(252)
             information_ratio = np.mean(excess_returns) * 252 / tracking_error if tracking_error != 0 else 0.0
         else:
             information_ratio = 0.0

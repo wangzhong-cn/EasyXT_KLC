@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import sys
 import types
+import warnings
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -17,6 +18,7 @@ def _make_manager() -> DataManager:
     mgr = DataManager.__new__(DataManager)
     mgr.preferred_source = None
     mgr.use_local_cache = True
+    mgr.verbose = False
     mgr.last_source = None
     mgr.last_data_info = {}
     mgr.duckdb_connection = None
@@ -29,6 +31,7 @@ def _make_manager() -> DataManager:
         DataSource.QMT: {"available": True, "connected": True, "message": "ok"},
         DataSource.QSTOCK: {"available": True, "connected": True, "message": "ok"},
         DataSource.AKSHARE: {"available": True, "connected": True, "message": "ok"},
+        DataSource.MOCK: {"available": True, "connected": True, "message": "ok"},
     }
     mgr.source_priority = [DataSource.DUCKDB, DataSource.QMT, DataSource.QSTOCK]
     return mgr
@@ -186,6 +189,25 @@ def test_validate_data_quality_detects_missing_values_and_price_relation_issue()
     assert "存在不合理的价格关系" in report["issues"]
 
 
+def test_validate_data_quality_does_not_emit_pct_change_futurewarning():
+    mgr = _make_manager()
+    idx = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    df = pd.DataFrame(
+        {
+            "open": [10.0, 10.0, 10.1],
+            "high": [10.5, 10.6, 10.7],
+            "low": [9.8, 9.9, 10.0],
+            "close": [10.2, None, 10.3],
+            "volume": [1000, 1000, 1000],
+        },
+        index=idx,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mgr.validate_data_quality(df)
+    assert not any(isinstance(w.message, FutureWarning) for w in caught)
+
+
 def test_resample_data_empty_returns_empty():
     mgr = _make_manager()
     out = mgr.resample_data(pd.DataFrame(), "1D")
@@ -208,6 +230,25 @@ def test_resample_data_aggregates_ohlcv():
     out = mgr.resample_data(df, "1H")
     assert not out.empty
     assert set(["open", "high", "low", "close", "volume"]).issubset(set(out.columns))
+
+
+def test_resample_data_uppercase_h_alias_does_not_emit_futurewarning():
+    mgr = _make_manager()
+    idx = pd.date_range("2024-01-01 09:30:00", periods=4, freq="30min")
+    df = pd.DataFrame(
+        {
+            "open": [10.0, 10.2, 10.1, 10.3],
+            "high": [10.3, 10.4, 10.5, 10.6],
+            "low": [9.9, 10.0, 10.0, 10.1],
+            "close": [10.2, 10.1, 10.3, 10.4],
+            "volume": [100, 120, 110, 130],
+        },
+        index=idx,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mgr.resample_data(df, "1H")
+    assert not any(isinstance(w.message, FutureWarning) for w in caught)
 
 
 def test_get_data_from_source_dispatches_all_sources():
@@ -326,6 +367,25 @@ def test_refresh_source_status_rechecks_and_prints():
             mgr.refresh_source_status()
     assert mgr.source_status[DataSource.DUCKDB]["message"] == "refreshed"
     assert mock_print.called
+
+
+def test_print_initialization_status_silent_when_not_verbose():
+    mgr = _make_manager()
+    with patch("builtins.print") as mock_print:
+        mgr._print_initialization_status()
+    mock_print.assert_not_called()
+
+
+def test_check_qstock_status_skips_probe_off_main_thread():
+    mgr = _make_manager()
+    with patch("threading.current_thread", return_value=MagicMock(name="worker")):
+        with patch("threading.main_thread", return_value=MagicMock(name="main")):
+            with patch("importlib.util.find_spec", return_value=object()):
+                with patch("importlib.import_module", side_effect=AssertionError("should not import qstock")):
+                    status = mgr._check_qstock_status()
+    assert status["available"] is True
+    assert status["connected"] is False
+    assert "后台线程" in status["message"]
 
 
 def test_update_local_cache_disabled_is_noop():

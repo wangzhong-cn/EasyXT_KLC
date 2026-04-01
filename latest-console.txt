@@ -1,0 +1,7 @@
+Total messages: 6 (Errors: 4, Warnings: 0)
+Returning 4 messages for level "error"
+
+[ERROR] Failed to load resource: net::ERR_INSUFFICIENT_RESOURCES @ http://127.0.0.1:1420/node_modules/.vite/deps/react.js?v=a31bc9be:0
+[ERROR] Failed to load resource: net::ERR_INSUFFICIENT_RESOURCES @ http://127.0.0.1:1420/node_modules/.vite/deps/react-dom_client.js?v=a31bc9be:0
+[ERROR] Failed to load resource: net::ERR_INSUFFICIENT_RESOURCES @ http://127.0.0.1:1420/src/App.tsx?t=1775004799864:0
+[ERROR] Failed to load resource: net::ERR_INSUFFICIENT_RESOURCES @ http://127.0.0.1:1420/src/styles.css:0

@@ -20,6 +20,7 @@
 ## 回填与容错
 - `EASYXT_BACKFILL_ENABLED`: `1/0`，是否启用历史补数调度。
 - `EASYXT_BACKFILL_MAX_QUEUE`: 历史补数队列上限。
+- `EASYXT_BACKFILL_DEADLETTER_REPLAY_LIMIT`: 每轮后台修复编排时，最多重放的 backfill 死信任务数，默认 `20`。
 - `EASYXT_REMOTE_CB_THRESHOLD`: 远程数据源熔断阈值（失败次数）。
 - `EASYXT_REMOTE_BACKOFF_BASE_S`: 熔断基准退避时间（秒）。
 - `EASYXT_REMOTE_BACKOFF_MAX_S`: 熔断最大退避时间（秒）。
@@ -53,19 +54,31 @@
 - `EASYXT_WM_APPROVAL_USAGE_LOG_PATH`: 审批使用日志路径，默认 `artifacts/watermark_approval_usage.jsonl`。
 - `EASYXT_WM_APPROVAL_SIGNING_KEY`: 审批签名密钥（HMAC-SHA256，建议仅在 CI Secret 配置）。
 - `EASYXT_SESSION_PROFILE`: 周期构建会话模板，支持 `CN_A` / `CN_A_AUCTION` / `FUTURES_COMMODITY`，默认 `CN_A`。
+- `EASYXT_SESSION_PROFILE_VERSIONS_FILE`: 版本化 session profile 注册表 JSON 路径，默认 `config/session_profile_versions.json`。
 - `EASYXT_SESSION_PROFILE_FILE`: 周期会话模板 JSON 文件路径，默认 `config/session_profiles.json`。
 - `EASYXT_SESSION_PROFILE_RULES_FILE`: 标的到会话模板映射规则文件路径，默认 `config/session_profile_rules.json`。
+- `EASYXT_PERIOD_REGISTRY_FILE`: 周期注册表 JSON 路径，默认 `config/period_registry.json`。
+- `EASYXT_PERIOD_THRESHOLDS_FILE`: 周期阈值注册表 JSON 路径，默认 `config/period_thresholds.json`。
 - `EASYXT_PERIOD_ALIGNMENT`: 周期对齐方式，默认 `left`。
 - `EASYXT_PERIOD_ANCHOR`: 日内收敛锚点，支持 `daily_close` / `none`，默认 `daily_close`。
 - `EASYXT_PERIOD_VALIDATION_REPORT_PATH`: 周期交叉校验报告 JSONL 路径，默认 `artifacts/period_validation_report.jsonl`。
 - `EASYXT_PERIOD_VALIDATION_FAIL_BLOCK`: `1/0`，周期校验报告出现失败时是否阻断 P0，默认 `1`。
 - `EASYXT_PEAK_MAX_PERIOD_VALIDATION_FAILED_ITEMS`: 峰值发布门禁允许的周期失败行数上限，默认 `0`。
+- `EASYXT_GOLDEN_1D_AUDIT_DB_PATH`: 黄金标准 1D 审计 SQLite 路径，默认 `data/golden_1d_audit.db`。
+- `EASYXT_GOLDEN_1D_INVARIANT_MODE`: 黄金标准 1D 的 1m→1d 不变量校验模式，支持 `recent` / `changed_partitions` / `full`，默认 `changed_partitions`。
+- `EASYXT_GOLDEN_1D_RECENT_DAYS`: 当 `EASYXT_GOLDEN_1D_INVARIANT_MODE=recent` 时，最近校验交易日数，默认 `5`。
+- `EASYXT_GOLDEN_1D_REPAIR_ENABLED`: `1/0`，是否启用 Golden 1D 后台修复编排，默认 `1`。
+- `EASYXT_GOLDEN_1D_REPAIR_SYMBOL_LIMIT`: 每轮后台修复编排最多处理的标的数，默认 `25`。
+- `EASYXT_GOLDEN_1D_INCREMENTAL_STALE_DAYS`: 本地最后交易日滞后多少自然日后视为 stale window，默认 `3`。
+- `EASYXT_GOLDEN_1D_INCREMENTAL_LOOKBACK_DAYS`: stale window 增量补齐回看的自然日窗口，默认 `7`。
 - 审批白名单样例文件：`config/watermark_approval_registry.example.json`。
 
 ## 接口服务
+
 - `EASYXT_API_PORT`: 本地 API/WS 端口，默认 `8000`。
 
 ## GUI 连接探测
+
 - `EASYXT_ENABLE_ACTIVE_PROBE`: `1/0`，是否启用 GUI 连接主动探测，默认 `0`（被动探测）。
 - `EASYXT_CONNECTION_PROBE_MODE`: 主动探测模式，支持 `active` / `safe` / `passive`，默认 `passive`。
 - `EASYXT_ENABLE_QMT_ONLINE`: `1/0`，GUI 默认 `0`（优先稳定性，避免启动阶段触发 QMT 在线链路）。

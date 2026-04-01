@@ -83,11 +83,28 @@ class TestImportFromCsvEmpty:
         result = imp.import_from_csv('nonexistent.csv', '2024-01-01', '2024-01-31')
         assert result.get('success') is False
 
+    def test_empty_csv_is_silent_by_default(self, capsys):
+        imp = _make_importer()
+        imp.csv_importer.load_stock_list = MagicMock(return_value=[])
+        result = imp.import_from_csv('nonexistent.csv', '2024-01-01', '2024-01-31')
+        assert result.get('success') is False
+        captured = capsys.readouterr()
+        assert captured.out == ''
+
     def test_csv_path_passed_to_importer(self):
         imp = _make_importer()
         imp.csv_importer.load_stock_list = MagicMock(return_value=[])
         imp.import_from_csv('/path/to/stocks.csv', '2024-01-01', '2024-01-31')
         imp.csv_importer.load_stock_list.assert_called_once_with('/path/to/stocks.csv')
+
+    def test_verbose_mode_restores_stdout(self, capsys):
+        imp = _make_importer()
+        imp._stdout_enabled = True
+        imp.csv_importer.load_stock_list = MagicMock(return_value=[])
+        result = imp.import_from_csv('/path/to/stocks.csv', '2024-01-01', '2024-01-31')
+        assert result.get('success') is False
+        captured = capsys.readouterr()
+        assert 'CSV股票列表导入' in captured.out
 
 
 class TestImportCustomStocks:
@@ -115,8 +132,9 @@ class TestCheckMissingData:
         imp = _make_importer()
         mock_detector = MagicMock()
         mock_detector.detect_missing_data.return_value = {
-            'missing_days': 0,
-            'missing_date_ranges': []
+            'missing_count': 0,
+            'missing_trading_days': [],
+            'missing_segments': []
         }
         imp.detector = mock_detector
 
@@ -128,8 +146,9 @@ class TestCheckMissingData:
         imp = _make_importer()
         mock_detector = MagicMock()
         mock_detector.detect_missing_data.return_value = {
-            'missing_days': 5,
-            'missing_date_ranges': [('2024-01-15', '2024-01-19')]
+            'missing_count': 5,
+            'missing_trading_days': [],
+            'missing_segments': [('2024-01-15', '2024-01-19')]
         }
         imp.detector = mock_detector
 

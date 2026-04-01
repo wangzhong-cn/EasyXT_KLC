@@ -42,7 +42,10 @@ from PyQt5.QtWidgets import (
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'strategies'))
 
-EASYXT_AVAILABLE = importlib.util.find_spec("easy_xt") is not None
+try:
+    EASYXT_AVAILABLE = importlib.util.find_spec("easy_xt") is not None
+except (ValueError, AttributeError):
+    EASYXT_AVAILABLE = "easy_xt" in sys.modules
 
 from core.events import Events
 from core.signal_bus import signal_bus

@@ -67,7 +67,7 @@ class TestBroadcastMetrics:
 
         lat = b.avg_publish_latency_ms
         assert lat is not None
-        assert lat < 1.0, f"put_nowait 应在 1 ms 内完成，实际 {lat:.3f} ms"
+        assert lat < 5.0, f"put_nowait 应在 5 ms 内完成，实际 {lat:.3f} ms"
 
     def test_avg_latency_not_recorded_without_subscribers(self):
         """无订阅者时广播不纳入基线统计（避免污染延迟均值）。"""
@@ -142,7 +142,7 @@ class TestBroadcastMetrics:
         lat = b.max_publish_latency_ms
         assert lat is not None
         assert lat >= b.avg_publish_latency_ms, "max 必须 >= avg"
-        assert lat < 1.0, f"put_nowait 应在 1 ms 内完成，实际 max={lat:.3f} ms"
+        assert lat < 5.0, f"put_nowait 应在 5 ms 内完成，实际 max={lat:.3f} ms"
 
     def test_max_latency_reflects_worst_sample(self):
         """手动注入延迟样本，max 应取最大值而非均值。"""

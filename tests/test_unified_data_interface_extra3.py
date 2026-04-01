@@ -33,7 +33,12 @@ import pytest
 def _make_udi(**kwargs) -> Any:
     from data_manager.unified_data_interface import UnifiedDataInterface
 
-    defaults = dict(duckdb_path=":memory:", eager_init=False, silent_init=True)
+    defaults = dict(
+        duckdb_path=":memory:",
+        eager_init=False,
+        silent_init=True,
+        xtdata_call_mode="direct",
+    )
     defaults.update(kwargs)
     return UnifiedDataInterface(**defaults)
 

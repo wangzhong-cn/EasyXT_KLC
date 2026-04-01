@@ -454,14 +454,15 @@ class TestNonTradingDayGate:
         assert not any(x.check == "non_trading_day" for x in r.violations)
 
     def test_weekend_rows_rejected_with_hard_violation(self):
-        """含周末行的日线 DataFrame 必须触发 non_trading_day 硬门禁。"""
+        """含周末行的日线 DataFrame 触发 non_trading_day 软告警（已改为 soft，不阻断入库）。"""
         df = _make_df_with_dates(self._WEEKDAYS + self._WEEKENDS)
         v = DataContractValidator()
         r = v.validate(df, "TEST", "mock", period="1d")
-        assert r.pass_gate is False
+        # 非交易日检查已改为 soft，不触发硬门禁
+        assert r.pass_gate is True
         ntd = [x for x in r.violations if x.check == "non_trading_day"]
         assert len(ntd) == 1
-        assert ntd[0].severity == "hard"
+        assert ntd[0].severity == "soft"
         assert ntd[0].value == 2.0  # 两行周末
 
     def test_no_datetime_column_skips_check(self):
@@ -482,9 +483,10 @@ class TestNonTradingDayGate:
             )
 
     def test_weekly_period_rejects_weekend(self):
-        """周线数据中的周末行也应被拒绝（1w 同属检查范围）。"""
+        """周线数据中的周末行触发软告警（1w 同属检查范围，如今为 soft）。"""
         df = _make_df_with_dates(self._WEEKDAYS[:2] + self._WEEKENDS)
         v = DataContractValidator()
         r = v.validate(df, "TEST", "mock", period="1w")
-        assert r.pass_gate is False
+        # 非交易日检查已改为 soft，不阻断入库
+        assert r.pass_gate is True
         assert any(x.check == "non_trading_day" for x in r.violations)

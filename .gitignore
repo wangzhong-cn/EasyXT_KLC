@@ -33,6 +33,12 @@ gui_app/chart_native/lib/*
 *.manifest
 *.spec
 
+# Frontend / Tauri shell
+node_modules/
+apps/tauri-shell/node_modules/
+apps/tauri-shell/dist/
+apps/tauri-shell/src-tauri/target/
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

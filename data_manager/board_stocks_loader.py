@@ -13,24 +13,49 @@
 - 全A股
 """
 
+import logging
+import os
 
 import pandas as pd
+
+from core.xtquant_import import import_xtdata_module
+
+
+def _stdout_enabled_by_default() -> bool:
+    return str(os.environ.get("EASYXT_BOARD_STOCKS_STDOUT", "0")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 class BoardStocksLoader:
     """板块股票加载器"""
 
-    def __init__(self):
+    def __init__(self, *, verbose: bool | None = None):
         """初始化加载器"""
+        self._logger = logging.getLogger(__name__)
+        self._stdout_enabled = _stdout_enabled_by_default() if verbose is None else bool(verbose)
         try:
-            from xtquant import xtdata
+            xtdata = import_xtdata_module()
             self.xtdata = xtdata
             self.available = True
-            print("[INFO] QMT xtdata 可用")
+            self._emit("[INFO] QMT xtdata 可用", level="info")
         except ImportError:
             self.available = False
             self.xtdata = None
-            print("[ERROR] QMT xtdata 不可用")
+            self._emit("[ERROR] QMT xtdata 不可用", level="warning")
+
+    def _emit(self, message: str, *, level: str = "info") -> None:
+        logger = getattr(self, "_logger", logging.getLogger(__name__))
+        log_method = getattr(logger, level, None)
+        if callable(log_method):
+            log_method("%s", message)
+        else:
+            logger.info("%s", message)
+        if getattr(self, "_stdout_enabled", _stdout_enabled_by_default()):
+            print(message)
 
     def get_board_stocks(self, board_name: str) -> list[str]:
         """
@@ -50,7 +75,7 @@ class BoardStocksLoader:
             List[str]: 股票代码列表
         """
         if not self.available:
-            print("[ERROR] QMT 不可用，无法获取板块股票")
+            self._emit("[ERROR] QMT 不可用，无法获取板块股票", level="warning")
             return []
 
         # 标准化板块名称
@@ -76,10 +101,10 @@ class BoardStocksLoader:
 
         board_code = board_map.get(board_name)
         if not board_code:
-            print(f"[ERROR] 未知板块: {board_name}")
+            self._emit(f"[ERROR] 未知板块: {board_name}", level="warning")
             return []
 
-        print(f"[板块加载] 获取 {board_code} 股票列表...")
+        self._emit(f"[板块加载] 获取 {board_code} 股票列表...", level="info")
 
         try:
             if board_code == 'all':
@@ -97,11 +122,11 @@ class BoardStocksLoader:
                 # 科创板、创业板等
                 stocks = self._get_market_board(board_code)
 
-            print(f"[OK] 获取到 {len(stocks)} 只股票")
+            self._emit(f"[OK] 获取到 {len(stocks)} 只股票", level="info")
             return stocks
 
         except Exception as e:
-            print(f"[ERROR] 获取板块股票失败: {e}")
+            self._emit(f"[ERROR] 获取板块股票失败: {e}", level="error")
             return []
 
     def _get_all_a_shares(self) -> list[str]:
@@ -133,7 +158,7 @@ class BoardStocksLoader:
             return all_stocks
 
         except Exception as e:
-            print(f"[ERROR] 获取全A股失败: {e}")
+            self._emit(f"[ERROR] 获取全A股失败: {e}", level="error")
             return []
 
     def _get_index_stocks(self, index_code: str) -> list[str]:
@@ -148,11 +173,11 @@ class BoardStocksLoader:
             if stocks:
                 return stocks
             else:
-                print(f"[WARNING] 未获取到 {index_code} 的成分股")
+                self._emit(f"[WARNING] 未获取到 {index_code} 的成分股", level="warning")
                 return []
 
         except Exception as e:
-            print(f"[ERROR] 获取指数成分股失败: {e}")
+            self._emit(f"[ERROR] 获取指数成分股失败: {e}", level="error")
             return []
 
     def _get_market_board(self, board_code: str) -> list[str]:
@@ -178,7 +203,7 @@ class BoardStocksLoader:
             return stocks if stocks else []
 
         except Exception as e:
-            print(f"[ERROR] 获取市场板块失败: {e}")
+            self._emit(f"[ERROR] 获取市场板块失败: {e}", level="error")
             return []
 
     def get_available_boards(self) -> dict[str, str]:
@@ -238,11 +263,11 @@ class BoardStocksLoader:
                         stock_str += '.BJ'
                 cleaned_stocks.append(stock_str)
 
-            print(f"[CSV加载] 从 {csv_path} 加载 {len(cleaned_stocks)} 只股票")
+            self._emit(f"[CSV加载] 从 {csv_path} 加载 {len(cleaned_stocks)} 只股票", level="info")
             return cleaned_stocks
 
         except Exception as e:
-            print(f"[ERROR] CSV加载失败: {e}")
+            self._emit(f"[ERROR] CSV加载失败: {e}", level="error")
             return []
 
 
@@ -252,7 +277,7 @@ if __name__ == "__main__":
     print("板块股票加载器测试")
     print("="*80)
 
-    loader = BoardStocksLoader()
+    loader = BoardStocksLoader(verbose=True)
 
     # 测试1：获取板块股票
     print("\n【测试1】获取上证50股票")

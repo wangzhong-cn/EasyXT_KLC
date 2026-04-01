@@ -6,8 +6,10 @@
 --------
 日内自定义周期（sub-1D，如 2m/10m/25m/70m/125m）
   - 每日以开盘第一根 1m K 线为起点，**左对齐**按 N 分钟聚合
-  - A 股交易分两段：上午 09:30-11:30、下午 13:00-15:00；午间休市为硬边界，
-    各时段独立左对齐，不跨午间
+    - A 股午间休市只是 1m 数据的自然间隙，**不是**左对齐计数边界；
+        当日计数器全日连续推进，70m/125m 等周期允许横跨上午尾段与下午开盘
+    - 会话模板（session_profile）只负责定义合法交易时段与展示元数据，
+        不改变日内左对齐的全日连续计数规则
   - 每日最后一根 K 线（下午最后一根）的 close 必须严格等于当日 1D 日 K 线收盘价
     （黄金标准收敛，误差容忍 ≤ 0.1%）
   - 四源交叉验证：日内聚合的总成交量与 1D 日 K 线成交量之差 ≤ 5%
@@ -148,6 +150,34 @@ MULTIDAY_CUSTOM_PERIODS = {k for k, v in PERIOD_SPECS.items() if v["type"] == Pe
 #: 自然日历周期
 NATURAL_CALENDAR_PERIODS = {k for k, v in PERIOD_SPECS.items() if v["type"] == PeriodType.NATURAL_CALENDAR}
 
+PERIOD_BAR_BUILDER_VERSION = "2026.04.01"
+
+_INTRADAY_CODE_BY_MINUTES = {
+    int(v["minutes"]): k for k, v in PERIOD_SPECS.items() if v["type"] == PeriodType.INTRADAY
+}
+_MULTIDAY_CODE_BY_TRADING_DAYS = {
+    int(v["trading_days"]): k
+    for k, v in PERIOD_SPECS.items()
+    if v["type"] == PeriodType.MULTIDAY_CUSTOM
+}
+_NATURAL_CODE_BY_FREQ = {
+    str(v["freq"]): k
+    for k, v in PERIOD_SPECS.items()
+    if v["type"] == PeriodType.NATURAL_CALENDAR
+}
+_PERIOD_FAMILY_BY_CODE = {
+    k: (
+        "intraday"
+        if v["type"] == PeriodType.INTRADAY
+        else "multiday_trading"
+        if v["type"] == PeriodType.MULTIDAY_CUSTOM
+        else "natural_calendar"
+        if v["type"] == PeriodType.NATURAL_CALENDAR
+        else "base"
+    )
+    for k, v in PERIOD_SPECS.items()
+}
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 校验结果容器
@@ -225,6 +255,12 @@ class PeriodBarBuilder:
         alignment: str = "left",
         anchor: str = "daily_close",
         validation_report_file: Optional[str] = None,
+        session_profile_version: str = "legacy",
+        auction_policy: str = "unknown",
+        timestamp_contract_version: str = "legacy",
+        source_rule_kind: str = "unknown",
+        period_registry_version: str = "legacy",
+        default_threshold_version: str = "legacy",
     ) -> None:
         profiles = self._resolve_session_profiles(session_profile_file)
         profile = str(session_profile or "CN_A").upper()
@@ -242,6 +278,67 @@ class PeriodBarBuilder:
         self._anchor = anchor_mode
         self._validation_report_file = str(validation_report_file or "").strip()
         self._session_profile_file = str(session_profile_file or "").strip()
+        self._session_profile_version = str(session_profile_version or "legacy").strip() or "legacy"
+        self._auction_policy = str(auction_policy or "unknown").strip() or "unknown"
+        self._timestamp_contract_version = (
+            str(timestamp_contract_version or "legacy").strip() or "legacy"
+        )
+        self._source_rule_kind = str(source_rule_kind or "unknown").strip() or "unknown"
+        self._period_registry_version = (
+            str(period_registry_version or "legacy").strip() or "legacy"
+        )
+        self._default_threshold_version = (
+            str(default_threshold_version or "legacy").strip() or "legacy"
+        )
+        self._bar_builder_version = PERIOD_BAR_BUILDER_VERSION
+
+    @staticmethod
+    def _infer_period_code_for_intraday(period_minutes: int) -> str:
+        return _INTRADAY_CODE_BY_MINUTES.get(int(period_minutes), f"{int(period_minutes)}m")
+
+    @staticmethod
+    def _infer_period_code_for_multiday(trading_days_per_period: int) -> str:
+        return _MULTIDAY_CODE_BY_TRADING_DAYS.get(
+            int(trading_days_per_period), f"{int(trading_days_per_period)}d"
+        )
+
+    @staticmethod
+    def _infer_period_code_for_calendar(freq: str) -> str:
+        return _NATURAL_CODE_BY_FREQ.get(str(freq), str(freq))
+
+    @staticmethod
+    def _infer_period_family(period_code: str) -> str:
+        return _PERIOD_FAMILY_BY_CODE.get(str(period_code), "unknown")
+
+    def _build_bar_metadata(
+        self,
+        *,
+        period_code: str,
+        alignment: str,
+        anchor: str,
+        period_family: Optional[str] = None,
+        threshold_version: Optional[str] = None,
+    ) -> dict[str, object]:
+        resolved_period_family = period_family or self._infer_period_family(period_code)
+        resolved_threshold_version = (
+            str(threshold_version or self._default_threshold_version).strip()
+            or self._default_threshold_version
+        )
+        return {
+            "alignment": alignment,
+            "anchor": anchor,
+            "session_profile": self._session_profile,
+            "session_profile_id": self._session_profile,
+            "session_profile_version": self._session_profile_version,
+            "auction_policy": self._auction_policy,
+            "timestamp_contract_version": self._timestamp_contract_version,
+            "source_rule_kind": self._source_rule_kind,
+            "period_code": str(period_code),
+            "period_family": resolved_period_family,
+            "period_registry_version": self._period_registry_version,
+            "threshold_version": resolved_threshold_version,
+            "bar_builder_version": self._bar_builder_version,
+        }
 
     # ── 统一入口 ──────────────────────────────────────────────────────────────
 
@@ -252,6 +349,7 @@ class PeriodBarBuilder:
         data_1d: Optional[pd.DataFrame] = None,
         daily_ref: Optional[pd.DataFrame] = None,
         listing_date: Optional[str] = None,
+        threshold_version: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         统一构建入口，根据 period 类型路由到相应方法。
@@ -280,6 +378,9 @@ class PeriodBarBuilder:
                 data_1m=data_1m,
                 period_minutes=spec["minutes"],
                 daily_ref=daily_ref if daily_ref is not None else data_1d,
+                period_code=period,
+                period_family=self._infer_period_family(period),
+                threshold_version=threshold_version,
             )
 
         if ptype == PeriodType.MULTIDAY_CUSTOM:
@@ -290,13 +391,22 @@ class PeriodBarBuilder:
                 data_1d=data_1d,
                 trading_days_per_period=spec["trading_days"],
                 listing_date=listing_date,
+                period_code=period,
+                period_family=self._infer_period_family(period),
+                threshold_version=threshold_version,
             )
 
         if ptype == PeriodType.NATURAL_CALENDAR:
             if data_1d is None or data_1d.empty:
                 _logger.warning("build(%s): 1d 数据为空，返回空 DataFrame", period)
                 return _empty_ohlcv()
-            return self.build_natural_calendar_bars(data_1d=data_1d, freq=spec["freq"])
+            return self.build_natural_calendar_bars(
+                data_1d=data_1d,
+                freq=spec["freq"],
+                period_code=period,
+                period_family=self._infer_period_family(period),
+                threshold_version=threshold_version,
+            )
 
         raise ValueError(f"未处理的 PeriodType: {ptype}")
 
@@ -307,6 +417,10 @@ class PeriodBarBuilder:
         data_1m: pd.DataFrame,
         period_minutes: int,
         daily_ref: Optional[pd.DataFrame] = None,
+        *,
+        period_code: Optional[str] = None,
+        period_family: Optional[str] = None,
+        threshold_version: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         从 1m 数据构建日内 N 分钟 K 线。
@@ -344,12 +458,17 @@ class PeriodBarBuilder:
                 daily_close_map[row["time"].date()] = float(row["close"])
 
         result_bars: list[dict] = []
+        resolved_period_code = period_code or self._infer_period_code_for_intraday(period_minutes)
+        resolved_period_family = period_family or self._infer_period_family(resolved_period_code)
         for trade_date, day_df in df.groupby("_date"):
             bars = self._build_day_intraday_bars(
                 day_df=day_df,
                 period_minutes=period_minutes,
                 trade_date=trade_date,
                 daily_close=daily_close_map.get(trade_date),
+                period_code=resolved_period_code,
+                period_family=resolved_period_family,
+                threshold_version=threshold_version,
             )
             result_bars.extend(bars)
 
@@ -365,6 +484,9 @@ class PeriodBarBuilder:
         period_minutes: int,
         trade_date,
         daily_close: Optional[float],
+        period_code: str,
+        period_family: str,
+        threshold_version: Optional[str],
     ) -> list[dict]:
         """单日内 N 分钟 K 线构建（全日连续左对齐，跨午间不截断）。
 
@@ -382,6 +504,13 @@ class PeriodBarBuilder:
             return []
 
         bars: list[dict] = []
+        bar_metadata = self._build_bar_metadata(
+            period_code=period_code,
+            period_family=period_family,
+            alignment=self._alignment,
+            anchor=self._anchor,
+            threshold_version=threshold_version,
+        )
         n = len(seg)
         i = 0
         while i < n:
@@ -427,9 +556,7 @@ class PeriodBarBuilder:
                 "close":      close_val,
                 "volume":     float(chunk["volume"].sum()),
                 "is_partial": is_partial,
-                "alignment":  self._alignment,
-                "anchor":     self._anchor,
-                "session_profile": self._session_profile,
+                **bar_metadata,
             })
             i += period_minutes
 
@@ -442,6 +569,10 @@ class PeriodBarBuilder:
         data_1d: pd.DataFrame,
         trading_days_per_period: int,
         listing_date: Optional[str] = None,
+        *,
+        period_code: Optional[str] = None,
+        period_family: Optional[str] = None,
+        threshold_version: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         从 1D 数据构建多日自定义 K 线（左对齐）。
@@ -502,6 +633,17 @@ class PeriodBarBuilder:
 
         max_period = int(df["_period_num"].max())
         result_bars: list[dict] = []
+        resolved_period_code = period_code or self._infer_period_code_for_multiday(
+            trading_days_per_period
+        )
+        resolved_period_family = period_family or self._infer_period_family(resolved_period_code)
+        bar_metadata = self._build_bar_metadata(
+            period_code=resolved_period_code,
+            period_family=resolved_period_family,
+            alignment=self._alignment,
+            anchor="period_end",
+            threshold_version=threshold_version,
+        )
 
         for period_num, group in df.groupby("_period_num"):
             is_partial = (
@@ -516,9 +658,7 @@ class PeriodBarBuilder:
                 "close":      float(group.iloc[-1]["close"]),
                 "volume":     float(group["volume"].sum()),
                 "is_partial": is_partial,
-                "alignment": self._alignment,
-                "anchor": "period_end",
-                "session_profile": self._session_profile,
+                **bar_metadata,
             })
 
         return pd.DataFrame(result_bars)
@@ -529,6 +669,10 @@ class PeriodBarBuilder:
         self,
         data_1d: pd.DataFrame,
         freq: str,
+        *,
+        period_code: Optional[str] = None,
+        period_family: Optional[str] = None,
+        threshold_version: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         自然日历周期 K 线（1W/1M/1Q/6M/1Y 等）。
@@ -555,10 +699,18 @@ class PeriodBarBuilder:
             resampled = df.resample(freq).agg(agg)
 
         resampled = resampled.dropna(subset=["open"]).reset_index()
+        resolved_period_code = period_code or self._infer_period_code_for_calendar(freq)
+        resolved_period_family = period_family or self._infer_period_family(resolved_period_code)
+        bar_metadata = self._build_bar_metadata(
+            period_code=resolved_period_code,
+            period_family=resolved_period_family,
+            alignment="calendar_right",
+            anchor="period_end",
+            threshold_version=threshold_version,
+        )
         resampled["is_partial"] = False
-        resampled["alignment"] = "calendar_right"
-        resampled["anchor"] = "period_end"
-        resampled["session_profile"] = self._session_profile
+        for key, value in bar_metadata.items():
+            resampled[key] = value
         return resampled
 
     # ── 四源交叉验证 ──────────────────────────────────────────────────────────
@@ -592,7 +744,12 @@ class PeriodBarBuilder:
             self._validate_intraday_vs_daily(custom_bars, daily_ref, vr)
         elif ptype == PeriodType.MULTIDAY_CUSTOM and daily_ref is not None and not daily_ref.empty:
             self._validate_multiday_vs_daily(custom_bars, daily_ref, vr)
-        self._emit_validation_report(period=period, vr=vr, rows=int(len(custom_bars)))
+        self._emit_validation_report(
+            period=period,
+            vr=vr,
+            rows=int(len(custom_bars)),
+            custom_bars=custom_bars,
+        )
 
         return vr
 
@@ -706,7 +863,13 @@ class PeriodBarBuilder:
                 )
             prev_end = bar_end
 
-    def _emit_validation_report(self, period: str, vr: ValidationResult, rows: int) -> None:
+    def _emit_validation_report(
+        self,
+        period: str,
+        vr: ValidationResult,
+        rows: int,
+        custom_bars: pd.DataFrame,
+    ) -> None:
         out = self._validation_report_file
         if not out:
             return
@@ -723,6 +886,13 @@ class PeriodBarBuilder:
             "alignment": self._alignment,
             "anchor": self._anchor,
             "session_profile": self._session_profile,
+            "session_profile_version": _first_column_value(custom_bars, "session_profile_version", self._session_profile_version),
+            "auction_policy": _first_column_value(custom_bars, "auction_policy", self._auction_policy),
+            "period_code": _first_column_value(custom_bars, "period_code", period),
+            "period_family": _first_column_value(custom_bars, "period_family", self._infer_period_family(period)),
+            "period_registry_version": _first_column_value(custom_bars, "period_registry_version", self._period_registry_version),
+            "threshold_version": _first_column_value(custom_bars, "threshold_version", self._default_threshold_version),
+            "bar_builder_version": _first_column_value(custom_bars, "bar_builder_version", self._bar_builder_version),
             "generated_at": pd.Timestamp.now().isoformat(),
         }
         try:
@@ -781,8 +951,28 @@ def _empty_ohlcv() -> pd.DataFrame:
             "alignment",
             "anchor",
             "session_profile",
+            "session_profile_id",
+            "session_profile_version",
+            "auction_policy",
+            "period_code",
+            "period_family",
+            "period_registry_version",
+            "threshold_version",
+            "bar_builder_version",
         ]
     )
+
+
+def _first_column_value(df: pd.DataFrame, column: str, default: object) -> object:
+    if df is None or df.empty or column not in df.columns:
+        return default
+    try:
+        value = df.iloc[0][column]
+    except Exception:
+        return default
+    if pd.isna(value):
+        return default
+    return value
 
 
 def _prepare_1m(df: pd.DataFrame) -> pd.DataFrame:

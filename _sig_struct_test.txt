@@ -1,0 +1,58 @@
+============================= test session starts =============================
+platform win32 -- Python 3.11.14, pytest-9.0.2, pluggy-1.5.0 -- C:\Users\wangzhong\miniconda3\envs\myenv\python.exe
+cachedir: .pytest_cache
+PyQt5 5.15.11 -- Qt runtime 5.15.2 -- Qt compiled 5.15.2
+rootdir: D:\EasyXT_KLC
+configfile: pytest.ini
+plugins: anyio-4.10.0, asyncio-1.3.0, cov-7.0.0, qt-4.5.0, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 45 items
+
+tests/test_signal_generator.py::TestStructuredSignal::test_valid_signal PASSED [  2%]
+tests/test_signal_generator.py::TestStructuredSignal::test_to_dict PASSED [  4%]
+tests/test_signal_generator.py::TestDrawdownTracker::test_initial_state PASSED [  6%]
+tests/test_signal_generator.py::TestDrawdownTracker::test_update_first_price PASSED [  8%]
+tests/test_signal_generator.py::TestDrawdownTracker::test_update_new_peak PASSED [ 11%]
+tests/test_signal_generator.py::TestDrawdownTracker::test_update_drawdown PASSED [ 13%]
+tests/test_signal_generator.py::TestDrawdownTracker::test_max_drawdown_tracks_peak PASSED [ 15%]
+tests/test_signal_generator.py::TestDrawdownTracker::test_reset PASSED   [ 17%]
+tests/test_signal_generator.py::TestSignalGeneratorInit::test_default_init PASSED [ 20%]
+tests/test_signal_generator.py::TestSignalGeneratorInit::test_with_drawdown_tracker PASSED [ 22%]
+tests/test_signal_generator.py::TestSignalGeneratorInit::test_with_code_and_interval PASSED [ 24%]
+tests/test_signal_generator.py::TestSignalGeneratorCallbacks::test_on_structure_created_long PASSED [ 26%]
+tests/test_signal_generator.py::TestSignalGeneratorCallbacks::test_on_structure_created_short PASSED [ 28%]
+tests/test_signal_generator.py::TestSignalGeneratorCallbacks::test_on_structure_reversed_creates_exit PASSED [ 31%]
+tests/test_signal_generator.py::TestSignalGeneratorCallbacks::test_multiple_structures PASSED [ 33%]
+tests/test_signal_generator.py::TestSignalGeneratorStopLoss::test_stop_loss_equals_p2 PASSED [ 35%]
+tests/test_signal_generator.py::TestSignalGeneratorStopLoss::test_stop_loss_distance_calculation PASSED [ 37%]
+tests/test_signal_generator.py::TestSignalGeneratorEdgeCases::test_reset_clears_signals PASSED [ 40%]
+tests/test_signal_generator.py::TestIntegrationStructureToSignal::test_full_pipeline PASSED [ 42%]
+tests/test_structure_engine.py::TestPricePoint::test_valid_price_point PASSED [ 44%]
+tests/test_structure_engine.py::TestPricePoint::test_invalid_timestamp_zero PASSED [ 46%]
+tests/test_structure_engine.py::TestPricePoint::test_invalid_timestamp_negative PASSED [ 48%]
+tests/test_structure_engine.py::TestPricePoint::test_invalid_price_zero PASSED [ 51%]
+tests/test_structure_engine.py::TestPricePoint::test_invalid_price_negative PASSED [ 53%]
+tests/test_structure_engine.py::TestNStructureDown::test_valid_down_structure PASSED [ 55%]
+tests/test_structure_engine.py::TestNStructureDown::test_invalid_time_order PASSED [ 57%]
+tests/test_structure_engine.py::TestNStructureDown::test_invalid_fold_price PASSED [ 60%]
+tests/test_structure_engine.py::TestNStructureDown::test_invalid_continuation_close PASSED [ 62%]
+tests/test_structure_engine.py::TestNStructureUp::test_valid_up_structure PASSED [ 64%]
+tests/test_structure_engine.py::TestNStructureUp::test_invalid_up_fold_price PASSED [ 66%]
+tests/test_structure_engine.py::TestNStructureUp::test_invalid_direction PASSED [ 68%]
+tests/test_structure_engine.py::TestStructureEngineInit::test_default_init PASSED [ 71%]
+tests/test_structure_engine.py::TestStructureEngineInit::test_reset PASSED [ 73%]
+tests/test_structure_engine.py::TestStructureEngineInit::test_callbacks_init PASSED [ 75%]
+tests/test_structure_engine.py::TestStructureEngineScan::test_scan_empty_df PASSED [ 77%]
+tests/test_structure_engine.py::TestStructureEngineScan::test_scan_insufficient_data PASSED [ 80%]
+tests/test_structure_engine.py::TestStructureEngineScan::test_scan_single_down_structure PASSED [ 82%]
+tests/test_structure_engine.py::TestStructureEngineScan::test_scan_single_up_structure PASSED [ 84%]
+tests/test_structure_engine.py::TestStructureEngineScan::test_scan_resets_before_scan PASSED [ 86%]
+tests/test_structure_engine.py::TestStructureEnginePush::test_push_init_state PASSED [ 88%]
+tests/test_structure_engine.py::TestStructureEnginePush::test_push_creates_first_structure PASSED [ 91%]
+tests/test_structure_engine.py::TestStructureEnginePush::test_push_state_transition PASSED [ 93%]
+tests/test_structure_engine.py::TestStructureEngineProperties::test_current_structure_property PASSED [ 95%]
+tests/test_structure_engine.py::TestStructureEngineProperties::test_all_structures_property PASSED [ 97%]
+tests/test_structure_engine.py::TestStructureEngineProperties::test_iter_structures PASSED [100%]
+
+============================= 45 passed in 3.25s ==============================
+

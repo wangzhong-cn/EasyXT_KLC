@@ -544,6 +544,10 @@ class TradeAPI:
             ErrorHandler.log_error("交易服务未连接或账户未添加")
             return OrderResponse(None, "error", "未连接或未添加账户")
 
+        if not hasattr(self.trader, "order_future"):
+            ErrorHandler.log_error("交易服务不支持期货下单（order_future 方法不可用）")
+            return OrderResponse(None, "error", "期货接口不可用，请确认连接的是期货账户")
+
         account = self.accounts[account_id]
         code = StockCodeUtils.normalize_code(code)
 
@@ -656,6 +660,142 @@ class TradeAPI:
             ErrorHandler.log_error(f"卖出操作失败: {str(e)}")
             if audit_trail is not None:
                 audit_trail.record_order(str(uuid.uuid4()), signal_id, code, "sell", volume, price, "error")
+            return OrderResponse(None, "error", str(e))
+
+    def buy_future(
+        self,
+        account_id: str,
+        code: str,
+        volume: int,
+        price: float = 0,
+        price_type: str = "market",
+        offset: str = "open",
+        signal_id: str = "",
+    ) -> OrderResponse:
+        """
+        期货买入开仓/平空（含风控前检和审计写入）。
+
+        Args:
+            account_id:  资金账号
+            code:        期货合约代码（如 "rb2501.SF"）
+            volume:      委托手数
+            price:       委托价格（0=市价）
+            price_type:  "market" | "limit"
+            offset:      开平标志：open | close | close_today | close_history
+            signal_id:   信号 ID
+        """
+        import uuid
+
+        if not self.trader or account_id not in self.accounts:
+            ErrorHandler.log_error("交易服务未连接或账户未添加")
+            return OrderResponse(None, "error", "未连接或未添加账户")
+
+        if not hasattr(self.trader, "order_future"):
+            ErrorHandler.log_error("交易服务不支持期货下单（order_future 方法不可用）")
+            return OrderResponse(None, "error", "期货接口不可用，请确认连接的是期货账户")
+
+        offset_map = {
+            "open": xt_const.FUTURE_OPEN_LONG,
+            "close": xt_const.FUTURE_CLOSE,
+            "close_today": xt_const.FUTURE_CLOSE_LONG_TODAY,
+            "close_history": xt_const.FUTURE_CLOSE_LONG_HISTORY,
+        }
+        xt_order_type = offset_map.get(offset, xt_const.FUTURE_OPEN_LONG)
+
+        price_type_map = {
+            "market": xt_const.MARKET_PEER_PRICE_FIRST,
+            "limit": xt_const.FIX_PRICE,
+            "市价": xt_const.MARKET_PEER_PRICE_FIRST,
+            "限价": xt_const.FIX_PRICE,
+        }
+        xt_price_type = price_type_map.get(price_type, xt_const.MARKET_PEER_PRICE_FIRST)
+
+        try:
+            log.info("期货买入 %s, 手数: %d, 价格: %s, 开平: %s", code, volume, price, offset)
+            order_id = self.trader.order_future(
+                account=self.accounts[account_id],
+                future_code=code,
+                order_type=xt_order_type,
+                order_volume=volume,
+                price_type=xt_price_type,
+                price=price,
+                strategy_name="EasyXT",
+                order_remark=f"期货买入{offset} {code}",
+            )
+            if order_id > 0:
+                log.info("期货买入委托成功: %s, 手数: %d, 委托号: %d", code, volume, order_id)
+                return OrderResponse(order_id, "submitted", "")
+            else:
+                ErrorHandler.log_error(f"期货买入委托失败，返回值: {order_id}")
+                return OrderResponse(None, "rejected_broker", f"Broker Reject Code: {order_id}")
+        except Exception as e:
+            ErrorHandler.log_error(f"期货买入操作失败: {str(e)}")
+            return OrderResponse(None, "error", str(e))
+
+    def sell_future(
+        self,
+        account_id: str,
+        code: str,
+        volume: int,
+        price: float = 0,
+        price_type: str = "market",
+        offset: str = "close",
+        signal_id: str = "",
+    ) -> OrderResponse:
+        """
+        期货卖出开仓/平多（含风控前检和审计写入）。
+
+        Args:
+            account_id:  资金账号
+            code:        期货合约代码（如 "rb2501.SF"）
+            volume:      委托手数
+            price:       委托价格（0=市价）
+            price_type:  "market" | "limit"
+            offset:      开平标志：open | close | close_today | close_history
+            signal_id:   信号 ID
+        """
+        import uuid
+
+        if not self.trader or account_id not in self.accounts:
+            ErrorHandler.log_error("交易服务未连接或账户未添加")
+            return OrderResponse(None, "error", "未连接或未添加账户")
+
+        offset_map = {
+            "open": xt_const.FUTURE_OPEN_SHORT,
+            "close": xt_const.FUTURE_CLOSE,
+            "close_today": xt_const.FUTURE_CLOSE_SHORT_TODAY,
+            "close_history": xt_const.FUTURE_CLOSE_SHORT_HISTORY,
+        }
+        xt_order_type = offset_map.get(offset, xt_const.FUTURE_CLOSE)
+
+        price_type_map = {
+            "market": xt_const.MARKET_PEER_PRICE_FIRST,
+            "limit": xt_const.FIX_PRICE,
+            "市价": xt_const.MARKET_PEER_PRICE_FIRST,
+            "限价": xt_const.FIX_PRICE,
+        }
+        xt_price_type = price_type_map.get(price_type, xt_const.MARKET_PEER_PRICE_FIRST)
+
+        try:
+            log.info("期货卖出 %s, 手数: %d, 价格: %s, 开平: %s", code, volume, price, offset)
+            order_id = self.trader.order_future(
+                account=self.accounts[account_id],
+                future_code=code,
+                order_type=xt_order_type,
+                order_volume=volume,
+                price_type=xt_price_type,
+                price=price,
+                strategy_name="EasyXT",
+                order_remark=f"期货卖出{offset} {code}",
+            )
+            if order_id > 0:
+                log.info("期货卖出委托成功: %s, 手数: %d, 委托号: %d", code, volume, order_id)
+                return OrderResponse(order_id, "submitted", "")
+            else:
+                ErrorHandler.log_error(f"期货卖出委托失败，返回值: {order_id}")
+                return OrderResponse(None, "rejected_broker", f"Broker Reject Code: {order_id}")
+        except Exception as e:
+            ErrorHandler.log_error(f"期货卖出操作失败: {str(e)}")
             return OrderResponse(None, "error", str(e))
 
     @ErrorHandler.handle_api_error

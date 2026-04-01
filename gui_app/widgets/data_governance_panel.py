@@ -26,9 +26,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Callable
 
-from PyQt5.QtCore import QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -477,6 +477,12 @@ class DataGovernancePanel(QWidget):
         self._tabs = QTabWidget()
         self._auto_refreshed: set[int] = set()  # 首次切换后只触发一次自动刷新
         self._closed = False
+        self._lazy_tab_factories: dict[int, Callable[[], QWidget]] = {}
+        self._lazy_tab_loaded: set[int] = set()
+        self._lazy_tab_loading: set[int] = set()
+        self._download_tab_widget: QWidget | None = None
+        self._query_tab_widget: QWidget | None = None
+        self._coverage_tab = None
         self._init_ui()
         self._connect_events()
 
@@ -485,8 +491,9 @@ class DataGovernancePanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._tabs)
 
-        # Tab 0：数据下载（嵌入旧 LocalDataManagerWidget）
-        self._tabs.addTab(self._make_download_tab(), "数据下载")
+        # Tab 0：数据下载（重组件，懒加载，避免主线程卡死）
+        self._tabs.addTab(self._build_lazy_placeholder("数据下载"), "数据下载")
+        self._lazy_tab_factories[0] = self._make_download_tab
 
         # Tab 1：数据质检
         self._integrity_tab = _IntegrityTab(self._ctrl)
@@ -500,8 +507,9 @@ class DataGovernancePanel(QWidget):
         self._pipeline_tab = _PipelineTab(self._ctrl)
         self._tabs.addTab(self._pipeline_tab, "管道状态")
 
-        # Tab 4：数据查询（嵌入旧 DuckDBDataManagerWidget）
-        self._tabs.addTab(self._make_query_tab(), "数据查询")
+        # Tab 4：数据查询（重组件，懒加载，避免主线程卡死）
+        self._tabs.addTab(self._build_lazy_placeholder("数据查询"), "数据查询")
+        self._lazy_tab_factories[4] = self._make_query_tab
 
         # Tab 5：数据对账
         self._reconciliation_tab = _ReconciliationTab(self._ctrl)
@@ -527,15 +535,9 @@ class DataGovernancePanel(QWidget):
         self._realtime_tab = _RealtimeMonitorTab(self._ctrl)
         self._tabs.addTab(self._realtime_tab, "实时链路")
 
-        # Tab 11：数据覆盖矩阵（全周期补数入口）
-        try:
-            from gui_app.widgets.data_coverage_widget import DataCoverageWidget
-            self._coverage_tab = DataCoverageWidget()
-        except Exception as _exc:
-            _lbl = QLabel(f"数据覆盖组件加载失败：{_exc}")
-            _lbl.setWordWrap(True)
-            self._coverage_tab = _lbl  # type: ignore[assignment]
-        self._tabs.addTab(self._coverage_tab, "数据覆盖")
+        # Tab 11：数据覆盖矩阵（中重组件，懒加载）
+        self._tabs.addTab(self._build_lazy_placeholder("数据覆盖"), "数据覆盖")
+        self._lazy_tab_factories[11] = self._make_coverage_tab
 
         # Tab 12：数据来源溯源
         self._traceability_tab = _TraceabilityTab(self._ctrl)
@@ -543,6 +545,42 @@ class DataGovernancePanel(QWidget):
 
         # 切换 Tab 时触发自动刷新
         self._tabs.currentChanged.connect(self._on_tab_changed)
+        QTimer.singleShot(0, lambda: self._ensure_lazy_tab_loaded(self._tabs.currentIndex()))
+
+    def _build_lazy_placeholder(self, title: str) -> QWidget:
+        lbl = QLabel(f"{title}加载中...")
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet("color: #666; font-size: 14px;")
+        lbl.setWordWrap(True)
+        return lbl
+
+    def _ensure_lazy_tab_loaded(self, index: int) -> None:
+        if index not in self._lazy_tab_factories:
+            return
+        if index in self._lazy_tab_loaded or index in self._lazy_tab_loading:
+            return
+        self._lazy_tab_loading.add(index)
+        QTimer.singleShot(0, lambda i=index: self._load_lazy_tab(i))
+
+    def _load_lazy_tab(self, index: int) -> None:
+        try:
+            factory = self._lazy_tab_factories.get(index)
+            if factory is None:
+                return
+            title = self._tabs.tabText(index)
+            widget = factory()
+            if index == 0:
+                self._download_tab_widget = widget
+            elif index == 4:
+                self._query_tab_widget = widget
+            elif index == 11:
+                self._coverage_tab = widget
+            self._tabs.removeTab(index)
+            self._tabs.insertTab(index, widget, title)
+            self._tabs.setCurrentIndex(index)
+            self._lazy_tab_loaded.add(index)
+        finally:
+            self._lazy_tab_loading.discard(index)
 
     def _connect_events(self) -> None:
         """订阅 signal_bus 事件，将实时推送转发到各 Tab。"""
@@ -645,8 +683,19 @@ class DataGovernancePanel(QWidget):
             lbl.setWordWrap(True)
             return lbl
 
+    def _make_coverage_tab(self) -> QWidget:
+        """尝试加载 DataCoverageWidget，失败时显示说明标签。"""
+        try:
+            from gui_app.widgets.data_coverage_widget import DataCoverageWidget
+            return DataCoverageWidget()
+        except Exception as exc:
+            lbl = QLabel(f"数据覆盖组件加载失败：{exc}")
+            lbl.setWordWrap(True)
+            return lbl
+
     def _on_tab_changed(self, index: int) -> None:
         """切换 Tab 时按需触发首次自动刷新（每个 Tab 整个生命周期只刷新一次）。"""
+        self._ensure_lazy_tab_loaded(index)
         if index in self._auto_refreshed:
             return
         self._auto_refreshed.add(index)

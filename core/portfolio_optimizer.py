@@ -148,14 +148,11 @@ class PortfolioOptimizer:
             raw_weights = self._equal_weight(n)
             solver = "equal_weight"
         elif method == "risk_parity":
-            raw_weights = self._risk_parity(clean.values, n, bounds_tuple)
-            solver = "scipy_slsqp"
+            raw_weights, solver = self._risk_parity(clean.values, n, bounds_tuple)
         elif method == "min_variance":
-            raw_weights = self._min_variance(clean.values, n, bounds_tuple)
-            solver = "scipy_slsqp"
+            raw_weights, solver = self._min_variance(clean.values, n, bounds_tuple)
         elif method == "mean_variance":
-            raw_weights = self._mean_variance(clean.values, n, bounds_tuple)
-            solver = "scipy_slsqp"
+            raw_weights, solver = self._mean_variance(clean.values, n, bounds_tuple)
         else:
             log.warning("未知优化方法 '%s'，降级为 equal_weight", method)
             raw_weights = self._equal_weight(n)
@@ -193,13 +190,14 @@ class PortfolioOptimizer:
         returns_arr: np.ndarray,
         n: int,
         bounds: list | None = None,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, str]:
         """风险平价：使各资产风险贡献相等。使用 scipy.minimize 支持 bounds。"""
-        from scipy.optimize import minimize
-
         cov = np.cov(returns_arr.T)
         if cov.ndim == 0:
             cov = np.array([[float(cov)]])
+        minimize = PortfolioOptimizer._try_get_scipy_minimize()
+        if minimize is None:
+            return PortfolioOptimizer._fallback_risk_parity(cov, n), "internal_fallback"
         w0 = np.full(n, 1.0 / n)
 
         def objective(w: np.ndarray) -> float:
@@ -212,22 +210,26 @@ class PortfolioOptimizer:
         bnds = bounds if bounds is not None else [(0.0, 1.0)] * n
         res = minimize(objective, w0, method="SLSQP", bounds=bnds, constraints=constraints,
                        options={"ftol": 1e-12, "maxiter": 500})
-        w = np.array(res.x)
-        w = np.maximum(w, 0.0)
-        return w
+        if getattr(res, "success", False) and getattr(res, "x", None) is not None:
+            w = np.array(res.x, dtype=float)
+            if np.all(np.isfinite(w)):
+                w = np.maximum(w, 0.0)
+                return w, "scipy_slsqp"
+        return PortfolioOptimizer._fallback_risk_parity(cov, n), "internal_fallback"
 
     @staticmethod
     def _min_variance(
         returns_arr: np.ndarray,
         n: int,
         bounds: list | None = None,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, str]:
         """最小方差：使用 scipy.minimize 支持 bounds。"""
-        from scipy.optimize import minimize
-
         cov = np.cov(returns_arr.T)
         if cov.ndim == 0:
             cov = np.array([[float(cov)]])
+        minimize = PortfolioOptimizer._try_get_scipy_minimize()
+        if minimize is None:
+            return PortfolioOptimizer._fallback_min_variance(cov, n), "internal_fallback"
         w0 = np.full(n, 1.0 / n)
 
         def objective(w: np.ndarray) -> float:
@@ -237,23 +239,27 @@ class PortfolioOptimizer:
         bnds = bounds if bounds is not None else [(0.0, 1.0)] * n
         res = minimize(objective, w0, method="SLSQP", bounds=bnds, constraints=constraints,
                        options={"ftol": 1e-12, "maxiter": 500})
-        w = np.array(res.x)
-        w = np.maximum(w, 0.0)
-        return w
+        if getattr(res, "success", False) and getattr(res, "x", None) is not None:
+            w = np.array(res.x, dtype=float)
+            if np.all(np.isfinite(w)):
+                w = np.maximum(w, 0.0)
+                return w, "scipy_slsqp"
+        return PortfolioOptimizer._fallback_min_variance(cov, n), "internal_fallback"
 
     @staticmethod
     def _mean_variance(
         returns_arr: np.ndarray,
         n: int,
         bounds: list | None = None,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, str]:
         """均值方差（最大化夏普比率近似）：使用 scipy.minimize 支持 bounds。"""
-        from scipy.optimize import minimize
-
         cov = np.cov(returns_arr.T)
         if cov.ndim == 0:
             cov = np.array([[float(cov)]])
         mu = returns_arr.mean(axis=0)
+        minimize = PortfolioOptimizer._try_get_scipy_minimize()
+        if minimize is None:
+            return PortfolioOptimizer._fallback_mean_variance(mu, cov, n), "internal_fallback"
         w0 = np.full(n, 1.0 / n)
 
         def neg_sharpe(w: np.ndarray) -> float:
@@ -266,9 +272,49 @@ class PortfolioOptimizer:
         bnds = bounds if bounds is not None else [(0.0, 1.0)] * n
         res = minimize(neg_sharpe, w0, method="SLSQP", bounds=bnds, constraints=constraints,
                        options={"ftol": 1e-12, "maxiter": 500})
-        w = np.array(res.x)
-        w = np.maximum(w, 0.0)
-        return w
+        if getattr(res, "success", False) and getattr(res, "x", None) is not None:
+            w = np.array(res.x, dtype=float)
+            if np.all(np.isfinite(w)):
+                w = np.maximum(w, 0.0)
+                return w, "scipy_slsqp"
+        return PortfolioOptimizer._fallback_mean_variance(mu, cov, n), "internal_fallback"
+
+    @staticmethod
+    def _try_get_scipy_minimize():
+        try:
+            from scipy.optimize import minimize
+
+            return minimize
+        except Exception as exc:
+            log.warning("SciPy.optimize.minimize 不可用，降级到内部启发式优化: %s", exc)
+            return None
+
+    @staticmethod
+    def _fallback_risk_parity(cov: np.ndarray, n: int) -> np.ndarray:
+        diag = np.diag(cov) if cov.ndim == 2 else np.array([float(cov)])
+        vol = np.sqrt(np.maximum(diag, 1e-12))
+        inv_vol = 1.0 / np.maximum(vol, 1e-12)
+        if not np.all(np.isfinite(inv_vol)) or float(inv_vol.sum()) <= 0:
+            return np.full(n, 1.0 / n)
+        return inv_vol / inv_vol.sum()
+
+    @staticmethod
+    def _fallback_min_variance(cov: np.ndarray, n: int) -> np.ndarray:
+        diag = np.diag(cov) if cov.ndim == 2 else np.array([float(cov)])
+        inv_var = 1.0 / np.maximum(diag, 1e-12)
+        if not np.all(np.isfinite(inv_var)) or float(inv_var.sum()) <= 0:
+            return np.full(n, 1.0 / n)
+        return inv_var / inv_var.sum()
+
+    @staticmethod
+    def _fallback_mean_variance(mu: np.ndarray, cov: np.ndarray, n: int) -> np.ndarray:
+        diag = np.diag(cov) if cov.ndim == 2 else np.array([float(cov)])
+        score = np.maximum(mu, 0.0) / np.maximum(diag, 1e-12)
+        if not np.all(np.isfinite(score)) or float(score.sum()) <= 0:
+            score = 1.0 / np.maximum(diag, 1e-12)
+        if not np.all(np.isfinite(score)) or float(score.sum()) <= 0:
+            return np.full(n, 1.0 / n)
+        return score / score.sum()
 
     @staticmethod
     def _clip_and_normalize(
@@ -278,18 +324,65 @@ class PortfolioOptimizer:
         n: int,
         max_iter: int = 100,
     ) -> np.ndarray:
-        """裁剪归一化，用于 equal_weight 的 bounds 校验及 scipy 结果的最终清理。"""
-        w = w.copy()
-        # 对 scipy 已满足 bounds 的结果，一次裁剪 + 归一化即可
-        w = np.clip(w, min_w, max_w)
-        s = w.sum()
-        if s <= 0:
+        """投影到 box + simplex：min_w <= w_i <= max_w 且 sum(w)=1。"""
+        if n <= 0:
+            return np.array([], dtype=float)
+        if min_w * n > 1.0 + 1e-12 or max_w * n < 1.0 - 1e-12:
             return np.full(n, 1.0 / n)
-        w = w / s
-        # 把归一化引入的极微量浮点误差（<1e-12）集中到最大权重资产，确保 sum 精确为 1
-        delta = 1.0 - w.sum()
-        if abs(delta) > 1e-15:
-            w[int(np.argmax(w))] += delta
+
+        w = np.asarray(w, dtype=float).copy()
+        if w.shape[0] != n or not np.all(np.isfinite(w)):
+            w = np.full(n, 1.0 / n)
+
+        base = np.full(n, min_w, dtype=float)
+        caps = np.full(n, max_w - min_w, dtype=float)
+        remaining = 1.0 - float(base.sum())
+        if remaining <= 1e-15:
+            return base
+
+        score = np.maximum(w - min_w, 0.0)
+        if float(score.sum()) <= 1e-15:
+            score = np.ones(n, dtype=float)
+
+        alloc = np.zeros(n, dtype=float)
+        active = np.ones(n, dtype=bool)
+
+        for _ in range(max_iter):
+            if remaining <= 1e-12 or not active.any():
+                break
+            active_score = score * active
+            if float(active_score.sum()) <= 1e-15:
+                active_score = active.astype(float)
+            share = remaining * active_score / float(active_score.sum())
+            headroom = np.maximum(caps - alloc, 0.0)
+            clipped_share = np.minimum(share, headroom)
+            alloc += clipped_share
+            remaining = 1.0 - float((base + alloc).sum())
+            active = headroom - clipped_share > 1e-12
+
+        w = base + alloc
+        if remaining > 1e-12:
+            active = w < max_w - 1e-12
+            if active.any():
+                w[active] += remaining / int(active.sum())
+
+        w = np.clip(w, min_w, max_w)
+        delta = 1.0 - float(w.sum())
+        if abs(delta) > 1e-12:
+            if delta > 0:
+                candidates = np.where(w < max_w - 1e-12)[0]
+            else:
+                candidates = np.where(w > min_w + 1e-12)[0]
+            if len(candidates) == 0:
+                return np.full(n, 1.0 / n)
+            idx = int(candidates[np.argmax(w[candidates])])
+            w[idx] = np.clip(w[idx] + delta, min_w, max_w)
+        final_delta = 1.0 - float(w.sum())
+        if abs(final_delta) > 1e-9:
+            candidates = np.where((w > min_w + 1e-12) & (w < max_w - 1e-12))[0]
+            if len(candidates) > 0:
+                idx = int(candidates[np.argmax(w[candidates])])
+                w[idx] += final_delta
         return w
 
     @staticmethod

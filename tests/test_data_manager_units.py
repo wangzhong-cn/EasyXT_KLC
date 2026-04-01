@@ -402,6 +402,26 @@ class TestCSVImporter:
         result = importer.load_stock_list("/nonexistent/path.csv")
         assert result == []
 
+    def test_load_stock_list_silent_by_default(self, tmp_path, capsys):
+        from data_manager.csv_importer import CSVImporter
+
+        path = self._write_csv(tmp_path, "code\n600000.SH\n")
+        importer = CSVImporter(verbose=False)
+        result = importer.load_stock_list(path)
+        assert "600000.SH" in result
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_verbose_flag_restores_stdout(self, tmp_path, capsys):
+        from data_manager.csv_importer import CSVImporter
+
+        path = self._write_csv(tmp_path, "code\n600000.SH\n")
+        importer = CSVImporter(verbose=True)
+        result = importer.load_stock_list(path)
+        assert "600000.SH" in result
+        captured = capsys.readouterr()
+        assert "[CSV导入]" in captured.out
+
     def test_load_stock_list_no_code_column_uses_first(self, tmp_path):
         from data_manager.csv_importer import CSVImporter
 

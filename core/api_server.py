@@ -22,15 +22,20 @@ EasyXT 轻量化中台服务（Phase 3）
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import logging
 import os
+import secrets
 import sys
 import threading
 import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from io import StringIO
+from pathlib import Path
 from typing import Any
 
 from fastapi import (
@@ -79,6 +84,41 @@ _DROP_RATE_MIN_SAMPLES: int = int(
 # 构建版本信息（CI 注入，本地开发时为 "dev"）
 _BUILD_VERSION: str = os.environ.get("EASYXT_BUILD_VERSION", "dev")
 _COMMIT_SHA: str = os.environ.get("EASYXT_COMMIT_SHA", "unknown")
+_ROOT_DIR: Path = Path(__file__).resolve().parents[1]
+_GOVERNANCE_THRESHOLD_CONFIG_PATH: Path = Path(
+    os.environ.get(
+        "EASYXT_GOVERNANCE_THRESHOLD_CONFIG",
+        str(_ROOT_DIR / "config" / "data_governance_thresholds.json"),
+    )
+)
+_GOVERNANCE_ACTION_RULEBOOK_PATH: Path = Path(
+    os.environ.get(
+        "EASYXT_GOVERNANCE_ACTION_RULEBOOK",
+        str(_ROOT_DIR / "config" / "governance_action_rulebook.json"),
+    )
+)
+_GOVERNANCE_ACTION_AUDIT_PATH: Path = Path(
+    os.environ.get(
+        "EASYXT_GOVERNANCE_ACTION_AUDIT_LOG",
+        str(_ROOT_DIR / "artifacts" / "governance_action_audit.jsonl"),
+    )
+)
+
+
+class GovernanceSlaThresholdUpdateBody(BaseModel):
+    overrides: dict[str, int]
+    operator: str = "unknown"
+    note: str = ""
+
+
+class GovernanceActionAuditBody(BaseModel):
+    action_id: str
+    action_type: str
+    tone: str = "neutral"
+    title: str = ""
+    detail: str = ""
+    source: str = "tauri-data-route"
+    payload: dict[str, Any] = {}
 
 # ---------------------------------------------------------------------------
 # Prometheus 指标定义（prometheus_client 可选；不可用时 /metrics 降级为 JSON）
@@ -129,6 +169,8 @@ _cleanup_stats: dict[str, Any] = {
 }
 _datasource_health_lock = threading.Lock()
 _datasource_health_interface: Any = None
+_data_governance_controller_lock = threading.Lock()
+_data_governance_controller: Any = None
 
 
 def _check_rate_limit(client_ip: str) -> bool:
@@ -163,6 +205,711 @@ def _get_datasource_health_interface() -> Any:
                 silent_init=True,
             )
     return _datasource_health_interface
+
+
+def _get_data_governance_controller() -> Any:
+    global _data_governance_controller
+    if _data_governance_controller is not None:
+        return _data_governance_controller
+    with _data_governance_controller_lock:
+        if _data_governance_controller is None:
+            from gui_app.data_manager_controller import DataManagerController
+
+            _data_governance_controller = DataManagerController()
+    return _data_governance_controller
+
+
+def _load_governance_threshold_overrides() -> dict[str, int]:
+    return _load_governance_threshold_bundle()["overrides"]
+
+
+def _load_governance_threshold_bundle() -> dict[str, Any]:
+    try:
+        if not _GOVERNANCE_THRESHOLD_CONFIG_PATH.exists():
+            return {"overrides": {}, "config_version": 0, "updated_by": "unknown", "note": ""}
+        payload = json.loads(_GOVERNANCE_THRESHOLD_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"overrides": {}, "config_version": 0, "updated_by": "unknown", "note": ""}
+    if not isinstance(payload, dict):
+        return {"overrides": {}, "config_version": 0, "updated_by": "unknown", "note": ""}
+    overrides = payload.get("overrides", payload)
+    if not isinstance(overrides, dict):
+        return {"overrides": {}, "config_version": 0, "updated_by": "unknown", "note": ""}
+    normalized: dict[str, int] = {}
+    for key, value in overrides.items():
+        try:
+            normalized[str(key)] = int(value)
+        except Exception:
+            continue
+    return {
+        "overrides": normalized,
+        "config_version": int(payload.get("config_version", 0) or 0),
+        "updated_by": str(payload.get("updated_by", "unknown")),
+        "note": str(payload.get("note", "")),
+    }
+
+
+def _save_governance_threshold_overrides(overrides: dict[str, int]) -> dict[str, int]:
+    bundle = _save_governance_threshold_bundle(overrides=overrides, operator="unknown", note="")
+    return bundle["overrides"]
+
+
+def _save_governance_threshold_bundle(
+    *,
+    overrides: dict[str, int],
+    operator: str,
+    note: str,
+) -> dict[str, Any]:
+    normalized = {str(key): int(value) for key, value in overrides.items()}
+    current = _load_governance_threshold_bundle()
+    next_version = int(current.get("config_version", 0) or 0) + 1
+    _GOVERNANCE_THRESHOLD_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _GOVERNANCE_THRESHOLD_CONFIG_PATH.write_text(
+        json.dumps(
+            {
+                "config_version": next_version,
+                "updated_by": operator or "unknown",
+                "note": note,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "overrides": normalized,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "overrides": normalized,
+        "config_version": next_version,
+        "updated_by": operator or "unknown",
+        "note": note,
+    }
+
+
+def _describe_config_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "path": str(path),
+            "exists": False,
+            "updated_at": None,
+        }
+    stat = path.stat()
+    payload_meta: dict[str, Any] = {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            if "config_version" in payload:
+                payload_meta["config_version"] = int(payload.get("config_version", 0) or 0)
+            if "updated_by" in payload:
+                payload_meta["updated_by"] = str(payload.get("updated_by", "unknown"))
+            if "note" in payload:
+                payload_meta["note"] = str(payload.get("note", ""))
+            if "version" in payload:
+                payload_meta["version"] = str(payload.get("version", ""))
+            if "maintainer" in payload:
+                payload_meta["maintainer"] = str(payload.get("maintainer", ""))
+    except Exception:
+        payload_meta = {}
+    return {
+        "path": str(path),
+        "exists": True,
+        "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        "size_bytes": int(stat.st_size),
+        **payload_meta,
+    }
+
+
+def _get_default_governance_action_rulebook() -> list[dict[str, Any]]:
+    return [
+        {
+            "rule_id": "tick_mismatch_repair",
+            "match_reason": "tick_mismatch",
+            "severity": "warning",
+            "sla_impact": "monitor",
+            "recommended_action": "trigger_repair_then_open_workbench",
+            "business_meaning": "tick 聚合无法解释分钟 bar，优先修复并回看主图确认。",
+        },
+        {
+            "rule_id": "cross_source_conflict_traceability",
+            "match_reason": "cross_source_conflict",
+            "severity": "critical",
+            "sla_impact": "gate_block",
+            "recommended_action": "open_traceability_and_hold_publish",
+            "business_meaning": "跨源冲突会直接降低可用性，应先排除数据源或对账口径问题。",
+        },
+        {
+            "rule_id": "lineage_incomplete_replay",
+            "match_reason": "lineage_incomplete",
+            "severity": "warning",
+            "sla_impact": "monitor",
+            "recommended_action": "trigger_replay_and_review_lineage",
+            "business_meaning": "回执链不完整会削弱审计闭环，应补 replay/repair 链路。",
+        },
+        {
+            "rule_id": "contract_failed_traceability",
+            "match_reason": "contract_failed",
+            "severity": "critical",
+            "sla_impact": "gate_block",
+            "recommended_action": "open_traceability_and_stop_publish",
+            "business_meaning": "时间戳/周期契约失败代表数据结构异常，应暂停放行。",
+        },
+    ]
+
+
+def _get_governance_action_rulebook() -> list[dict[str, Any]]:
+    default_rulebook = _get_default_governance_action_rulebook()
+    try:
+        if not _GOVERNANCE_ACTION_RULEBOOK_PATH.exists():
+            return default_rulebook
+        payload = json.loads(_GOVERNANCE_ACTION_RULEBOOK_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return default_rulebook
+    if isinstance(payload, dict):
+        rules = payload.get("rules", [])
+    else:
+        rules = payload
+    if not isinstance(rules, list):
+        return default_rulebook
+    normalized: list[dict[str, Any]] = []
+    for item in rules:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "rule_id": str(item.get("rule_id", "")),
+                "match_reason": str(item.get("match_reason", "")),
+                "severity": str(item.get("severity", "")),
+                "sla_impact": str(item.get("sla_impact", "")),
+                "recommended_action": str(item.get("recommended_action", "")),
+                "business_meaning": str(item.get("business_meaning", "")),
+            }
+        )
+    return normalized or default_rulebook
+
+
+def _get_governance_action_rulebook_bundle() -> dict[str, Any]:
+    rules = _get_governance_action_rulebook()
+    return {
+        "rules": rules,
+        "meta": _describe_config_file(_GOVERNANCE_ACTION_RULEBOOK_PATH),
+        "validation": _validate_governance_action_rulebook(rules),
+    }
+
+
+def _validate_governance_action_rulebook(rules: list[dict[str, Any]]) -> dict[str, Any]:
+    required_fields = [
+        "rule_id",
+        "match_reason",
+        "severity",
+        "sla_impact",
+        "recommended_action",
+        "business_meaning",
+    ]
+    errors: list[str] = []
+    allowed_severity = {"ok", "warning", "critical", "unknown"}
+    for index, rule in enumerate(rules):
+        for field in required_fields:
+            if not str(rule.get(field, "")).strip():
+                errors.append(f"rule[{index}].{field} 不能为空")
+        severity = str(rule.get("severity", "")).strip().lower()
+        if severity and severity not in allowed_severity:
+            errors.append(f"rule[{index}].severity 非法: {severity}")
+    return {
+        "valid": len(errors) == 0,
+        "errors": errors,
+        "rule_count": len(rules),
+        "required_fields": required_fields,
+    }
+
+
+def _append_governance_action_audit(
+    *,
+    action_id: str,
+    action_type: str,
+    tone: str,
+    title: str,
+    detail: str,
+    source: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    stock_code = str(payload.get("stock_code") or payload.get("symbol") or "")
+    period = str(payload.get("period") or "")
+    lineage_anchor = str(payload.get("lineage_anchor") or "")
+    operator = str(payload.get("operator") or "")
+    config_version = payload.get("config_version")
+    record = {
+        "event_id": str(uuid.uuid4()),
+        "event_time": datetime.utcnow().isoformat() + "Z",
+        "action_id": action_id,
+        "action_type": action_type,
+        "tone": tone,
+        "title": title,
+        "detail": detail,
+        "source": source,
+        "stock_code": stock_code,
+        "period": period,
+        "lineage_anchor": lineage_anchor,
+        "operator": operator,
+        "config_version": int(config_version or 0) if str(config_version or "").strip() else None,
+        "payload": payload,
+    }
+    _GOVERNANCE_ACTION_AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _GOVERNANCE_ACTION_AUDIT_PATH.open("a", encoding="utf-8") as fp:
+        fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def _read_governance_action_audit(
+    *,
+    limit: int = 20,
+    action_type: str = "",
+    source: str = "",
+    stock_code: str = "",
+    period: str = "",
+    lineage_anchor: str = "",
+) -> list[dict[str, Any]]:
+    if not _GOVERNANCE_ACTION_AUDIT_PATH.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        lines = _GOVERNANCE_ACTION_AUDIT_PATH.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        if action_type and str(item.get("action_type", "")) != action_type:
+            continue
+        if source and str(item.get("source", "")) != source:
+            continue
+        if stock_code and str(item.get("stock_code", "")) != stock_code:
+            continue
+        if period and str(item.get("period", "")) != period:
+            continue
+        if lineage_anchor and str(item.get("lineage_anchor", "")) != lineage_anchor:
+            continue
+        records.append(item)
+        if len(records) >= max(int(limit), 1):
+            break
+    return records
+
+
+def _build_governance_action_recommendations(
+    receipt_timeline: list[dict[str, Any]],
+    threshold_panel: dict[str, Any],
+) -> list[dict[str, Any]]:
+    recommendations: list[dict[str, Any]] = []
+    first_item = receipt_timeline[0] if receipt_timeline else {}
+    tick_item = next(
+        (item for item in receipt_timeline if str(item.get("gate_reject_reason") or "") == "tick_mismatch"),
+        None,
+    )
+    conflict_item = next(
+        (item for item in receipt_timeline if str(item.get("gate_reject_reason") or "") == "cross_source_conflict"),
+        None,
+    )
+    if threshold_panel.get("breaches", {}).get("gate_block"):
+        recommendations.append(
+            {
+                "action_id": "sla_gate_block",
+                "tone": "danger",
+                "title": "SLA gate_block 超阈值",
+                "detail": f"gate_block={threshold_panel.get('current', {}).get('gate_block', 0)}，建议先做溯源核查。",
+                "action_type": "open_traceability",
+                "payload": {
+                    "stock_code": first_item.get("stock_code", ""),
+                    "period": first_item.get("period", ""),
+                },
+            }
+        )
+    if tick_item:
+        recommendations.append(
+            {
+                "action_id": "tick_mismatch",
+                "tone": "warning",
+                "title": "发现 tick_mismatch",
+                "detail": "建议先触发 repair，再联动到图表复核分钟聚合。",
+                "action_type": "trigger_repair",
+                "payload": {
+                    "stock_code": tick_item.get("stock_code", ""),
+                    "period": tick_item.get("period", ""),
+                    "lineage_anchor": tick_item.get("lineage_anchor", ""),
+                },
+            }
+        )
+    if conflict_item:
+        recommendations.append(
+            {
+                "action_id": "cross_source_conflict",
+                "tone": "danger",
+                "title": "发现 cross_source_conflict",
+                "detail": "建议转到 traceability 追源，不建议直接 replay。",
+                "action_type": "open_traceability",
+                "payload": {
+                    "stock_code": conflict_item.get("stock_code", ""),
+                    "period": conflict_item.get("period", ""),
+                },
+            }
+        )
+    if first_item and not recommendations:
+        recommendations.append(
+            {
+                "action_id": "healthy_scan",
+                "tone": "ok",
+                "title": "当前未发现高优先级阻断",
+                "detail": "建议继续做样本巡检并保留最新 receipt timeline 快照。",
+                "action_type": "open_timeline",
+                "payload": {
+                    "stock_code": first_item.get("stock_code", ""),
+                    "period": first_item.get("period", ""),
+                },
+            }
+        )
+    return recommendations[:4]
+
+
+def _build_governance_snapshot_payload(trend_days: int, audit_limit: int) -> dict[str, Any]:
+    overview = get_data_governance_overview(trend_days=trend_days)
+    audit_records = _read_governance_action_audit(limit=audit_limit)
+    return {
+        "snapshot_name": f"data_governance_snapshot_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "overview": overview,
+        "action_audit": audit_records,
+        "config_sources": {
+            "sla_thresholds": _describe_config_file(_GOVERNANCE_THRESHOLD_CONFIG_PATH),
+            "action_rulebook": _describe_config_file(_GOVERNANCE_ACTION_RULEBOOK_PATH),
+            "action_audit": _describe_config_file(_GOVERNANCE_ACTION_AUDIT_PATH),
+        },
+        "server_time": int(time.time() * 1000),
+        "build_version": _BUILD_VERSION,
+        "commit_sha": _COMMIT_SHA,
+    }
+
+
+def _get_structure_query_db_manager() -> Any:
+    """获取七层结构查询所需的 DuckDB 管理器，并确保结构表存在。"""
+    from data_manager.duckdb_connection_pool import get_db_manager, resolve_duckdb_path
+    from data_manager.structure_schema import ensure_structure_tables
+
+    db_mgr = get_db_manager(resolve_duckdb_path())
+    ensure_structure_tables(db_mgr)
+    return db_mgr
+
+
+def _df_to_records(df: Any) -> list[dict[str, Any]]:
+    """将 DataFrame 安全转为 JSON 友好的 records。"""
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return []
+    try:
+        sanitized = df.where(df.notna(), other=None)
+        return json.loads(sanitized.to_json(orient="records"))
+    except Exception:
+        return []
+
+
+_CHART_INTERVAL_TO_BACKEND_PERIOD: dict[str, str] = {
+    "1m": "1m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "60m",
+    "4h": "240m",
+    "1d": "1d",
+    "1w": "1w",
+}
+
+_CHART_DEFAULT_RANGE: dict[str, timedelta] = {
+    "1m": timedelta(days=5),
+    "5m": timedelta(days=5),
+    "15m": timedelta(days=15),
+    "30m": timedelta(days=15),
+    "1h": timedelta(days=15),
+    "4h": timedelta(days=90),
+    "1d": timedelta(days=365),
+    "1w": timedelta(days=365 * 2),
+}
+
+_CHART_ADJUST_OPTIONS = {"none", "front", "back", "geometric_front", "geometric_back"}
+_CHART_DATE_ONLY_PERIODS = {"1d", "1w"}
+
+
+def _resolve_chart_backend_period(interval: str) -> str:
+    normalized = str(interval or "").strip().lower()
+    backend_period = _CHART_INTERVAL_TO_BACKEND_PERIOD.get(normalized)
+    if backend_period is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "interval 参数非法，可选值: "
+                f"{sorted(_CHART_INTERVAL_TO_BACKEND_PERIOD.keys())}"
+            ),
+        )
+    return backend_period
+
+
+def _resolve_chart_request_window(
+    interval: str, start_date: str, end_date: str
+) -> tuple[str, str]:
+    end_dt = datetime.now()
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="end_date 必须为 YYYY-MM-DD 格式",
+            ) from exc
+
+    if start_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="start_date 必须为 YYYY-MM-DD 格式",
+            ) from exc
+    else:
+        start_dt = end_dt - _CHART_DEFAULT_RANGE.get(interval, timedelta(days=30))
+
+    if start_dt > end_dt:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="start_date 不能晚于 end_date",
+        )
+
+    return start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
+
+
+def _resolve_chart_available_window(
+    interval: str, available_start: str, available_end: str
+) -> tuple[str, str]:
+    try:
+        start_dt = datetime.strptime(available_start, "%Y-%m-%d")
+        end_dt = datetime.strptime(available_end, "%Y-%m-%d")
+    except ValueError:
+        return available_start, available_end
+
+    fallback_start = max(start_dt, end_dt - _CHART_DEFAULT_RANGE.get(interval, timedelta(days=30)))
+    if fallback_start > end_dt:
+        fallback_start = start_dt
+    return fallback_start.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
+
+
+def _format_chart_bar_time(value: Any, requested_interval: str) -> str:
+    import pandas as pd
+
+    ts = pd.Timestamp(value)
+    if requested_interval in _CHART_DATE_ONLY_PERIODS:
+        return ts.strftime("%Y-%m-%d")
+    return ts.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _serialize_chart_bars(df: Any, requested_interval: str, limit: int) -> list[dict[str, Any]]:
+    import pandas as pd
+
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return []
+
+    data = df.copy()
+    if isinstance(getattr(data, "index", None), pd.DatetimeIndex):
+        index_name = data.index.name or "index"
+        if "datetime" not in data.columns and "time" not in data.columns:
+            data = data.reset_index().rename(columns={index_name: "time"})
+    data.columns = [str(col).lower() for col in data.columns]
+
+    if "time" not in data.columns:
+        if "datetime" in data.columns:
+            data["time"] = data["datetime"]
+        elif "date" in data.columns:
+            data["time"] = data["date"]
+        elif "index" in data.columns:
+            data["time"] = data["index"]
+        else:
+            return []
+
+    data["time"] = pd.to_datetime(data["time"], errors="coerce")
+    data = data[data["time"].notna()].sort_values("time")
+
+    required_cols = ["open", "high", "low", "close"]
+    for col in required_cols:
+        if col not in data.columns:
+            return []
+
+    if limit > 0:
+        data = data.tail(limit)
+
+    bars: list[dict[str, Any]] = []
+    for row in data.itertuples(index=False):
+        item = {
+            "time": _format_chart_bar_time(getattr(row, "time"), requested_interval),
+            "open": float(getattr(row, "open")),
+            "high": float(getattr(row, "high")),
+            "low": float(getattr(row, "low")),
+            "close": float(getattr(row, "close")),
+        }
+        volume = getattr(row, "volume", None)
+        if volume is not None:
+            item["volume"] = float(volume)
+        bars.append(item)
+    return bars
+
+
+def _build_chart_quality_payload(symbol: str) -> dict[str, Any]:
+    from data_manager.golden_1d_audit import Golden1dAuditor
+
+    def _serialize_repair_task(task: Any) -> dict[str, Any]:
+        return {
+            "stock_code": getattr(task, "stock_code", ""),
+            "period": getattr(task, "period", "1d"),
+            "start_date": getattr(task, "start_date", ""),
+            "end_date": getattr(task, "end_date", ""),
+            "reason": getattr(task, "reason", ""),
+            "priority_hint": getattr(task, "priority_hint", None),
+            "current_symbol": getattr(task, "current_symbol", ""),
+            "gap_length": getattr(task, "gap_length", None),
+        }
+
+    def _default_repair_payload() -> dict[str, Any]:
+        return {
+            "plan_status": "unknown",
+            "generated_at": None,
+            "queued_tasks": 0,
+            "failed_tasks": 0,
+            "task_count": 0,
+            "blocker_issues": [],
+            "notes": [],
+            "tasks": [],
+        }
+
+    def _build_golden_repair_payload(target_symbol: str) -> dict[str, Any]:
+        try:
+            from data_manager.golden_1d_repair_orchestrator import Golden1DRepairOrchestrator
+
+            snapshot = Golden1DRepairOrchestrator().get_latest_plan(target_symbol)
+            if snapshot is None:
+                return _default_repair_payload()
+            return {
+                "plan_status": snapshot.plan_status,
+                "generated_at": snapshot.generated_at,
+                "queued_tasks": snapshot.queued_tasks,
+                "failed_tasks": snapshot.failed_tasks,
+                "task_count": snapshot.task_count,
+                "blocker_issues": snapshot.blocker_issues[:5],
+                "notes": snapshot.notes[:5],
+                "tasks": [_serialize_repair_task(task) for task in snapshot.tasks[:5]],
+            }
+        except Exception:
+            return _default_repair_payload()
+
+    summary = Golden1dAuditor().get_audit_status(symbol)
+    if summary is None:
+        return {
+            "golden_status": "unknown",
+            "is_golden_1d_ready": False,
+            "missing_days": None,
+            "cross_source_status": "unknown",
+            "backfill_status": "pending",
+            "last_audited_at": None,
+            "audit_anchor_date": None,
+            "listing_date": None,
+            "listing_date_confidence": "unknown",
+            "issues": [],
+            "repair": _build_golden_repair_payload(symbol),
+        }
+
+    listing_confidence = (
+        "verified" if summary.listing_date and str(summary.listing_date) > "1990-01-01" else "fallback"
+    )
+    audit_anchor = (
+        summary.listing_date if listing_confidence == "verified" else summary.local_first_date
+    )
+    return {
+        "golden_status": summary.golden_status,
+        "is_golden_1d_ready": summary.is_golden_1d_ready,
+        "missing_days": summary.missing_days,
+        "cross_source_status": summary.cross_source_status,
+        "backfill_status": summary.backfill_status,
+        "last_audited_at": summary.last_audited_at,
+        "audit_anchor_date": audit_anchor,
+        "listing_date": summary.listing_date,
+        "listing_date_confidence": listing_confidence,
+        "issues": summary.issues[:5],
+        "repair": _build_golden_repair_payload(summary.symbol),
+    }
+
+
+def _serialize_structure_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "structure_id": row.get("structure_id"),
+        "code": row.get("code"),
+        "interval": row.get("interval"),
+        "created_at": row.get("created_at"),
+        "direction": row.get("direction"),
+        "status": row.get("status"),
+        "closed_at": row.get("closed_at"),
+        "retrace_ratio": row.get("retrace_ratio"),
+        "layer4": {
+            "attractor_mean": row.get("attractor_mean"),
+            "attractor_std": row.get("attractor_std"),
+            "bayes_lower": row.get("bayes_lower"),
+            "bayes_upper": row.get("bayes_upper"),
+            "posterior_mean": row.get("posterior_mean"),
+            "observation_count": row.get("observation_count"),
+            "continuation_count": row.get("continuation_count"),
+            "reversal_count": row.get("reversal_count"),
+            "bayes_group_level": row.get("bayes_group_level"),
+            "bayes_group_key": row.get("bayes_group_key"),
+        },
+        "points": {
+            "p0": {"ts": row.get("p0_ts"), "price": row.get("p0_price")},
+            "p1": {"ts": row.get("p1_ts"), "price": row.get("p1_price")},
+            "p2": {"ts": row.get("p2_ts"), "price": row.get("p2_price")},
+            "p3": {"ts": row.get("p3_ts"), "price": row.get("p3_price")},
+        },
+    }
+
+
+def _serialize_audit_row(row: dict[str, Any]) -> dict[str, Any]:
+    snapshot = None
+    raw = row.get("snapshot_json")
+    if isinstance(raw, str) and raw:
+        try:
+            snapshot = json.loads(raw)
+        except Exception:
+            snapshot = None
+    return {
+        "audit_id": row.get("audit_id"),
+        "structure_id": row.get("structure_id"),
+        "code": row.get("code"),
+        "interval": row.get("interval"),
+        "event_type": row.get("event_type"),
+        "event_ts": row.get("event_ts"),
+        "snapshot": snapshot,
+    }
+
+
+def _serialize_signal_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "signal_id": row.get("signal_id"),
+        "structure_id": row.get("structure_id"),
+        "code": row.get("code"),
+        "interval": row.get("interval"),
+        "signal_ts": row.get("signal_ts"),
+        "signal_type": row.get("signal_type"),
+        "trigger_price": row.get("trigger_price"),
+        "risk": {
+            "stop_loss_price": row.get("stop_loss_price"),
+            "stop_loss_distance": row.get("stop_loss_distance"),
+            "drawdown_pct": row.get("drawdown_pct"),
+            "calmar_snapshot": row.get("calmar_snapshot"),
+        },
+        "remarks": row.get("remarks"),
+    }
 
 
 async def _cleanup_rate_buckets() -> None:
@@ -209,7 +956,7 @@ async def _verify_auth_and_rate(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="请求过于频繁，请稍后再试",
         )
-    if _API_TOKEN and x_api_token != _API_TOKEN:
+    if _API_TOKEN and (not x_api_token or not secrets.compare_digest(x_api_token, _API_TOKEN)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效或缺失的 X-API-Token",
@@ -468,6 +1215,15 @@ _server_loop: asyncio.AbstractEventLoop | None = None
 _server_start_time: float | None = None  # monotonic 启动时刻，用于计算 uptime_s
 
 
+def _diag_logging_enabled() -> bool:
+    return str(os.environ.get("EASYXT_QMT_DIAG", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def ingest_tick_from_thread(symbol: str, tick_data: dict) -> None:
     """
     从非异步线程（如 QMT xtdata 回调）注入实时行情，线程安全。
@@ -490,10 +1246,13 @@ def ingest_tick_from_thread(symbol: str, tick_data: dict) -> None:
         from xtquant import xtdata
         xtdata.subscribe_quote("000001.SZ", period="tick", callback=on_tick)
     """
-    # 调试日志：追踪 ingest_tick 数据来源
-    log.warning(
-        f"[DIAG] ingest_tick_from_thread symbol={symbol} price={tick_data.get('price')} source={tick_data.get('source', 'unknown')}"
-    )
+    if _diag_logging_enabled():
+        log.warning(
+            "[DIAG] ingest_tick_from_thread symbol=%s price=%s source=%s",
+            symbol,
+            tick_data.get("price"),
+            tick_data.get("source", "unknown"),
+        )
 
     if _server_loop is None or _server_loop.is_closed():
         return
@@ -684,6 +1443,7 @@ def datasource_health_check() -> dict[str, Any]:
         payload["checks"]["quarantine"]["dead_letter_ratio"] = dead_ratio
         payload["checks"]["data_quality_incident"] = iface.get_data_quality_incident_counts()
         payload["checks"]["step6_validation"] = iface.get_step6_validation_metrics()
+        payload["checks"]["publish_gate"] = iface.get_publish_gate_summary()
         dl_abs_warn = int(os.environ.get("EASYXT_QUARANTINE_DEADLETTER_WARN", "100") or 100)
         dl_ratio_warn = float(
             os.environ.get("EASYXT_QUARANTINE_DEADLETTER_RATIO_WARN", "0.01") or 0.01
@@ -710,6 +1470,8 @@ def datasource_health_check() -> dict[str, Any]:
         }
         if dead >= dl_abs_warn or dead_ratio >= dl_ratio_warn:
             payload["status"] = "degraded"
+        if int(payload["checks"]["publish_gate"].get("degraded", 0) or 0) > 0:
+            payload["status"] = "degraded"
     except Exception as e:
         payload["status"] = "degraded"
         payload["checks"]["error"] = str(e)
@@ -717,6 +1479,331 @@ def datasource_health_check() -> dict[str, Any]:
     payload["build_version"] = _BUILD_VERSION
     payload["commit_sha"] = _COMMIT_SHA
     return payload
+
+
+@app.get(
+    "/api/v1/data-quality/ingestion-status",
+    tags=["数据质量"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_ingestion_gate_status(
+    symbol: str = Query(..., description="标的代码，例如 000001.SZ"),
+    period: str = Query("1d", description="周期代码"),
+) -> dict[str, Any]:
+    try:
+        iface = _get_datasource_health_interface()
+        payload = iface.get_latest_gate_status(symbol, period)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"门禁状态查询失败: {exc}",
+        ) from exc
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"未找到 {symbol} / {period} 的门禁状态",
+        )
+    payload["server_time"] = int(time.time() * 1000)
+    payload["build_version"] = _BUILD_VERSION
+    payload["commit_sha"] = _COMMIT_SHA
+    return payload
+
+
+@app.get(
+    "/api/v1/data-quality/receipts",
+    tags=["数据质量"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_receipt_history(
+    receipt_type: str = Query(..., pattern="^(publish_gate|repair|replay)$", description="回执类型"),
+    symbol: str = Query("", description="标的代码，可选"),
+    period: str = Query("", description="周期代码，可选"),
+    limit: int = Query(default=20, ge=1, le=100, description="返回条数"),
+) -> dict[str, Any]:
+    try:
+        iface = _get_datasource_health_interface()
+        items = iface.get_receipt_history(
+            receipt_type,
+            symbol=symbol,
+            period=period,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"回执历史查询失败: {exc}",
+        ) from exc
+    return {
+        "receipt_type": receipt_type,
+        "items": items,
+        "returned": len(items),
+        "limit": limit,
+        "server_time": int(time.time() * 1000),
+        "build_version": _BUILD_VERSION,
+        "commit_sha": _COMMIT_SHA,
+    }
+
+
+@app.get(
+    "/api/v1/data-quality/receipt-timeline",
+    tags=["数据质量"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_receipt_timeline(
+    symbol: str = Query("", description="标的代码，可选"),
+    period: str = Query("", description="周期代码，可选"),
+    lineage_anchor: str = Query("", description="lineage 锚点，可选"),
+    receipt_type: str = Query("", pattern="^(|publish_gate|repair|replay)$", description="回执类型过滤"),
+    gate_reject_reason: str = Query("", description="gate 拒绝原因过滤"),
+    severity: str = Query("", pattern="^(|ok|warning|critical|unknown)$", description="严重度过滤"),
+    lookback_days: int = Query(default=0, ge=0, le=365, description="时间窗口天数，0表示不限"),
+    limit: int = Query(default=50, ge=1, le=200, description="返回条数"),
+) -> dict[str, Any]:
+    try:
+        iface = _get_datasource_health_interface()
+        items = iface.get_receipt_timeline(
+            symbol=symbol,
+            period=period,
+            lineage_anchor=lineage_anchor,
+            receipt_type=receipt_type,
+            gate_reject_reason=gate_reject_reason,
+            severity=severity,
+            lookback_days=lookback_days,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"回执时间线查询失败: {exc}",
+        ) from exc
+    return {
+        "items": items,
+        "returned": len(items),
+        "filters": {
+            "symbol": symbol,
+            "period": period,
+            "lineage_anchor": lineage_anchor,
+            "receipt_type": receipt_type,
+            "gate_reject_reason": gate_reject_reason,
+            "severity": severity,
+            "lookback_days": lookback_days,
+            "limit": limit,
+        },
+        "server_time": int(time.time() * 1000),
+        "build_version": _BUILD_VERSION,
+        "commit_sha": _COMMIT_SHA,
+    }
+
+
+@app.get(
+    "/api/v1/data-quality/lineage-anchor-detail",
+    tags=["数据质量"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_lineage_anchor_detail(
+    lineage_anchor: str = Query(..., description="lineage 锚点"),
+) -> dict[str, Any]:
+    try:
+        iface = _get_datasource_health_interface()
+        payload = iface.get_lineage_anchor_detail(lineage_anchor)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"lineage 锚点详情查询失败: {exc}",
+        ) from exc
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"未找到 lineage_anchor={lineage_anchor} 对应的回执链",
+        )
+    payload["server_time"] = int(time.time() * 1000)
+    payload["build_version"] = _BUILD_VERSION
+    payload["commit_sha"] = _COMMIT_SHA
+    return payload
+
+
+@app.get(
+    "/api/v1/data-governance/sla-thresholds",
+    tags=["数据治理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_data_governance_sla_thresholds() -> dict[str, Any]:
+    iface = _get_datasource_health_interface()
+    threshold_bundle = _load_governance_threshold_bundle()
+    overrides = threshold_bundle["overrides"]
+    panel = iface.get_sla_alert_threshold_panel_with_overrides(overrides)
+    return {
+        "overrides": overrides,
+        "panel": panel,
+        "config_meta": _describe_config_file(_GOVERNANCE_THRESHOLD_CONFIG_PATH),
+        "config_version": int(threshold_bundle.get("config_version", 0) or 0),
+        "updated_by": str(threshold_bundle.get("updated_by", "unknown")),
+        "note": str(threshold_bundle.get("note", "")),
+        "server_time": int(time.time() * 1000),
+        "build_version": _BUILD_VERSION,
+        "commit_sha": _COMMIT_SHA,
+    }
+
+
+@app.patch(
+    "/api/v1/data-governance/sla-thresholds",
+    tags=["数据治理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def patch_data_governance_sla_thresholds(body: GovernanceSlaThresholdUpdateBody) -> dict[str, Any]:
+    iface = _get_datasource_health_interface()
+    threshold_bundle = _save_governance_threshold_bundle(
+        overrides=body.overrides,
+        operator=body.operator,
+        note=body.note,
+    )
+    overrides = threshold_bundle["overrides"]
+    panel = iface.get_sla_alert_threshold_panel_with_overrides(overrides)
+    audit_record = _append_governance_action_audit(
+        action_id="sla_threshold_update",
+        action_type="update_sla_thresholds",
+        tone="warning" if panel.get("status") != "ok" else "ok",
+        title="更新 SLA 阈值",
+        detail=f"已写入 {len(overrides)} 个阈值覆盖项",
+        source="api_server",
+        payload={
+            "overrides": overrides,
+            "panel_status": panel.get("status"),
+            "operator": threshold_bundle["updated_by"],
+            "config_version": threshold_bundle["config_version"],
+        },
+    )
+    return {
+        "overrides": overrides,
+        "panel": panel,
+        "config_meta": _describe_config_file(_GOVERNANCE_THRESHOLD_CONFIG_PATH),
+        "config_version": int(threshold_bundle.get("config_version", 0) or 0),
+        "updated_by": str(threshold_bundle.get("updated_by", "unknown")),
+        "note": str(threshold_bundle.get("note", "")),
+        "audit_record": audit_record,
+        "server_time": int(time.time() * 1000),
+        "build_version": _BUILD_VERSION,
+        "commit_sha": _COMMIT_SHA,
+    }
+
+
+@app.get(
+    "/api/v1/data-governance/action-audit",
+    tags=["数据治理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_governance_action_audit(
+    limit: int = Query(default=20, ge=1, le=200, description="返回条数"),
+    action_type: str = Query("", description="动作类型过滤"),
+    source: str = Query("", description="来源过滤"),
+    stock_code: str = Query("", description="标的过滤"),
+    period: str = Query("", description="周期过滤"),
+    lineage_anchor: str = Query("", description="lineage 锚点过滤"),
+) -> dict[str, Any]:
+    records = _read_governance_action_audit(
+        limit=limit,
+        action_type=action_type,
+        source=source,
+        stock_code=stock_code,
+        period=period,
+        lineage_anchor=lineage_anchor,
+    )
+    return {
+        "records": records,
+        "returned": len(records),
+        "filters": {
+            "limit": limit,
+            "action_type": action_type,
+            "source": source,
+            "stock_code": stock_code,
+            "period": period,
+            "lineage_anchor": lineage_anchor,
+        },
+        "config_meta": _describe_config_file(_GOVERNANCE_ACTION_AUDIT_PATH),
+        "server_time": int(time.time() * 1000),
+        "build_version": _BUILD_VERSION,
+        "commit_sha": _COMMIT_SHA,
+    }
+
+
+@app.post(
+    "/api/v1/data-governance/action-audit",
+    tags=["数据治理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def create_governance_action_audit(body: GovernanceActionAuditBody) -> dict[str, Any]:
+    record = _append_governance_action_audit(
+        action_id=body.action_id,
+        action_type=body.action_type,
+        tone=body.tone,
+        title=body.title,
+        detail=body.detail,
+        source=body.source,
+        payload=body.payload,
+    )
+    return {
+        "record": record,
+        "config_meta": _describe_config_file(_GOVERNANCE_ACTION_AUDIT_PATH),
+        "server_time": int(time.time() * 1000),
+        "build_version": _BUILD_VERSION,
+        "commit_sha": _COMMIT_SHA,
+    }
+
+
+@app.get(
+    "/api/v1/data-governance/export-snapshot",
+    tags=["数据治理"],
+    response_model=None,
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def export_data_governance_snapshot(
+    trend_days: int = Query(default=7, ge=1, le=365, description="趋势窗口天数"),
+    audit_limit: int = Query(default=50, ge=1, le=500, description="附带审计日志条数"),
+    export_format: str = Query(default="json", pattern="^(json|jsonl|csv)$", description="导出格式"),
+) -> Any:
+    payload = _build_governance_snapshot_payload(trend_days=trend_days, audit_limit=audit_limit)
+    snapshot_name = str(payload["snapshot_name"])
+    if export_format == "json":
+        return payload
+    if export_format == "jsonl":
+        lines = [
+            json.dumps({"record_type": "snapshot_meta", "snapshot_name": payload["snapshot_name"], "generated_at": payload["generated_at"]}, ensure_ascii=False),
+            json.dumps({"record_type": "summary", "summary": payload["overview"].get("summary", {})}, ensure_ascii=False),
+        ]
+        for item in payload["action_audit"]:
+            lines.append(json.dumps({"record_type": "action_audit", **item}, ensure_ascii=False))
+        return Response(
+            content="\n".join(lines) + "\n",
+            media_type="application/x-ndjson",
+            headers={"Content-Disposition": f'attachment; filename="{snapshot_name}.jsonl"'},
+        )
+    csv_buffer = StringIO()
+    writer = csv.writer(csv_buffer)
+    writer.writerow(["section", "key", "value"])
+    for key, value in payload["overview"].get("summary", {}).items():
+        writer.writerow(["summary", key, value])
+    for item in payload["action_audit"]:
+        writer.writerow(
+            [
+                "action_audit",
+                item.get("event_id", ""),
+                json.dumps(
+                    {
+                        "event_time": item.get("event_time"),
+                        "action_type": item.get("action_type"),
+                        "stock_code": item.get("stock_code"),
+                        "period": item.get("period"),
+                        "detail": item.get("detail"),
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+    return Response(
+        content=csv_buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{snapshot_name}.csv"'},
+    )
 
 
 @app.get("/health/sla", tags=["运维"])
@@ -736,6 +1823,636 @@ def sla_health_check(report_date: str = "") -> dict[str, Any]:
     except Exception as e:
         payload["status"] = "degraded"
         payload["error"] = str(e)
+    payload["server_time"] = int(time.time() * 1000)
+    payload["build_version"] = _BUILD_VERSION
+    payload["commit_sha"] = _COMMIT_SHA
+    return payload
+
+
+@app.get(
+    "/api/v1/system/state-status",
+    tags=["系统状态"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_system_state_status() -> dict[str, Any]:
+    """返回状态主线与影子同步的真实快照，供 Tauri SystemRoute 直接消费。"""
+    try:
+        from core.state_store.system_status import get_system_state_snapshot
+
+        snapshot = get_system_state_snapshot().to_dict()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"系统状态查询失败: {exc}",
+        ) from exc
+
+    snapshot["server_time"] = int(time.time() * 1000)
+    snapshot["build_version"] = _BUILD_VERSION
+    snapshot["commit_sha"] = _COMMIT_SHA
+    return snapshot
+
+
+@app.get(
+    "/api/v1/data-quality/golden-1d-status",
+    tags=["数据质量"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_golden_1d_status(symbol: str = Query("", description="标的代码，留空返回汇总")) -> dict[str, Any]:
+    """查询黄金标准 1D 数据质量状态。
+
+    - `symbol`: 标的代码（如 000001.SZ），留空时返回全量汇总
+    - 返回 golden/partial_trust/degraded/unknown 状态
+    - 供 Qt/Tauri 图表左上角质量叠层消费
+    """
+    try:
+        from data_manager.golden_1d_audit import Golden1dAuditor
+
+        auditor = Golden1dAuditor()
+
+        def _serialize_repair_snapshot(target_symbol: str) -> dict[str, Any]:
+            from data_manager.golden_1d_repair_orchestrator import Golden1DRepairOrchestrator
+
+            snapshot = Golden1DRepairOrchestrator(auditor=auditor).get_latest_plan(target_symbol)
+            if snapshot is None:
+                return {
+                    "plan_status": "unknown",
+                    "generated_at": None,
+                    "queued_tasks": 0,
+                    "failed_tasks": 0,
+                    "task_count": 0,
+                    "blocker_issues": [],
+                    "notes": [],
+                    "tasks": [],
+                }
+            return {
+                "plan_status": snapshot.plan_status,
+                "generated_at": snapshot.generated_at,
+                "queued_tasks": snapshot.queued_tasks,
+                "failed_tasks": snapshot.failed_tasks,
+                "task_count": snapshot.task_count,
+                "blocker_issues": snapshot.blocker_issues[:5],
+                "notes": snapshot.notes[:5],
+                "tasks": [
+                    {
+                        "stock_code": task.stock_code,
+                        "period": task.period,
+                        "start_date": task.start_date,
+                        "end_date": task.end_date,
+                        "reason": task.reason,
+                        "priority_hint": task.priority_hint,
+                        "current_symbol": task.current_symbol,
+                        "gap_length": task.gap_length,
+                    }
+                    for task in snapshot.tasks[:5]
+                ],
+            }
+
+        if symbol:
+            summary = auditor.get_audit_status(symbol)
+            if summary is None:
+                return {
+                    "symbol": symbol,
+                    "status": "unknown",
+                    "message": "该标的尚未执行审计",
+                    "repair": _serialize_repair_snapshot(symbol),
+                    "server_time": int(time.time() * 1000),
+                }
+            return {
+                "symbol": summary.symbol,
+                "golden_status": summary.golden_status,
+                "is_golden_1d_ready": summary.is_golden_1d_ready,
+                "listing_date": summary.listing_date,
+                "local_first_date": summary.local_first_date,
+                "local_last_date": summary.local_last_date,
+                "expected_trading_days": summary.expected_trading_days,
+                "actual_trading_days": summary.actual_trading_days,
+                "missing_days": summary.missing_days,
+                "has_listing_gap": summary.has_listing_gap,
+                "cross_source_status": summary.cross_source_status,
+                "cross_source_fields_passed": f"{summary.cross_source_fields_passed}/{summary.cross_source_fields_total}",
+                "backfill_status": summary.backfill_status,
+                "last_audited_at": summary.last_audited_at,
+                "issues": summary.issues[:5],
+                "repair": _serialize_repair_snapshot(summary.symbol),
+                "server_time": int(time.time() * 1000),
+            }
+        else:
+            import sqlite3
+
+            conn = sqlite3.connect(auditor.audit_db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT golden_status, COUNT(*) as cnt FROM golden_1d_audit GROUP BY golden_status"
+            ).fetchall()
+            total = conn.execute("SELECT COUNT(*) as cnt FROM golden_1d_audit").fetchone()["cnt"]
+            conn.close()
+
+            summary = {"golden": 0, "partial_trust": 0, "degraded": 0, "unknown": 0}
+            for row in rows:
+                summary[row["golden_status"]] = row["cnt"]
+
+            return {
+                "total_audited": total,
+                "golden_count": summary["golden"],
+                "partial_trust_count": summary["partial_trust"],
+                "degraded_count": summary["degraded"],
+                "unknown_count": summary["unknown"],
+                "golden_ratio": summary["golden"] / total if total > 0 else 0.0,
+                "server_time": int(time.time() * 1000),
+            }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"黄金标准 1D 状态查询失败: {exc}",
+        ) from exc
+
+
+@app.get(
+    "/api/v1/data-quality/golden-1d-repair-plan",
+    tags=["数据质量"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_golden_1d_repair_plan(
+    symbol: str = Query("", description="标的代码，留空返回最近 repair plans"),
+    limit: int = Query(default=20, ge=1, le=100, description="批量查询时返回最近 plan 条数"),
+) -> dict[str, Any]:
+    """查询 Golden 1D 后台修复编排状态。"""
+    try:
+        from data_manager.golden_1d_repair_orchestrator import Golden1DRepairOrchestrator
+
+        orchestrator = Golden1DRepairOrchestrator()
+
+        def _serialize_snapshot(snapshot: Any) -> dict[str, Any]:
+            summary_snapshot = (
+                snapshot.summary_snapshot if isinstance(getattr(snapshot, "summary_snapshot", None), dict) else {}
+            )
+            return {
+                "symbol": snapshot.symbol,
+                "plan_status": snapshot.plan_status,
+                "generated_at": snapshot.generated_at,
+                "queued_tasks": snapshot.queued_tasks,
+                "failed_tasks": snapshot.failed_tasks,
+                "task_count": snapshot.task_count,
+                "blocker_issues": snapshot.blocker_issues[:5],
+                "notes": snapshot.notes[:5],
+                "governance": summary_snapshot.get("governance", {}),
+                "tasks": [
+                    {
+                        "stock_code": task.stock_code,
+                        "period": task.period,
+                        "start_date": task.start_date,
+                        "end_date": task.end_date,
+                        "reason": task.reason,
+                        "priority_hint": task.priority_hint,
+                        "current_symbol": task.current_symbol,
+                        "gap_length": task.gap_length,
+                    }
+                    for task in snapshot.tasks[:5]
+                ],
+            }
+
+        if symbol:
+            snapshot = orchestrator.get_latest_plan(symbol)
+            if snapshot is None:
+                return {
+                    "symbol": symbol,
+                    "plan_status": "unknown",
+                    "generated_at": None,
+                    "queued_tasks": 0,
+                    "failed_tasks": 0,
+                    "task_count": 0,
+                    "blocker_issues": [],
+                    "notes": [],
+                    "tasks": [],
+                    "server_time": int(time.time() * 1000),
+                }
+            payload = _serialize_snapshot(snapshot)
+            payload["server_time"] = int(time.time() * 1000)
+            return payload
+
+        snapshots = orchestrator.list_recent_plans(limit=limit)
+        return {
+            "items": [_serialize_snapshot(item) for item in snapshots],
+            "returned": len(snapshots),
+            "limit": limit,
+            "server_time": int(time.time() * 1000),
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Golden 1D repair plan 查询失败: {exc}",
+        ) from exc
+
+
+@app.post(
+    "/api/v1/data-quality/golden-1d-repair",
+    tags=["数据质量"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def trigger_golden_1d_repair(
+    symbol: str = Query("", description="标的代码，留空执行限量批量 repair orchestration"),
+    force_full: bool = Query(default=False, description="是否先强制全量复审再执行 repair orchestration"),
+    limit: int = Query(default=25, ge=1, le=200, description="批量 repair 时最多处理的标的数"),
+) -> dict[str, Any]:
+    """手动触发 Golden 1D repair orchestration。"""
+    try:
+        from data_manager.golden_1d_audit import Golden1dAuditor
+        from data_manager.golden_1d_repair_orchestrator import Golden1DRepairOrchestrator
+
+        auditor = Golden1dAuditor()
+        orchestrator = Golden1DRepairOrchestrator(auditor=auditor)
+
+        if symbol:
+            result = orchestrator.audit_and_schedule(symbol, force_full=force_full, current_symbol=symbol)
+            snapshot = orchestrator.get_latest_plan(symbol)
+            audit_record = _append_governance_action_audit(
+                action_id="trigger_golden_1d_repair",
+                action_type="trigger_repair",
+                tone="warning" if result.status != "complete" else "ok",
+                title="触发 Golden 1D Repair",
+                detail=f"{symbol} -> {result.status}",
+                source="api_server",
+                payload={"symbol": symbol, "force_full": force_full, "status": result.status},
+            )
+            return {
+                "symbol": symbol,
+                "status": result.status,
+                "queued_tasks": result.queued_tasks,
+                "failed_tasks": result.failed_tasks,
+                "blocker_issues": result.blocker_issues[:5],
+                "notes": result.notes[:5],
+                "force_full": force_full,
+                "repair": {
+                    "plan_status": snapshot.plan_status if snapshot else "unknown",
+                    "generated_at": snapshot.generated_at if snapshot else None,
+                    "queued_tasks": snapshot.queued_tasks if snapshot else 0,
+                    "failed_tasks": snapshot.failed_tasks if snapshot else 0,
+                    "task_count": snapshot.task_count if snapshot else 0,
+                    "blocker_issues": snapshot.blocker_issues[:5] if snapshot else [],
+                    "notes": snapshot.notes[:5] if snapshot else [],
+                    "tasks": [
+                        {
+                            "stock_code": task.stock_code,
+                            "period": task.period,
+                            "start_date": task.start_date,
+                            "end_date": task.end_date,
+                            "reason": task.reason,
+                            "priority_hint": task.priority_hint,
+                            "current_symbol": task.current_symbol,
+                            "gap_length": task.gap_length,
+                        }
+                        for task in (snapshot.tasks[:5] if snapshot else [])
+                    ],
+                },
+                "audit_record": audit_record,
+                "server_time": int(time.time() * 1000),
+            }
+
+        symbols = auditor.list_stored_symbols(limit=limit)
+        items: list[dict[str, Any]] = []
+        status_counts: dict[str, int] = {}
+        for item_symbol in symbols[:limit]:
+            result = orchestrator.audit_and_schedule(item_symbol, force_full=force_full)
+            status_counts[result.status] = int(status_counts.get(result.status, 0)) + 1
+            items.append(
+                {
+                    "symbol": item_symbol,
+                    "status": result.status,
+                    "queued_tasks": result.queued_tasks,
+                    "failed_tasks": result.failed_tasks,
+                }
+            )
+        audit_record = _append_governance_action_audit(
+            action_id="trigger_golden_1d_repair_batch",
+            action_type="trigger_repair_batch",
+            tone="warning" if status_counts.get("blocked", 0) or status_counts.get("failed", 0) else "ok",
+            title="批量触发 Golden 1D Repair",
+            detail=f"processed={len(items)}",
+            source="api_server",
+            payload={"force_full": force_full, "limit": limit, "status_counts": status_counts},
+        )
+        return {
+            "processed": len(items),
+            "status_counts": status_counts,
+            "force_full": force_full,
+            "limit": limit,
+            "items": items,
+            "audit_record": audit_record,
+            "server_time": int(time.time() * 1000),
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Golden 1D repair 触发失败: {exc}",
+        ) from exc
+
+
+@app.post(
+    "/api/v1/data-quality/late-event-replay",
+    tags=["数据质量"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def trigger_late_event_replay(
+    symbol: str = Query("", description="标的代码，可选"),
+    period: str = Query("", description="周期代码，可选"),
+    limit: int = Query(default=20, ge=1, le=200, description="最大处理条数"),
+    max_retries: int = Query(default=3, ge=1, le=10, description="最大重试次数"),
+    reason_regex: str = Query(
+        default=r"(late|out_of_order|watermark|stale|reorder)",
+        description="reason 正则过滤",
+    ),
+) -> dict[str, Any]:
+    try:
+        iface = _get_datasource_health_interface()
+        result = iface.run_late_event_replay(
+            limit=limit,
+            max_retries=max_retries,
+            reason_regex=reason_regex,
+            stock_code=symbol,
+            period=period,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"late event replay 触发失败: {exc}",
+        ) from exc
+    audit_record = _append_governance_action_audit(
+        action_id="trigger_late_event_replay",
+        action_type="trigger_replay",
+        tone="warning" if int(result.get("failed", 0) or 0) > 0 else "ok",
+        title="触发 Late Event Replay",
+        detail=f"{symbol or 'ALL'} / {period or 'ALL'} -> succeeded={result.get('succeeded', 0)}",
+        source="api_server",
+        payload={
+            "symbol": symbol,
+            "period": period,
+            "limit": limit,
+            "max_retries": max_retries,
+            "reason_regex": reason_regex,
+            "result": result,
+        },
+    )
+    return {
+        "symbol": symbol,
+        "period": period,
+        "result": result,
+        "limit": limit,
+        "max_retries": max_retries,
+        "reason_regex": reason_regex,
+        "audit_record": audit_record,
+        "server_time": int(time.time() * 1000),
+        "build_version": _BUILD_VERSION,
+        "commit_sha": _COMMIT_SHA,
+    }
+
+
+@app.post(
+    "/api/v1/data-quality/golden-1d-audit",
+    tags=["数据质量"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def trigger_golden_1d_audit(
+    symbol: str = Query("", description="标的代码，留空审计全部"),
+    force_full: bool = Query(default=False, description="是否忽略分区 hash 缓存并执行全量重验"),
+    limit: int = Query(default=50, ge=1, le=5000, description="批量审计时最多处理的标的数"),
+) -> dict[str, Any]:
+    """触发黄金标准 1D 数据质量审计。
+
+    - `symbol`: 标的代码，留空时执行全量审计
+    - 执行 DAT 直读 + 全历史逐日穷举 + 1m→1d 不变量验证
+    """
+    try:
+        from data_manager.golden_1d_audit import Golden1dAuditor
+
+        auditor = Golden1dAuditor()
+
+        if symbol:
+            summary = auditor.audit_symbol(symbol, force_full=force_full)
+            return {
+                "symbol": summary.symbol,
+                "golden_status": summary.golden_status,
+                "is_golden_1d_ready": summary.is_golden_1d_ready,
+                "missing_days": summary.missing_days,
+                "force_full": force_full,
+                "issues": summary.issues[:5],
+                "server_time": int(time.time() * 1000),
+            }
+        else:
+            symbols = auditor.list_stored_symbols(limit=limit)
+            if not symbols:
+                symbols = ["000001.SZ", "000002.SZ", "600000.SH"]
+
+            report = auditor.audit_batch(symbols[:limit], max_workers=4, force_full=force_full)
+            return {
+                "total_audited": report.total_symbols,
+                "golden_count": report.golden_count,
+                "partial_trust_count": report.partial_trust_count,
+                "degraded_count": report.degraded_count,
+                "unknown_count": report.unknown_count,
+                "force_full": force_full,
+                "limit": limit,
+                "audited_at": report.audited_at,
+                "server_time": int(time.time() * 1000),
+            }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"黄金标准 1D 审计触发失败: {exc}",
+        ) from exc
+
+
+@app.get(
+    "/api/v1/system/frontend-events",
+    tags=["系统状态"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def list_system_frontend_events(
+    event_type: str = "",
+    start_time: str = "",
+    end_time: str = "",
+    limit: int = Query(default=20, ge=1, le=200),
+) -> dict[str, Any]:
+    """通过 federation executor 读取状态主线中的 frontend_events 读模型。"""
+    try:
+        from core.state_store.system_read_models import read_frontend_events_read_model
+
+        payload = read_frontend_events_read_model(
+            limit=limit,
+            event_type=event_type or None,
+            start_time=start_time or None,
+            end_time=end_time or None,
+        ).to_dict()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"系统事件查询失败: {exc}",
+        ) from exc
+
+    payload["filters"] = {
+        "event_type": event_type,
+        "start_time": start_time,
+        "end_time": end_time,
+        "limit": limit,
+    }
+    payload["server_time"] = int(time.time() * 1000)
+    payload["build_version"] = _BUILD_VERSION
+    payload["commit_sha"] = _COMMIT_SHA
+    return payload
+
+
+@app.get(
+    "/api/v1/data-governance/overview",
+    tags=["数据治理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_data_governance_overview(
+    sla_report_date: str = "",
+    trend_days: int = Query(default=7, ge=1, le=365, description="趋势与时间线窗口天数"),
+) -> dict[str, Any]:
+    """聚合数据治理 Route 所需的只读快照。"""
+    try:
+        controller = _get_data_governance_controller()
+        iface = _get_datasource_health_interface()
+        datasource_health = datasource_health_check()
+        sla_health = sla_health_check(sla_report_date)
+        pipeline = controller.get_pipeline_status()
+        routing = controller.get_routing_metrics()
+        duckdb = controller.get_duckdb_summary()
+        environment = controller.get_all_env_config()
+        realtime = controller.get_realtime_pipeline_info()
+        receipt_store = iface.get_receipt_store_summary()
+        publish_gate = iface.get_publish_gate_summary()
+        reject_reasons = iface.get_gate_reject_reason_summary()
+        reject_severity = iface.get_gate_reject_severity_summary()
+        gate_sla_impact = iface.get_gate_sla_impact_summary()
+        threshold_bundle = _load_governance_threshold_bundle()
+        threshold_overrides = threshold_bundle["overrides"]
+        receipt_timeline = iface.get_receipt_timeline(limit=12, lookback_days=trend_days)
+        gate_trend = iface.get_gate_trend_summary(days=trend_days)
+        gate_trend_by_symbol = iface.get_gate_dimension_trend_summary(days=trend_days, dimension="symbol", limit=5)
+        gate_trend_by_period = iface.get_gate_dimension_trend_summary(days=trend_days, dimension="period", limit=5)
+        sla_threshold_panel = iface.get_sla_alert_threshold_panel_with_overrides(threshold_overrides)
+        rulebook_bundle = _get_governance_action_rulebook_bundle()
+        governance_action_rulebook = rulebook_bundle["rules"]
+        governance_action_recommendations = _build_governance_action_recommendations(
+            receipt_timeline=receipt_timeline,
+            threshold_panel=sla_threshold_panel,
+        )
+        recent_action_audit = _read_governance_action_audit(limit=12)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"数据治理概览查询失败: {exc}",
+        ) from exc
+
+    return {
+        "datasource_health": datasource_health,
+        "sla_health": sla_health,
+        "pipeline": pipeline,
+        "routing": routing,
+        "duckdb": duckdb,
+        "environment": environment,
+        "realtime": realtime,
+        "receipts": {
+            "store": receipt_store,
+            "publish_gate": publish_gate,
+            "gate_reject_reasons": reject_reasons,
+            "gate_reject_severity": reject_severity,
+            "gate_sla_impact": gate_sla_impact,
+            "sla_threshold_panel": sla_threshold_panel,
+            "sla_threshold_overrides": threshold_overrides,
+            "sla_threshold_config_meta": _describe_config_file(_GOVERNANCE_THRESHOLD_CONFIG_PATH),
+            "sla_threshold_version": int(threshold_bundle.get("config_version", 0) or 0),
+            "sla_threshold_updated_by": str(threshold_bundle.get("updated_by", "unknown")),
+            "sla_threshold_note": str(threshold_bundle.get("note", "")),
+            "action_rulebook": governance_action_rulebook,
+            "action_rulebook_meta": rulebook_bundle["meta"],
+            "action_rulebook_validation": rulebook_bundle["validation"],
+            "action_recommendations": governance_action_recommendations,
+            "action_audit_recent": recent_action_audit,
+            "action_audit_meta": _describe_config_file(_GOVERNANCE_ACTION_AUDIT_PATH),
+            "timeline": receipt_timeline,
+            "trend_7d": gate_trend,
+            "trend_by_symbol_7d": gate_trend_by_symbol,
+            "trend_by_period_7d": gate_trend_by_period,
+        },
+        "summary": {
+            "datasource_status": datasource_health.get("status", "unknown"),
+            "sla_status": sla_health.get("status", "unknown"),
+            "pipeline_healthy": bool(pipeline.get("overall_healthy", False)),
+            "healthy_sources": int(routing.get("healthy_sources", 0) or 0),
+            "total_sources": int(routing.get("total_sources", 0) or 0),
+            "duckdb_healthy": bool(duckdb.get("healthy", False)),
+            "env_valid": bool(environment.get("overall_valid", False)),
+            "realtime_connected": realtime.get("connected"),
+            "gate_degraded": int(publish_gate.get("degraded", 0) or 0),
+            "gate_reject_total": sum(int(v or 0) for k, v in reject_reasons.items() if k != "passed"),
+            "gate_critical": int(reject_severity.get("critical", 0) or 0),
+            "gate_warning": int(reject_severity.get("warning", 0) or 0),
+            "sla_gate_block": int(gate_sla_impact.get("gate_block", 0) or 0),
+            "sla_monitor": int(gate_sla_impact.get("monitor", 0) or 0),
+            "repair_receipts": int(receipt_store.get("repair", 0) or 0),
+            "replay_receipts": int(receipt_store.get("replay", 0) or 0),
+        },
+        "filters": {"sla_report_date": sla_report_date, "trend_days": trend_days},
+        "server_time": int(time.time() * 1000),
+        "build_version": _BUILD_VERSION,
+        "commit_sha": _COMMIT_SHA,
+    }
+
+
+@app.get(
+    "/api/v1/data-governance/trading-calendar",
+    tags=["数据治理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_data_governance_trading_calendar(start_date: str, end_date: str) -> dict[str, Any]:
+    """返回 DataRoute 使用的交易日历摘要与列表。"""
+    try:
+        payload = _get_data_governance_controller().get_trading_calendar_info(
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"交易日历查询失败: {exc}",
+        ) from exc
+
+    payload["server_time"] = int(time.time() * 1000)
+    payload["build_version"] = _BUILD_VERSION
+    payload["commit_sha"] = _COMMIT_SHA
+    return payload
+
+
+@app.get(
+    "/api/v1/data-governance/traceability",
+    tags=["数据治理"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def list_data_governance_traceability(
+    stock_code: str = "",
+    period: str = "",
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    """返回逐标的数据来源溯源记录。"""
+    try:
+        payload = _get_data_governance_controller().get_ingestion_traceability(
+            stock_code=stock_code or None,
+            period=period or None,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"数据溯源查询失败: {exc}",
+        ) from exc
+
+    payload["filters"] = {
+        "stock_code": stock_code,
+        "period": period,
+        "limit": limit,
+    }
     payload["server_time"] = int(time.time() * 1000)
     payload["build_version"] = _BUILD_VERSION
     payload["commit_sha"] = _COMMIT_SHA
@@ -872,27 +2589,108 @@ def get_market_snapshot(symbol: str) -> dict:
     }
 
 
+@app.get(
+    "/api/v1/chart/bars",
+    tags=["图表"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_chart_bars(
+    symbol: str = Query(..., description="标的代码，如 000001.SZ"),
+    interval: str = Query(default="1d", description="图表周期，支持 1m/5m/15m/30m/1h/4h/1d/1w"),
+    start_date: str = Query(default="", description="开始日期，YYYY-MM-DD；留空按周期默认窗口"),
+    end_date: str = Query(default="", description="结束日期，YYYY-MM-DD；留空默认今天"),
+    adjust: str = Query(default="none", description="复权类型"),
+    limit: int = Query(default=800, ge=1, le=5000, description="最多返回 bars 数量"),
+) -> dict[str, Any]:
+    """返回 Workbench 图表主舞台使用的 K 线 bars 与 Golden 1D 质量元数据。"""
+    if adjust not in _CHART_ADJUST_OPTIONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"adjust 参数非法，可选值: {sorted(_CHART_ADJUST_OPTIONS)}",
+        )
+
+    requested_interval = str(interval or "1d").strip().lower()
+    backend_period = _resolve_chart_backend_period(requested_interval)
+    requested_start_supplied = bool(start_date)
+    requested_end_supplied = bool(end_date)
+    start_at, end_at = _resolve_chart_request_window(requested_interval, start_date, end_date)
+
+    try:
+        iface = _get_datasource_health_interface()
+        if getattr(iface, "con", None) is None:
+            try:
+                iface.connect(read_only=False)
+            except Exception:
+                pass
+
+        listing_date = getattr(iface, "get_listing_date", lambda _symbol: None)(symbol)
+
+        def _load_frame(window_start: str, window_end: str):
+            local_reader = getattr(iface, "_read_from_duckdb", None)
+            if callable(local_reader):
+                return local_reader(
+                    symbol,
+                    window_start,
+                    window_end,
+                    backend_period,
+                    adjust,
+                    listing_date=listing_date,
+                )
+            return iface.get_stock_data(
+                stock_code=symbol,
+                start_date=window_start,
+                end_date=window_end,
+                period=backend_period,
+                adjust=adjust,
+                auto_save=False,
+            )
+
+        df = _load_frame(start_at, end_at)
+
+        if df is None or (hasattr(df, "empty") and df.empty):
+            date_range_getter = getattr(iface, "get_stock_date_range", None)
+            if (
+                callable(date_range_getter)
+                and not requested_start_supplied
+                and not requested_end_supplied
+            ):
+                available_window = date_range_getter(symbol, backend_period)
+                if available_window:
+                    fallback_start, fallback_end = _resolve_chart_available_window(
+                        requested_interval,
+                        available_window[0],
+                        available_window[1],
+                    )
+                    if (fallback_start, fallback_end) != (start_at, end_at):
+                        start_at, end_at = fallback_start, fallback_end
+                        df = _load_frame(start_at, end_at)
+
+        bars = _serialize_chart_bars(df, requested_interval, limit)
+        quality = _build_chart_quality_payload(symbol)
+        return {
+            "symbol": symbol,
+            "interval": requested_interval,
+            "resolved_period": backend_period,
+            "adjust": adjust,
+            "start_date": start_at,
+            "end_date": end_at,
+            "bar_count": len(bars),
+            "bars": bars,
+            "quality": quality,
+            "server_time": int(time.time() * 1000),
+            "build_version": _BUILD_VERSION,
+            "commit_sha": _COMMIT_SHA,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"图表 bars 查询失败: {exc}",
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
-# 账户注册表 REST API
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/v1/accounts/", tags=["账户管理"], dependencies=[Depends(_verify_auth_and_rate)])
-def list_accounts_api() -> list[dict]:
-    """枚举所有已注册账户。"""
-    from core.account_registry import account_registry
-
-    return account_registry.list_accounts()
-
-
-@app.post("/api/v1/accounts/", tags=["账户管理"], dependencies=[Depends(_verify_auth_and_rate)])
-def register_account_api(body: AccountRegisterBody) -> dict:
-    """注册或更新账户（account_id 存在则合并更新）。"""
-    from core.account_registry import account_registry
-
-    payload = body.model_dump()
-    return account_registry.register_account(payload)
-
 
 @app.get(
     "/api/v1/accounts/{account_id}",
@@ -1003,7 +2801,7 @@ async def ws_market(
     客户端去重键：symbol + seq
     数据通过 ingest_tick_from_thread() 从 QMT 实时推送（无 mock）。
     """
-    if _API_TOKEN and token != _API_TOKEN:
+    if _API_TOKEN and (not token or not secrets.compare_digest(token, _API_TOKEN)):
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
@@ -1132,7 +2930,6 @@ def refresh_financial_data(
             iface = _get_datasource_health_interface()
             if getattr(iface, "qmt_available", False):
                 import pandas as pd
-
                 from xtquant import xtdata  # type: ignore[import]
 
                 raw = xtdata.get_financial_data(
@@ -1182,6 +2979,763 @@ def refresh_financial_data(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"财务数据刷新失败: {exc}",
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# 七层结构 / 审计 / 信号查询 API
+# ---------------------------------------------------------------------------
+
+
+@app.get(
+    "/api/v1/structures/",
+    tags=["七层架构"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def list_structures(
+    code: str = "",
+    interval: str = "",
+    direction: str = "",
+    status_filter: str = Query(default="", alias="status"),
+    include_bayes_meta: bool = Query(default=False),
+    group_strategy: str = Query(default="fixed"),
+    min_observations: int = Query(default=3, ge=1),
+    limit: int = Query(default=200, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """查询 structure_analyze 主表，供前端结构面板和离线实验底座消费。"""
+    allowed_direction = {"up", "down"}
+    allowed_status = {"active", "closed", "reversed"}
+    if direction and direction not in allowed_direction:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"direction 参数非法，可选值: {sorted(allowed_direction)}",
+        )
+    if status_filter and status_filter not in allowed_status:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"status 参数非法，可选值: {sorted(allowed_status)}",
+        )
+    if group_strategy not in {"fixed", "adaptive"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="group_strategy 参数非法，可选值: ['adaptive', 'fixed']",
+        )
+
+    sql = """
+        SELECT
+            id AS structure_id,
+            code,
+            interval,
+            created_at,
+            direction,
+            p0_ts,
+            p0_price,
+            p1_ts,
+            p1_price,
+            p2_ts,
+            p2_price,
+            p3_ts,
+            p3_price,
+            attractor_mean,
+            attractor_std,
+            bayes_lower,
+            bayes_upper,
+            retrace_ratio,
+            status,
+            closed_at
+        FROM structure_analyze
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if code:
+        clauses.append("code = ?")
+        params.append(code)
+    if interval:
+        clauses.append("interval = ?")
+        params.append(interval)
+    if direction:
+        clauses.append("direction = ?")
+        params.append(direction)
+    if status_filter:
+        clauses.append("status = ?")
+        params.append(status_filter)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY created_at DESC, structure_id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    try:
+        db_mgr = _get_structure_query_db_manager()
+        rows = _df_to_records(
+            db_mgr.execute_read_query(sql, tuple(params))
+        )
+        if include_bayes_meta and rows:
+            from data_manager.structure_bayesian_baseline import StructureBayesianBaseline
+            from data_manager.structure_dataset_builder import StructureDatasetBuilder
+
+            builder = StructureDatasetBuilder(db_manager=db_mgr)
+            baseline = StructureBayesianBaseline(dataset_builder=builder)
+            dataset = builder.build_dataset(
+                code=code,
+                interval=interval,
+                direction=direction,
+                statuses=[status_filter] if status_filter else None,
+                limit=limit,
+                offset=offset,
+                order_desc=True,
+            )
+            annotated = baseline.annotate_dataset(
+                dataset,
+                group_by=("code", "interval", "direction"),
+                group_strategy=group_strategy,
+                min_observations=min_observations,
+            )
+            meta_by_id = {
+                row["structure_id"]: row for row in _df_to_records(annotated)
+            }
+            for row in rows:
+                meta = meta_by_id.get(row.get("structure_id"))
+                if not meta:
+                    continue
+                for key in (
+                    "posterior_mean",
+                    "observation_count",
+                    "continuation_count",
+                    "reversal_count",
+                    "bayes_group_level",
+                    "bayes_group_key",
+                ):
+                    row[key] = meta.get(key)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"结构查询失败: {exc}",
+        ) from exc
+
+    items = [_serialize_structure_row(row) for row in rows]
+    return {
+        "items": items,
+        "returned": len(items),
+        "limit": limit,
+        "offset": offset,
+        "filters": {
+            "code": code,
+            "interval": interval,
+            "direction": direction,
+            "status": status_filter,
+            "include_bayes_meta": include_bayes_meta,
+            "group_strategy": group_strategy,
+            "min_observations": min_observations,
+        },
+        "server_time": int(time.time() * 1000),
+    }
+
+
+@app.get(
+    "/api/v1/structures/bayesian-baseline",
+    tags=["七层架构"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def preview_structure_bayesian_baseline(
+    code: str = "",
+    interval: str = "",
+    direction: str = "",
+    statuses: list[str] | None = Query(default=None, alias="status"),
+    signal_types: list[str] | None = Query(default=None, alias="signal_type"),
+    group_by: list[str] | None = Query(default=None),
+    group_strategy: str = Query(default="fixed"),
+    min_observations: int = Query(default=3, ge=1),
+    alpha_prior: float = Query(default=1.0, gt=0.0),
+    beta_prior: float = Query(default=1.0, gt=0.0),
+    credible_level: float = Query(default=0.95, gt=0.0, lt=1.0),
+) -> dict[str, Any]:
+    """预览结构 Bayesian baseline 分桶 posterior，不写回数据库。"""
+    allowed_group_by = {"code", "interval", "direction", "status", "latest_signal_type"}
+    effective_group_by = group_by or ["interval", "direction"]
+    invalid = sorted(set(effective_group_by) - allowed_group_by)
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"group_by 参数非法，可选值: {sorted(allowed_group_by)}",
+        )
+    if group_strategy not in {"fixed", "adaptive"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="group_strategy 参数非法，可选值: ['adaptive', 'fixed']",
+        )
+
+    try:
+        from data_manager.structure_bayesian_baseline import StructureBayesianBaseline
+        from data_manager.structure_dataset_builder import StructureDatasetBuilder
+
+        db_mgr = _get_structure_query_db_manager()
+        builder = StructureDatasetBuilder(db_manager=db_mgr)
+        baseline = StructureBayesianBaseline(dataset_builder=builder)
+        dataset = builder.build_dataset(
+            code=code,
+            interval=interval,
+            direction=direction,
+            statuses=statuses,
+            signal_types=signal_types,
+        )
+        posterior = baseline.fit(
+            dataset,
+            group_by=tuple(effective_group_by),
+            group_strategy=group_strategy,
+            min_observations=min_observations,
+            alpha_prior=alpha_prior,
+            beta_prior=beta_prior,
+            credible_level=credible_level,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Bayesian baseline 预览失败: {exc}",
+        ) from exc
+
+    return {
+        "items": _df_to_records(posterior),
+        "returned": len(posterior),
+        "dataset_rows": len(dataset),
+        "group_by": effective_group_by,
+        "group_strategy": group_strategy,
+        "min_observations": min_observations,
+        "writeback": False,
+        "filters": {
+            "code": code,
+            "interval": interval,
+            "direction": direction,
+            "status": statuses or [],
+            "signal_type": signal_types or [],
+        },
+        "server_time": int(time.time() * 1000),
+    }
+
+
+@app.get(
+    "/api/v1/structures/bayesian-baseline/summary",
+    tags=["七层架构"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def summarize_structure_bayesian_baseline(
+    code: str = "",
+    interval: str = "",
+    direction: str = "",
+    statuses: list[str] | None = Query(default=None, alias="status"),
+    signal_types: list[str] | None = Query(default=None, alias="signal_type"),
+    group_by: list[str] | None = Query(default=None),
+    group_strategy: str = Query(default="fixed"),
+    min_observations: int = Query(default=3, ge=1),
+    alpha_prior: float = Query(default=1.0, gt=0.0),
+    beta_prior: float = Query(default=1.0, gt=0.0),
+    credible_level: float = Query(default=0.95, gt=0.0, lt=1.0),
+) -> dict[str, Any]:
+    """返回结构 Bayesian 注解后的 Layer 4 摘要（含审计事件均值）。"""
+    allowed_group_by = {"code", "interval", "direction", "status", "latest_signal_type"}
+    effective_group_by = group_by or ["interval", "direction"]
+    invalid = sorted(set(effective_group_by) - allowed_group_by)
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"group_by 参数非法，可选值: {sorted(allowed_group_by)}",
+        )
+    if group_strategy not in {"fixed", "adaptive"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="group_strategy 参数非法，可选值: ['adaptive', 'fixed']",
+        )
+
+    try:
+        from data_manager.structure_bayesian_baseline import StructureBayesianBaseline
+        from data_manager.structure_dataset_builder import StructureDatasetBuilder
+
+        db_mgr = _get_structure_query_db_manager()
+        builder = StructureDatasetBuilder(db_manager=db_mgr)
+        baseline = StructureBayesianBaseline(dataset_builder=builder)
+        dataset = builder.build_dataset(
+            code=code,
+            interval=interval,
+            direction=direction,
+            statuses=statuses,
+            signal_types=signal_types,
+        )
+        annotated = baseline.annotate_dataset(
+            dataset,
+            group_by=tuple(effective_group_by),
+            group_strategy=group_strategy,
+            min_observations=min_observations,
+            alpha_prior=alpha_prior,
+            beta_prior=beta_prior,
+            credible_level=credible_level,
+        )
+        summary = baseline.summarize_annotated_dataset(annotated)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Bayesian baseline 摘要失败: {exc}",
+        ) from exc
+
+    return {
+        "items": _df_to_records(summary),
+        "returned": len(summary),
+        "dataset_rows": len(dataset),
+        "group_by": effective_group_by,
+        "group_strategy": group_strategy,
+        "min_observations": min_observations,
+        "filters": {
+            "code": code,
+            "interval": interval,
+            "direction": direction,
+            "status": statuses or [],
+            "signal_type": signal_types or [],
+        },
+        "server_time": int(time.time() * 1000),
+    }
+
+
+@app.post(
+    "/api/v1/structures/bayesian-baseline/apply",
+    tags=["七层架构"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def apply_structure_bayesian_baseline(
+    code: str = "",
+    interval: str = "",
+    direction: str = "",
+    statuses: list[str] | None = Query(default=None, alias="status"),
+    signal_types: list[str] | None = Query(default=None, alias="signal_type"),
+    group_by: list[str] | None = Query(default=None),
+    group_strategy: str = Query(default="fixed"),
+    min_observations: int = Query(default=3, ge=1),
+    alpha_prior: float = Query(default=1.0, gt=0.0),
+    beta_prior: float = Query(default=1.0, gt=0.0),
+    credible_level: float = Query(default=0.95, gt=0.0, lt=1.0),
+) -> dict[str, Any]:
+    """计算并将 Bayesian baseline 区间写回 structure_analyze。"""
+    allowed_group_by = {"code", "interval", "direction", "status", "latest_signal_type"}
+    effective_group_by = group_by or ["interval", "direction"]
+    invalid = sorted(set(effective_group_by) - allowed_group_by)
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"group_by 参数非法，可选值: {sorted(allowed_group_by)}",
+        )
+    if group_strategy not in {"fixed", "adaptive"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="group_strategy 参数非法，可选值: ['adaptive', 'fixed']",
+        )
+
+    try:
+        from data_manager.structure_bayesian_baseline import StructureBayesianBaseline
+        from data_manager.structure_dataset_builder import StructureDatasetBuilder
+
+        db_mgr = _get_structure_query_db_manager()
+        builder = StructureDatasetBuilder(db_manager=db_mgr)
+        baseline = StructureBayesianBaseline(dataset_builder=builder)
+        dataset = builder.build_dataset(
+            code=code,
+            interval=interval,
+            direction=direction,
+            statuses=statuses,
+            signal_types=signal_types,
+        )
+        posterior = baseline.fit(
+            dataset,
+            group_by=tuple(effective_group_by),
+            group_strategy=group_strategy,
+            min_observations=min_observations,
+            alpha_prior=alpha_prior,
+            beta_prior=beta_prior,
+            credible_level=credible_level,
+        )
+        updated = baseline.writeback_structure_bounds(
+            dataset,
+            posterior=posterior,
+            group_by=tuple(effective_group_by),
+            group_strategy=group_strategy,
+            min_observations=min_observations,
+            alpha_prior=alpha_prior,
+            beta_prior=beta_prior,
+            credible_level=credible_level,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Bayesian baseline 写回失败: {exc}",
+        ) from exc
+
+    return {
+        "items": _df_to_records(posterior),
+        "returned": len(posterior),
+        "dataset_rows": len(dataset),
+        "updated": updated,
+        "group_by": effective_group_by,
+        "group_strategy": group_strategy,
+        "min_observations": min_observations,
+        "writeback": True,
+        "filters": {
+            "code": code,
+            "interval": interval,
+            "direction": direction,
+            "status": statuses or [],
+            "signal_type": signal_types or [],
+        },
+        "server_time": int(time.time() * 1000),
+    }
+
+
+@app.get(
+    "/api/v1/structures/{structure_id}/detail",
+    tags=["七层架构"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def get_structure_detail(
+    structure_id: str,
+    audit_limit: int = Query(default=20, ge=1, le=200),
+    include_bayes_meta: bool = Query(default=True),
+    group_strategy: str = Query(default="adaptive"),
+    min_observations: int = Query(default=3, ge=1),
+    alpha_prior: float = Query(default=1.0, gt=0.0),
+    beta_prior: float = Query(default=1.0, gt=0.0),
+    credible_level: float = Query(default=0.95, gt=0.0, lt=1.0),
+) -> dict[str, Any]:
+    """查询单个结构详情，返回结构主记录、最新信号、审计明细与审计摘要。"""
+    if group_strategy not in {"fixed", "adaptive"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="group_strategy 参数非法，可选值: ['adaptive', 'fixed']",
+        )
+
+    structure_sql = """
+        SELECT
+            id AS structure_id,
+            code,
+            interval,
+            created_at,
+            direction,
+            p0_ts,
+            p0_price,
+            p1_ts,
+            p1_price,
+            p2_ts,
+            p2_price,
+            p3_ts,
+            p3_price,
+            attractor_mean,
+            attractor_std,
+            bayes_lower,
+            bayes_upper,
+            retrace_ratio,
+            status,
+            closed_at
+        FROM structure_analyze
+        WHERE id = ?
+        LIMIT 1
+    """
+    audit_sql = """
+        SELECT
+            id AS audit_id,
+            structure_id,
+            code,
+            interval,
+            event_type,
+            event_ts,
+            snapshot_json
+        FROM structure_audit
+        WHERE structure_id = ?
+        ORDER BY event_ts DESC, audit_id DESC
+        LIMIT ?
+    """
+    audit_summary_sql = """
+        SELECT
+            COUNT(*) AS audit_event_count,
+            SUM(CASE WHEN event_type = 'create' THEN 1 ELSE 0 END) AS create_event_count,
+            SUM(CASE WHEN event_type = 'extend' THEN 1 ELSE 0 END) AS extend_event_count,
+            SUM(CASE WHEN event_type = 'reverse' THEN 1 ELSE 0 END) AS reverse_event_count,
+            MAX(event_ts) AS last_event_ts,
+            arg_max(event_type, event_ts) AS last_event_type
+        FROM structure_audit
+        WHERE structure_id = ?
+    """
+    latest_signal_sql = """
+        SELECT
+            id AS signal_id,
+            structure_id,
+            code,
+            interval,
+            signal_ts,
+            signal_type,
+            trigger_price,
+            stop_loss_price,
+            stop_loss_distance,
+            drawdown_pct,
+            calmar_snapshot,
+            remarks
+        FROM signal_structured
+        WHERE structure_id = ?
+        ORDER BY signal_ts DESC,
+                 CASE WHEN signal_type = 'EXIT' THEN 1 ELSE 0 END DESC,
+                 signal_id DESC
+        LIMIT 1
+    """
+
+    try:
+        db_mgr = _get_structure_query_db_manager()
+        row_records = _df_to_records(db_mgr.execute_read_query(structure_sql, (structure_id,)))
+        if not row_records:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"未找到 structure_id={structure_id} 对应的结构",
+            )
+        structure_row = row_records[0]
+        audit_rows = _df_to_records(db_mgr.execute_read_query(audit_sql, (structure_id, audit_limit)))
+        audit_summary_rows = _df_to_records(db_mgr.execute_read_query(audit_summary_sql, (structure_id,)))
+        signal_rows = _df_to_records(db_mgr.execute_read_query(latest_signal_sql, (structure_id,)))
+
+        if include_bayes_meta:
+            from data_manager.structure_bayesian_baseline import StructureBayesianBaseline
+            from data_manager.structure_dataset_builder import StructureDatasetBuilder
+
+            builder = StructureDatasetBuilder(db_manager=db_mgr)
+            dataset = builder.build_dataset(
+                code=str(structure_row.get("code") or ""),
+                interval=str(structure_row.get("interval") or ""),
+                direction=str(structure_row.get("direction") or ""),
+            )
+            annotated = StructureBayesianBaseline(dataset_builder=builder).annotate_dataset(
+                dataset,
+                group_by=("code", "interval", "direction"),
+                group_strategy=group_strategy,
+                min_observations=min_observations,
+                alpha_prior=alpha_prior,
+                beta_prior=beta_prior,
+                credible_level=credible_level,
+            )
+            meta = next(
+                (
+                    item
+                    for item in _df_to_records(annotated)
+                    if str(item.get("structure_id")) == str(structure_id)
+                ),
+                None,
+            )
+            if meta:
+                for key in (
+                    "posterior_mean",
+                    "observation_count",
+                    "continuation_count",
+                    "reversal_count",
+                    "bayes_group_level",
+                    "bayes_group_key",
+                ):
+                    structure_row[key] = meta.get(key)
+        structure = _serialize_structure_row(structure_row)
+        audit_items = [_serialize_audit_row(row) for row in audit_rows]
+        latest_signal = _serialize_signal_row(signal_rows[0]) if signal_rows else None
+        audit_summary = audit_summary_rows[0] if audit_summary_rows else {}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"结构详情查询失败: {exc}",
+        ) from exc
+
+    return {
+        "structure": structure,
+        "latest_signal": latest_signal,
+        "audit_items": audit_items,
+        "audit_summary": {
+            "audit_event_count": audit_summary.get("audit_event_count"),
+            "create_event_count": audit_summary.get("create_event_count"),
+            "extend_event_count": audit_summary.get("extend_event_count"),
+            "reverse_event_count": audit_summary.get("reverse_event_count"),
+            "last_event_ts": audit_summary.get("last_event_ts"),
+            "last_event_type": audit_summary.get("last_event_type"),
+        },
+        "filters": {
+            "audit_limit": audit_limit,
+            "include_bayes_meta": include_bayes_meta,
+            "group_strategy": group_strategy,
+            "min_observations": min_observations,
+        },
+        "server_time": int(time.time() * 1000),
+    }
+
+
+@app.get(
+    "/api/v1/structure-audit/",
+    tags=["七层架构"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def list_structure_audit(
+    structure_id: str = "",
+    code: str = "",
+    interval: str = "",
+    event_type: str = "",
+    limit: int = Query(default=200, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """查询 structure_audit 审计日志，返回已解析的结构快照。"""
+    allowed_event_type = {"create", "extend", "reverse", "close"}
+    if event_type and event_type not in allowed_event_type:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"event_type 参数非法，可选值: {sorted(allowed_event_type)}",
+        )
+
+    sql = """
+        SELECT
+            id AS audit_id,
+            structure_id,
+            code,
+            interval,
+            event_type,
+            event_ts,
+            snapshot_json
+        FROM structure_audit
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if structure_id:
+        clauses.append("structure_id = ?")
+        params.append(structure_id)
+    if code:
+        clauses.append("code = ?")
+        params.append(code)
+    if interval:
+        clauses.append("interval = ?")
+        params.append(interval)
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(event_type)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY event_ts DESC, audit_id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    try:
+        rows = _df_to_records(
+            _get_structure_query_db_manager().execute_read_query(sql, tuple(params))
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"结构审计查询失败: {exc}",
+        ) from exc
+
+    items = [_serialize_audit_row(row) for row in rows]
+    return {
+        "items": items,
+        "returned": len(items),
+        "limit": limit,
+        "offset": offset,
+        "filters": {
+            "structure_id": structure_id,
+            "code": code,
+            "interval": interval,
+            "event_type": event_type,
+        },
+        "server_time": int(time.time() * 1000),
+    }
+
+
+@app.get(
+    "/api/v1/signals/",
+    tags=["七层架构"],
+    dependencies=[Depends(_verify_auth_and_rate)],
+)
+def list_structured_signals(
+    structure_id: str = "",
+    code: str = "",
+    interval: str = "",
+    signal_type: str = "",
+    limit: int = Query(default=200, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """查询 signal_structured 信号表，供审计面板/结构实验面板消费。"""
+    allowed_signal_type = {"LONG", "SHORT", "EXIT", "HOLD"}
+    if signal_type and signal_type not in allowed_signal_type:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"signal_type 参数非法，可选值: {sorted(allowed_signal_type)}",
+        )
+
+    sql = """
+        SELECT
+            id AS signal_id,
+            structure_id,
+            code,
+            interval,
+            signal_ts,
+            signal_type,
+            trigger_price,
+            stop_loss_price,
+            stop_loss_distance,
+            drawdown_pct,
+            calmar_snapshot,
+            remarks
+        FROM signal_structured
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if structure_id:
+        clauses.append("structure_id = ?")
+        params.append(structure_id)
+    if code:
+        clauses.append("code = ?")
+        params.append(code)
+    if interval:
+        clauses.append("interval = ?")
+        params.append(interval)
+    if signal_type:
+        clauses.append("signal_type = ?")
+        params.append(signal_type)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY signal_ts DESC, signal_id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    try:
+        rows = _df_to_records(
+            _get_structure_query_db_manager().execute_read_query(sql, tuple(params))
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"结构信号查询失败: {exc}",
+        ) from exc
+
+    items = [_serialize_signal_row(row) for row in rows]
+    return {
+        "items": items,
+        "returned": len(items),
+        "limit": limit,
+        "offset": offset,
+        "filters": {
+            "structure_id": structure_id,
+            "code": code,
+            "interval": interval,
+            "signal_type": signal_type,
+        },
+        "server_time": int(time.time() * 1000),
+    }
 
 
 # ---------------------------------------------------------------------------
