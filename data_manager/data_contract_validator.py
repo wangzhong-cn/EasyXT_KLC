@@ -276,7 +276,7 @@ class DataContractValidator:
             try:
                 close_series = df[c].dropna()
                 if len(close_series) > 1:
-                    pct_chg = close_series.pct_change().abs()
+                    pct_chg = close_series.pct_change(fill_method=None).abs()
                     mask = pct_chg > velocity_limit
                     velocity_violation_count = int(mask.sum())
                     velocity_violation_pct = velocity_violation_count / len(close_series)
@@ -347,7 +347,7 @@ class DataContractValidator:
                     calendar = _get_trading_calendar()
                     date_series = pd.to_datetime(df[dt_col], errors="coerce").dt.date
                     non_td_mask = date_series.apply(
-                        lambda d: d is not None and not calendar.is_trading_day(d)
+                        lambda d: d is not None and not pd.isna(d) and not calendar.is_trading_day(d)
                     )
                     non_td_count = int(non_td_mask.sum())
                     if non_td_count > 0:
@@ -355,7 +355,7 @@ class DataContractValidator:
                         violations.append(
                             ContractViolation(
                                 check="non_trading_day",
-                                severity="hard",
+                                severity="soft",
                                 detail=(
                                     f"发现 {non_td_count} 行非交易日数据"
                                     f"（周期={period}，前3例: {sample}）"

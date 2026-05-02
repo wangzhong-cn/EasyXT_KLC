@@ -17,9 +17,8 @@ import threading
 import time
 import uuid
 import warnings
-from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, cast
 
 import pandas as pd
 
@@ -33,7 +32,20 @@ try:
         ParquetSource,
         TushareSource,
     )
+    from data_manager.market_storage_topology import (
+        SQLitePrimaryMarketSource,
+        SQLitePrimaryMarketStore,
+        resolve_market_storage_topology,
+    )
     from data_manager.duckdb_fivefold_adjust import FiveFoldAdjustmentManager
+    from data_manager.period_registry import PeriodRegistry, build_period_runtime_contracts
+    from data_manager.session_profile_registry import SessionProfileRegistry
+    from data_manager.threshold_registry import ThresholdRegistry
+    from data_manager.timestamp_contract import (
+        TIMESTAMP_CONTRACT_VERSION,
+        normalize_timestamp_frame,
+    )
+    from data_manager.canonical_minute import normalize_canonical_1m
     from data_manager.timestamp_utils import qmt_ms_to_beijing  # P0 时间戳契约层
 except ModuleNotFoundError:
     _project_root = str(Path(__file__).resolve().parents[1])
@@ -48,7 +60,20 @@ except ModuleNotFoundError:
         ParquetSource,
         TushareSource,
     )
+    from data_manager.market_storage_topology import (
+        SQLitePrimaryMarketSource,
+        SQLitePrimaryMarketStore,
+        resolve_market_storage_topology,
+    )
     from data_manager.duckdb_fivefold_adjust import FiveFoldAdjustmentManager
+    from data_manager.period_registry import PeriodRegistry, build_period_runtime_contracts
+    from data_manager.session_profile_registry import SessionProfileRegistry
+    from data_manager.threshold_registry import ThresholdRegistry
+    from data_manager.timestamp_contract import (
+        TIMESTAMP_CONTRACT_VERSION,
+        normalize_timestamp_frame,
+    )
+    from data_manager.canonical_minute import normalize_canonical_1m
     from data_manager.timestamp_utils import qmt_ms_to_beijing  # P0 时间戳契约层
 
 # 血缘字段版本号 — 升版本策略见 docs/lineage_spec.md §二
@@ -56,22 +81,55 @@ except ModuleNotFoundError:
 #                 支持 QMT 主路径 + Tushare 降级路径；auto_data_updater 收盘后 20 分钟调度
 # v1.2 (2026-03): 引入 sequence_id + watermark 晚到治理字段与多周期重建审计回执
 CURRENT_SCHEMA_VERSION = "1.2"
+GATE_POLICY_VERSION = "2026.04.01"
+
+_PERIOD_RUNTIME_CONTRACTS = build_period_runtime_contracts(
+    base_path=Path(__file__).resolve().parents[1]
+)
 
 warnings.filterwarnings("ignore")
+
+
+def _xt_trace(message: str) -> None:
+    if os.environ.get("EASYXT_XTDATA_TRACE", "0") not in ("1", "true", "True"):
+        return
+    try:
+        print(
+            f"[XTTRACE][{threading.current_thread().name}] {message}",
+            flush=True,
+        )
+    except Exception:
+        pass
+
+
+# xtquant C 扩展（bsonobj.cpp）使用线程本地存储（TLS），
+# 不同线程即使串行化也各持独立未初始化的 TLS 缓冲区。
+# 所有 xtdata 调用必须通过 xtdata_submit 派发到专用工作线程。
+from core.xtdata_lock import xtdata_call_lock as _xtdata_call_lock  # noqa: F401 — 向后兼容
+from core.xtdata_lock import xtdata_submit as _xtdata_submit
+from core.xtquant_import import import_xtdata_module, import_xtquant_package
 
 
 class UnifiedDataInterface:
     _table_init_lock = threading.Lock()
 
+    # 跨实例表初始化状态缓存——每个 _ChartDataLoadThread 都新建 UnifiedDataInterface，
+    # 类级 set 确保同一 DB 路径只执行一次 DDL，避免每次图表切换都重跑 CREATE TABLE IF NOT EXISTS。
+    _tables_initialized_paths: set = set()
+
+    # 已确认存在的 DuckDB 表名缓存（key = f"{duckdb_path}:{table_name}"）。
+    # 避免 _read_from_duckdb() / _read_cached_custom_bars() 每次都查 information_schema.tables。
+    _known_tables: set = set()
+
     # 跨实例结果缓存——每个 _ChartDataLoadThread 都会新建 UnifiedDataInterface，
     # 类级缓存确保切换股票再切回后无需重新计算自定义周期 K 线。
     _result_cache: dict = {}
     _result_cache_lock: threading.Lock = threading.Lock()
-    _RESULT_CACHE_TTL_S: float = 300.0    # 5 分钟 TTL
-    _RESULT_CACHE_MAX_ENTRIES: int = 80   # LRU 淘汰上限
+    _RESULT_CACHE_TTL_S: float = 300.0  # 5 分钟 TTL
+    _RESULT_CACHE_MAX_ENTRIES: int = 80  # LRU 淘汰上限
 
     @classmethod
-    def _cache_get(cls, key: tuple) -> "Optional[pd.DataFrame]":
+    def _cache_get(cls, key: tuple) -> "pd.DataFrame | None":
         with cls._result_cache_lock:
             entry = cls._result_cache.get(key)
             if entry is None:
@@ -115,12 +173,13 @@ class UnifiedDataInterface:
 
     def __init__(
         self,
-        duckdb_path: Optional[str] = None,
+        duckdb_path: str | None = None,
         eager_init: bool = False,
         silent_init: bool = True,
-        cb_fail_threshold: Optional[int] = None,
-        backoff_base_s: Optional[float] = None,
-        backoff_max_s: Optional[float] = None,
+        xtdata_call_mode: str = "submit",
+        cb_fail_threshold: int | None = None,
+        backoff_base_s: float | None = None,
+        backoff_max_s: float | None = None,
     ):
         """
         初始化统一数据接口
@@ -146,6 +205,21 @@ class UnifiedDataInterface:
         self._tushare_checked = False
         self.adjustment_manager = None
         self.data_registry = DataSourceRegistry()
+        self._market_storage_topology = resolve_market_storage_topology(
+            duckdb_shadow_path=self.duckdb_path
+        )
+        self._primary_write_engine = self._market_storage_topology.primary_write_engine
+        self._sqlite_primary_enabled = self._primary_write_engine == "sqlite"
+        self._sqlite_primary_store = (
+            SQLitePrimaryMarketStore(topology=self._market_storage_topology)
+            if self._sqlite_primary_enabled
+            else None
+        )
+        if self._sqlite_primary_store is not None:
+            self.data_registry.register(
+                "sqlite_primary",
+                SQLitePrimaryMarketSource(self._sqlite_primary_store),
+            )
         self.data_registry.register("duckdb", DuckDBSource(self))
         self.data_registry.register("dat", DATBinarySource(DATBinaryReader()))
         self.data_registry.register("parquet", ParquetSource())
@@ -193,14 +267,15 @@ class UnifiedDataInterface:
         }
         self._cb_disabled = False  # 批量入库时可临时禁用熔断
         self._skip_third_party_fallback = False  # 批量入库时跳过 Tushare/AKShare 回退
-        self._cache_stale_quarantine_enabled = (
-            str(os.environ.get("EASYXT_CACHE_STALE_QUARANTINE_ENABLED", "1")).lower()
-            in ("1", "true", "yes", "on")
-        )
+        self._cache_stale_quarantine_enabled = str(
+            os.environ.get("EASYXT_CACHE_STALE_QUARANTINE_ENABLED", "1")
+        ).lower() in ("1", "true", "yes", "on")
         try:
-            _sample_rate = float(os.environ.get("EASYXT_STEP6_VALIDATE_SAMPLE_RATE", "1.0"))
+            # 默认值从 1.0 降至 0.05（每次 DuckDB 读取只抽检 5%），可通过环境变量覆盖。
+            # 原 1.0 导致每次图表加载都做全量 DataContractValidator.validate()，占据显著 CPU。
+            _sample_rate = float(os.environ.get("EASYXT_STEP6_VALIDATE_SAMPLE_RATE", "0.05"))
         except Exception:
-            _sample_rate = 1.0
+            _sample_rate = 0.05
         self._step6_validate_sample_rate = max(0.0, min(1.0, _sample_rate))
         self._step6_validation_metrics: dict[str, Any] = {
             "total": 0,
@@ -210,14 +285,12 @@ class UnifiedDataInterface:
             "quarantined": 0,
             "sample_rate": self._step6_validate_sample_rate,
         }
-        self._canary_shadow_write_enabled = (
-            str(os.environ.get("EASYXT_CANARY_SHADOW_WRITE", "0")).lower()
-            in ("1", "true", "yes", "on")
-        )
-        self._canary_shadow_only = (
-            str(os.environ.get("EASYXT_CANARY_SHADOW_ONLY", "1")).lower()
-            in ("1", "true", "yes", "on")
-        )
+        self._canary_shadow_write_enabled = str(
+            os.environ.get("EASYXT_CANARY_SHADOW_WRITE", "0")
+        ).lower() in ("1", "true", "yes", "on")
+        self._canary_shadow_only = str(
+            os.environ.get("EASYXT_CANARY_SHADOW_ONLY", "1")
+        ).lower() in ("1", "true", "yes", "on")
         self._backfill_enabled = os.environ.get("EASYXT_BACKFILL_ENABLED", "1") in (
             "1",
             "true",
@@ -226,10 +299,11 @@ class UnifiedDataInterface:
         self._backfill_scheduler = None
         self._backfill_max_queue = int(os.environ.get("EASYXT_BACKFILL_MAX_QUEUE", "512"))
         self._logger = logging.getLogger(__name__)
+        self._xtdata_call_mode = xtdata_call_mode
         # 最近一次 get_stock_data() 的合约验证结论（供调用方读取）
-        self._last_contract_validation: Optional[object] = None
+        self._last_contract_validation: object | None = None
         # 因子引擎懒初始化（connect() 后首次调用因子 API 时激活）
-        self._factor_storage: Optional[Any] = None
+        self._factor_storage: Any | None = None
         # 上市首日缓存：{stock_code: 'YYYY-MM-DD'}（多日周期左对齐必需）
         self._listing_date_cache: dict[str, str] = {}
         if eager_init:
@@ -238,6 +312,17 @@ class UnifiedDataInterface:
             self._check_qmt()
             self._check_akshare()
             self._check_tushare()
+
+    def _run_xtdata_callable(self, func, *args, **kwargs):
+        """统一执行 xtdata 调用。
+
+        - direct: 仅供 QThread.run() 直接调用 xtdata，满足 xtquant 线程亲和性要求。
+        - submit: 其它上下文统一派发到单例 QThread 执行器。
+        """
+        if self._xtdata_call_mode == "direct":
+            with _xtdata_call_lock:
+                return func(*args, **kwargs)
+        return _xtdata_submit(func, *args, **kwargs)
 
     def _ensure_backfill_scheduler(self):
         if not self._backfill_enabled:
@@ -351,7 +436,29 @@ class UnifiedDataInterface:
         if not stock_code or not start_date or not end_date:
             return False
 
-        def _emit_backfill_event(status: str, record_count: int = 0, error_message: Optional[str] = None):
+        def _set_golden_backfill_status(status: str, note: str | None = None) -> None:
+            try:
+                from data_manager.golden_1d_audit import Golden1dAuditor
+
+                Golden1dAuditor(db_path=self.duckdb_path).update_backfill_status(
+                    stock_code,
+                    status,  # type: ignore[arg-type]
+                    note=note,
+                )
+            except Exception:
+                pass
+
+        def _re_audit_golden_1d() -> None:
+            try:
+                from data_manager.golden_1d_audit import Golden1dAuditor
+
+                Golden1dAuditor(db_path=self.duckdb_path).audit_symbol(stock_code, force_full=False)
+            except Exception as exc:
+                _set_golden_backfill_status("failed", note=f"后台补齐后复审失败: {exc}")
+
+        def _emit_backfill_event(
+            status: str, record_count: int = 0, error_message: str | None = None
+        ):
             try:
                 from core.events import Events
                 from core.signal_bus import signal_bus
@@ -378,6 +485,10 @@ class UnifiedDataInterface:
             backoff_max_s=self._cb_state.get("max_s", 300.0),
         )
         try:
+            _set_golden_backfill_status(
+                "in_progress",
+                note=f"后台补齐执行中: {period} {start_date}~{end_date}",
+            )
             worker.connect(read_only=False)
             worker._ensure_tables_exist()
             worker._record_ingestion_status(
@@ -418,15 +529,22 @@ class UnifiedDataInterface:
                     error_message="empty_result",
                 )
                 _emit_backfill_event(status="failed", error_message="empty_result")
+                _set_golden_backfill_status(
+                    "failed",
+                    note=f"后台补齐返回空结果: {period} {start_date}~{end_date}",
+                )
                 return False
 
             worker._save_to_duckdb(
-                data, stock_code, period,
+                data,
+                stock_code,
+                period,
                 _ingest_source="backfill",
                 _ingest_start=start_date,
                 _ingest_end=end_date,
             )  # ingestion_status(success) 已在同一事务内原子写入
             _emit_backfill_event(status="success", record_count=len(data))
+            _re_audit_golden_1d()
             return True
         except Exception:
             self._logger.exception(
@@ -446,6 +564,10 @@ class UnifiedDataInterface:
             except Exception as _ing_err:
                 self._logger.warning("记录ingestion_status(failed)失败: %s", _ing_err)
             _emit_backfill_event(status="failed", error_message="exception")
+            _set_golden_backfill_status(
+                "failed",
+                note=f"后台补齐执行失败: {period} {start_date}~{end_date}",
+            )
             return False
         finally:
             try:
@@ -495,6 +617,9 @@ class UnifiedDataInterface:
         # immediately returns pd.DataFrame() and daily data is always re-fetched.
         if self.adjustment_manager._db is None:
             self.adjustment_manager.connect()
+        # 注入分红数据获取回调，使 _try_repair_adjustment 能正确重算复权列
+        if self.adjustment_manager.dividends_fetcher is None:
+            self.adjustment_manager.dividends_fetcher = self._get_dividends_from_qmt
 
     def _check_duckdb(self):
         if self._duckdb_checked:
@@ -516,6 +641,7 @@ class UnifiedDataInterface:
         self._akshare_checked = True
         try:
             import akshare as ak
+
             ver = getattr(ak, "__version__", "unknown")
             self.akshare_available = True
             self._log(f"[INFO] AKShare 可用 (v{ver})")
@@ -545,9 +671,11 @@ class UnifiedDataInterface:
         if self._qmt_checked:
             return
         self._qmt_checked = True
+        _xt_trace("_check_qmt enter")
         # 若 QMT 在线模式被禁用，跳过 xtdata 导入以防止 native 崩溃
         if os.environ.get("EASYXT_ENABLE_QMT_ONLINE", "1") not in ("1", "true", "True"):
             self.qmt_available = False
+            _xt_trace("_check_qmt skipped by EASYXT_ENABLE_QMT_ONLINE=0")
             return
         project_root = Path(__file__).resolve().parent.parent
         xtquant_path = project_root / "xtquant"
@@ -559,20 +687,37 @@ class UnifiedDataInterface:
         last_err: Exception | None = None
         for i in range(retry_count):
             try:
-                import xtquant as _xtquant_pkg
 
-                if extra_xtquant_dir and extra_xtquant_dir not in _xtquant_pkg.__path__:
-                    _xtquant_pkg.__path__.append(extra_xtquant_dir)
+                def _init_xtdata(_extra=extra_xtquant_dir):
+                    _xt_trace("_check_qmt worker: import xtquant")
+                    _xtquant_pkg = import_xtquant_package()
 
-                from xtquant import xtdata
+                    if _extra and _extra not in _xtquant_pkg.__path__:
+                        _xtquant_pkg.__path__.append(_extra)
+                    _xt_trace("_check_qmt worker: import xtdata")
+                    xtdata = import_xtdata_module()
 
-                _ = xtdata
+                    # 预热：首次连接必须在工作线程上完成，确保 TLS 初始化
+                    if not UnifiedDataInterface._xtdata_connection_warmed:
+                        xtdata.enable_hello = False
+                        _xt_trace("_check_qmt worker: warmup get_instrument_detail")
+                        try:
+                            xtdata.get_instrument_detail("000001.SZ")
+                        except Exception:
+                            pass
+                        UnifiedDataInterface._xtdata_connection_warmed = True
+
+                self._run_xtdata_callable(_init_xtdata)
                 self.qmt_available = True
+                _xt_trace("_check_qmt ok")
                 self._log("[INFO] QMT xtdata 可用")
                 return
-            except Exception as e:  # 捕获 ImportError、OSError（pyd加载）和 xtdatacenter rpc_init 抛出的 Exception
+            except (
+                Exception
+            ) as e:  # 捕获 ImportError、OSError（pyd加载）和 xtdatacenter rpc_init 抛出的 Exception
                 last_err = e
                 self.qmt_available = False
+                _xt_trace(f"_check_qmt failed: {type(e).__name__}: {e}")
                 if i < retry_count - 1:
                     time.sleep(retry_sleep)
                     continue
@@ -582,12 +727,12 @@ class UnifiedDataInterface:
         self._qmt_checked = False
         self._check_qmt()
 
-    def _ensure_qmt_paths(self) -> Optional[str]:
+    def _ensure_qmt_paths(self) -> str | None:
         candidates = []
         env_path = os.environ.get("XTQUANT_PATH") or os.environ.get("QMT_PATH")
         if env_path:
             candidates.append(env_path)
-        config_obj: Optional[Any] = None
+        config_obj: Any | None = None
         try:
             from easy_xt.config import config as config_obj
         except Exception:
@@ -629,7 +774,7 @@ class UnifiedDataInterface:
             sys.path.insert(0, found_root)
         return found_xtquant_dir
 
-    def _find_qmt_python_root(self, root: str) -> Optional[str]:
+    def _find_qmt_python_root(self, root: str) -> str | None:
         if not root or not os.path.isdir(root):
             return None
         if os.path.basename(root).lower() == "xtquant":
@@ -671,11 +816,13 @@ class UnifiedDataInterface:
             self._db_manager = get_db_manager(self.duckdb_path)
             prefer_rw = os.environ.get("EASYXT_DUCKDB_PREFER_RW", "1") in ("1", "true", "True")
             # :memory: 数据库不支持只读模式，始终使用读写连接
-            is_memory_db = (self.duckdb_path == ":memory:")
+            is_memory_db = self.duckdb_path == ":memory:"
             effective_read_only = bool(read_only and (not prefer_rw) and (not is_memory_db))
             # 通过连接池创建连接，享受重试与路径归一化
             try:
-                self.con = duckdb.connect(self._db_manager.duckdb_path, read_only=effective_read_only)
+                self.con = duckdb.connect(
+                    self._db_manager.duckdb_path, read_only=effective_read_only
+                )
                 self._read_only_connection = bool(effective_read_only)
             except Exception as connect_error:
                 msg = str(connect_error).lower()
@@ -689,9 +836,8 @@ class UnifiedDataInterface:
                     else:
                         raise
                 elif (
-                    (not effective_read_only)
-                    and "different configuration than existing connections" in msg
-                ):
+                    not effective_read_only
+                ) and "different configuration than existing connections" in msg:
                     self._logger.warning("检测到连接配置冲突，重试共享读写连接")
                     self.con = duckdb.connect(self._db_manager.duckdb_path, read_only=False)
                     self._read_only_connection = False
@@ -713,28 +859,82 @@ class UnifiedDataInterface:
         """关闭底层 DuckDB 连接，释放文件句柄（内部辅助方法）"""
         if self.con:
             try:
-                self.con.close()
+                self._close_duckdb_connection()
             except Exception:
                 pass
             self.con = None
             self._read_only_connection = False
+
+    @staticmethod
+    def _normalize_duckdb_cache_path(path_value: str) -> str:
+        path_str = str(path_value).strip()
+        if path_str.startswith("\\\\?\\UNC\\"):
+            path_str = "\\\\" + path_str[len("\\\\?\\UNC\\") :]
+        elif path_str.startswith("\\\\?\\"):
+            path_str = path_str[4:]
+        return os.path.normcase(os.path.abspath(path_str))
+
+    def _get_duckdb_cache_key(self) -> str | None:
+        """返回稳定的 DuckDB 缓存 key。
+
+        优先使用显式 duckdb_path；若缺失则回退到实际连接绑定的数据库文件路径。
+        对 :memory: / 临时内存连接返回 None，避免 class 级缓存因连接 id 复用产生误判。
+        """
+        duckdb_path = getattr(self, "duckdb_path", None)
+        if duckdb_path:
+            if str(duckdb_path).strip() == ":memory:":
+                return ":memory:"
+            return self._normalize_duckdb_cache_path(str(duckdb_path))
+
+        if not getattr(self, "con", None):
+            return None
+
+        try:
+            db_rows = self.con.execute("PRAGMA database_list").fetchall()
+            for row in db_rows:
+                db_file = row[2] if len(row) >= 3 else None
+                if db_file and str(db_file).strip() == ":memory:":
+                    return ":memory:"
+                if db_file and str(db_file).strip() not in {"", ":memory:"}:
+                    return self._normalize_duckdb_cache_path(str(db_file))
+        except Exception:
+            pass
+
+        return None
 
     def _ensure_tables_exist(self):
         """确保所有必需的表都存在
 
         修复：首次使用时自动创建表，避免"Table does not exist"错误
         """
-        if not self.con or self._tables_initialized:
-            return
+        _duckdb_key = self._get_duckdb_cache_key()
+        _is_memory = _duckdb_key in {None, ":memory:"}
+        # :memory: 连接：Python 会复用已回收连接的 id() 地址，不能用 id 做 class 级缓存 key；
+        # 对内存连接只用 instance-level self._tables_initialized 防重入。
+        # 对文件连接：用路径做 class 级缓存，避免同一数据库文件重复建表。
+        if _is_memory:
+            if not self.con or self._tables_initialized:
+                return
+            _db_key = None  # 不加入 class 级缓存
+        else:
+            _db_key = _duckdb_key
+            if not self.con or _db_key in UnifiedDataInterface._tables_initialized_paths:
+                return
         if self._read_only_connection:
-            self._tables_initialized = True
+            if _db_key is not None:
+                UnifiedDataInterface._tables_initialized_paths.add(_db_key)
+            self._tables_initialized = True  # 兼容旧代码（实例级标志保留）
             return
 
         try:
             with self._table_init_lock:
-                if not self.con or self._tables_initialized:
-                    return
-            # 创建 stock_daily 表（日线）
+                if _is_memory:
+                    if not self.con or self._tables_initialized:
+                        return
+                else:
+                    if not self.con or _db_key in UnifiedDataInterface._tables_initialized_paths:
+                        return
+                # 创建 stock_daily 表（日线）
                 self.con.execute("""
                 CREATE TABLE IF NOT EXISTS stock_daily (
                     stock_code VARCHAR NOT NULL,
@@ -755,7 +955,7 @@ class UnifiedDataInterface:
                 )
                 """)
 
-            # 创建 stock_1m 表（1分钟线）
+                # 创建 stock_1m 表（1分钟线）
                 self.con.execute("""
                 CREATE TABLE IF NOT EXISTS stock_1m (
                     stock_code VARCHAR NOT NULL,
@@ -776,7 +976,7 @@ class UnifiedDataInterface:
                 )
                 """)
 
-            # 创建 stock_5m 表（5分钟线）
+                # 创建 stock_5m 表（5分钟线）
                 self.con.execute("""
                 CREATE TABLE IF NOT EXISTS stock_5m (
                     stock_code VARCHAR NOT NULL,
@@ -797,7 +997,7 @@ class UnifiedDataInterface:
                 )
                 """)
 
-            # 创建 stock_tick 表（tick数据）
+                # 创建 stock_tick 表（tick数据）
                 self.con.execute("""
                 CREATE TABLE IF NOT EXISTS stock_tick (
                     stock_code VARCHAR NOT NULL,
@@ -851,6 +1051,7 @@ class UnifiedDataInterface:
                     ingest_run_id VARCHAR,
                     raw_hash VARCHAR,
                     source_event_time TIMESTAMP,
+                    gate_reject_reason VARCHAR,
                     PRIMARY KEY (stock_code, period)
                 )
                 """)
@@ -888,6 +1089,78 @@ class UnifiedDataInterface:
                     error_message VARCHAR,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (audit_id)
+                )
+                """)
+                self.con.execute("""
+                CREATE TABLE IF NOT EXISTS publish_gate_receipt (
+                    receipt_id VARCHAR NOT NULL,
+                    stock_code VARCHAR NOT NULL,
+                    period VARCHAR NOT NULL,
+                    range_start TIMESTAMP,
+                    range_end TIMESTAMP,
+                    source VARCHAR,
+                    status VARCHAR,
+                    result_status VARCHAR,
+                    contract_pass BOOLEAN,
+                    cross_source_pass BOOLEAN,
+                    tick_verified BOOLEAN,
+                    lineage_complete BOOLEAN,
+                    replayable BOOLEAN,
+                    quality_grade VARCHAR,
+                    gate_reject_reason VARCHAR,
+                    session_profile_version VARCHAR,
+                    timestamp_contract_version VARCHAR,
+                    threshold_version VARCHAR,
+                    period_registry_version VARCHAR,
+                    gate_policy_version VARCHAR,
+                    lineage_anchor VARCHAR,
+                    related_repair_receipt_id VARCHAR,
+                    related_replay_receipt_id VARCHAR,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (receipt_id)
+                )
+                """)
+                self.con.execute("""
+                CREATE TABLE IF NOT EXISTS repair_receipt (
+                    receipt_id VARCHAR NOT NULL,
+                    stock_code VARCHAR NOT NULL,
+                    period VARCHAR NOT NULL,
+                    range_start TIMESTAMP,
+                    range_end TIMESTAMP,
+                    reason VARCHAR,
+                    source VARCHAR,
+                    status VARCHAR,
+                    task_count INTEGER,
+                    queued_tasks INTEGER,
+                    failed_tasks INTEGER,
+                    related_gate_receipt_id VARCHAR,
+                    session_profile_version VARCHAR,
+                    timestamp_contract_version VARCHAR,
+                    threshold_version VARCHAR,
+                    period_registry_version VARCHAR,
+                    lineage_anchor VARCHAR,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (receipt_id)
+                )
+                """)
+                self.con.execute("""
+                CREATE TABLE IF NOT EXISTS replay_receipt (
+                    receipt_id VARCHAR NOT NULL,
+                    quarantine_id VARCHAR,
+                    stock_code VARCHAR NOT NULL,
+                    period VARCHAR NOT NULL,
+                    range_start TIMESTAMP,
+                    range_end TIMESTAMP,
+                    replay_kind VARCHAR,
+                    status VARCHAR,
+                    last_error VARCHAR,
+                    related_gate_receipt_id VARCHAR,
+                    related_repair_receipt_id VARCHAR,
+                    tick_verified BOOLEAN,
+                    replayable BOOLEAN,
+                    lineage_anchor VARCHAR,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (receipt_id)
                 )
                 """)
                 self.con.execute("""
@@ -988,6 +1261,7 @@ class UnifiedDataInterface:
                     amount       DECIMAL(18, 6),
                     adjust_type  VARCHAR   DEFAULT 'none',
                     adj_factor_hash VARCHAR DEFAULT '',
+                    governance_hash VARCHAR DEFAULT '',
                     is_partial   BOOLEAN   DEFAULT FALSE,
                     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (stock_code, period, datetime, adjust_type)
@@ -997,6 +1271,9 @@ class UnifiedDataInterface:
                 self._migrate_stock_daily_schema()
                 self._migrate_stock_tick_schema()
                 self._migrate_ingestion_status_schema()
+                self._migrate_publish_gate_receipt_schema()
+                self._migrate_repair_receipt_schema()
+                self._migrate_replay_receipt_schema()
                 self._migrate_quarantine_schema()
                 self._migrate_sla_daily_schema()
                 self._migrate_custom_period_bars_schema()
@@ -1021,12 +1298,14 @@ class UnifiedDataInterface:
                 except Exception:
                     pass
 
-            # 创建索引
+                # 创建索引
                 try:
                     self.con.execute(
                         "CREATE INDEX IF NOT EXISTS idx_stock_code_daily ON stock_daily (stock_code)"
                     )
-                    self.con.execute("CREATE INDEX IF NOT EXISTS idx_date_daily ON stock_daily (date)")
+                    self.con.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_date_daily ON stock_daily (date)"
+                    )
                     self.con.execute(
                         "CREATE INDEX IF NOT EXISTS idx_source_conflict_lookup "
                         "ON source_conflict_audit (stock_code, period, event_ts)"
@@ -1038,6 +1317,18 @@ class UnifiedDataInterface:
                     self.con.execute(
                         "CREATE INDEX IF NOT EXISTS idx_quarantine_lookup "
                         "ON data_quarantine_log (stock_code, table_name, created_at)"
+                    )
+                    self.con.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_publish_gate_lookup "
+                        "ON publish_gate_receipt (stock_code, period, created_at)"
+                    )
+                    self.con.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_repair_receipt_lookup "
+                        "ON repair_receipt (stock_code, period, created_at)"
+                    )
+                    self.con.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_replay_receipt_lookup "
+                        "ON replay_receipt (stock_code, period, created_at)"
                     )
                     self.con.execute(
                         "CREATE INDEX IF NOT EXISTS idx_sla_daily_gate "
@@ -1054,16 +1345,21 @@ class UnifiedDataInterface:
                 except Exception:
                     pass  # 索引可能已存在
 
-                self._tables_initialized = True
+                self._tables_initialized = True  # 兼容旧代码（实例级标志保留）
+                if _db_key is not None:
+                    UnifiedDataInterface._tables_initialized_paths.add(_db_key)
                 self._logger.debug("数据表检查完成")
 
         except Exception as e:
             self._logger.warning("创建表失败: %s", e)
 
     def _get_table_columns(self, table_name: str) -> list[str]:
+        if not self._is_safe_identifier(table_name):
+            self._logger.warning("_get_table_columns: 非法表名 %r", table_name)
+            return []
         try:
             rows = self.con.execute(
-                "SELECT column_name FROM pragma_table_info('" + table_name + "')"
+                f'SELECT column_name FROM pragma_table_info("{table_name}")'  # noqa: S608
             ).fetchall()
             if rows:
                 return [row[0] for row in rows]
@@ -1072,7 +1368,7 @@ class UnifiedDataInterface:
 
         try:
             rows = self.con.execute(
-                "SELECT name FROM pragma_table_info('" + table_name + "')"
+                f'SELECT name FROM pragma_table_info("{table_name}")'  # noqa: S608
             ).fetchall()
             return [row[0] for row in rows]
         except Exception as _tbl_err2:
@@ -1165,17 +1461,121 @@ class UnifiedDataInterface:
             ("ingest_run_id", "VARCHAR"),
             ("raw_hash", "VARCHAR"),
             ("source_event_time", "TIMESTAMP"),
+            ("tick_verified", "BOOLEAN"),
+            ("gate_receipt_id", "VARCHAR"),
+            ("threshold_version", "VARCHAR"),
+            ("session_profile_version", "VARCHAR"),
+            ("timestamp_contract_version", "VARCHAR"),
+            ("period_registry_version", "VARCHAR"),
+            ("source_grade", "VARCHAR"),
+            ("contract_pass", "BOOLEAN"),
+            ("cross_source_pass", "BOOLEAN"),
+            ("lineage_complete", "BOOLEAN"),
+            ("replayable", "BOOLEAN"),
+            ("quality_grade", "VARCHAR"),
+            ("gate_reject_reason", "VARCHAR"),
         ]
         for col_name, col_def in lineage_columns:
             if col_name not in columns_set:
                 try:
                     self.con.execute(
-                        "ALTER TABLE data_ingestion_status ADD COLUMN "
-                        + col_name + " " + col_def
+                        "ALTER TABLE data_ingestion_status ADD COLUMN " + col_name + " " + col_def
                     )
                     self._logger.debug("ingestion_status 迁移: 添加列 %s", col_name)
                 except Exception as _mig_err:
                     self._logger.debug("ingestion_status 迁移列 %s 跳过: %s", col_name, _mig_err)
+
+    def _migrate_publish_gate_receipt_schema(self) -> None:
+        columns = self._get_table_columns("publish_gate_receipt")
+        if not columns:
+            return
+        columns_set = set(columns)
+        ext_columns = [
+            ("source", "VARCHAR"),
+            ("status", "VARCHAR"),
+            ("result_status", "VARCHAR"),
+            ("contract_pass", "BOOLEAN"),
+            ("cross_source_pass", "BOOLEAN"),
+            ("tick_verified", "BOOLEAN"),
+            ("lineage_complete", "BOOLEAN"),
+            ("replayable", "BOOLEAN"),
+            ("quality_grade", "VARCHAR"),
+            ("gate_reject_reason", "VARCHAR"),
+            ("session_profile_version", "VARCHAR"),
+            ("timestamp_contract_version", "VARCHAR"),
+            ("threshold_version", "VARCHAR"),
+            ("period_registry_version", "VARCHAR"),
+            ("gate_policy_version", "VARCHAR"),
+            ("lineage_anchor", "VARCHAR"),
+            ("related_repair_receipt_id", "VARCHAR"),
+            ("related_replay_receipt_id", "VARCHAR"),
+        ]
+        for col_name, col_def in ext_columns:
+            if col_name not in columns_set:
+                try:
+                    self.con.execute(
+                        "ALTER TABLE publish_gate_receipt ADD COLUMN " + col_name + " " + col_def
+                    )
+                    self._logger.debug("publish_gate_receipt 迁移: 添加列 %s", col_name)
+                except Exception as _mig_err:
+                    self._logger.debug(
+                        "publish_gate_receipt 迁移列 %s 跳过: %s",
+                        col_name,
+                        _mig_err,
+                    )
+
+    def _migrate_repair_receipt_schema(self) -> None:
+        columns = self._get_table_columns("repair_receipt")
+        if not columns:
+            return
+        columns_set = set(columns)
+        ext_columns = [
+            ("reason", "VARCHAR"),
+            ("source", "VARCHAR"),
+            ("status", "VARCHAR"),
+            ("task_count", "INTEGER"),
+            ("queued_tasks", "INTEGER"),
+            ("failed_tasks", "INTEGER"),
+            ("related_gate_receipt_id", "VARCHAR"),
+            ("session_profile_version", "VARCHAR"),
+            ("timestamp_contract_version", "VARCHAR"),
+            ("threshold_version", "VARCHAR"),
+            ("period_registry_version", "VARCHAR"),
+            ("lineage_anchor", "VARCHAR"),
+        ]
+        for col_name, col_def in ext_columns:
+            if col_name not in columns_set:
+                try:
+                    self.con.execute(
+                        "ALTER TABLE repair_receipt ADD COLUMN " + col_name + " " + col_def
+                    )
+                except Exception as _mig_err:
+                    self._logger.debug("repair_receipt 迁移列 %s 跳过: %s", col_name, _mig_err)
+
+    def _migrate_replay_receipt_schema(self) -> None:
+        columns = self._get_table_columns("replay_receipt")
+        if not columns:
+            return
+        columns_set = set(columns)
+        ext_columns = [
+            ("quarantine_id", "VARCHAR"),
+            ("replay_kind", "VARCHAR"),
+            ("status", "VARCHAR"),
+            ("last_error", "VARCHAR"),
+            ("related_gate_receipt_id", "VARCHAR"),
+            ("related_repair_receipt_id", "VARCHAR"),
+            ("tick_verified", "BOOLEAN"),
+            ("replayable", "BOOLEAN"),
+            ("lineage_anchor", "VARCHAR"),
+        ]
+        for col_name, col_def in ext_columns:
+            if col_name not in columns_set:
+                try:
+                    self.con.execute(
+                        "ALTER TABLE replay_receipt ADD COLUMN " + col_name + " " + col_def
+                    )
+                except Exception as _mig_err:
+                    self._logger.debug("replay_receipt 迁移列 %s 跳过: %s", col_name, _mig_err)
 
     def _migrate_quarantine_schema(self) -> None:
         columns = self._get_table_columns("data_quarantine_log")
@@ -1229,7 +1629,9 @@ class UnifiedDataInterface:
             columns_to_add.append(("canary_shadow_only", "BOOLEAN DEFAULT TRUE"))
         for col_name, col_type in columns_to_add:
             try:
-                self.con.execute(f"ALTER TABLE data_quality_sla_daily ADD COLUMN {col_name} {col_type}")
+                self.con.execute(
+                    f"ALTER TABLE data_quality_sla_daily ADD COLUMN {col_name} {col_type}"
+                )
             except Exception as _mig_err:
                 self._logger.debug("data_quality_sla_daily 迁移列 %s 跳过: %s", col_name, _mig_err)
 
@@ -1237,13 +1639,22 @@ class UnifiedDataInterface:
         columns = self._get_table_columns("custom_period_bars")
         if not columns:
             return
-        if "adj_factor_hash" in set(columns):
-            return
-        try:
-            self.con.execute("ALTER TABLE custom_period_bars ADD COLUMN adj_factor_hash VARCHAR DEFAULT ''")
-            self._logger.debug("custom_period_bars 迁移: 添加列 adj_factor_hash")
-        except Exception as _mig_err:
-            self._logger.debug("custom_period_bars 迁移列 adj_factor_hash 跳过: %s", _mig_err)
+        existing = set(columns)
+        for col_name, ddl in (
+            ("adj_factor_hash", "VARCHAR DEFAULT ''"),
+            ("governance_hash", "VARCHAR DEFAULT ''"),
+        ):
+            if col_name in existing:
+                continue
+            try:
+                self.con.execute(
+                    f"ALTER TABLE custom_period_bars ADD COLUMN {col_name} {ddl}"
+                )
+                self._logger.debug("custom_period_bars 迁移: 添加列 %s", col_name)
+            except Exception as _mig_err:
+                self._logger.debug(
+                    "custom_period_bars 迁移列 %s 跳过: %s", col_name, _mig_err
+                )
 
     def get_stock_data(
         self,
@@ -1276,17 +1687,35 @@ class UnifiedDataInterface:
         Returns:
             DataFrame: 包含 OHLCV 数据
         """
-        self._logger.debug("获取数据: %s | %s ~ %s | %s | %s", stock_code, start_date, end_date, period, adjust)
+        requested_period = str(period or "").strip()
+        period = self._canonicalize_period_code(requested_period)
+        if requested_period and requested_period != period:
+            self._logger.debug("周期别名解析: %s -> %s", requested_period, period)
+
+        _xt_trace(
+            f"get_stock_data start stock={stock_code} period={period} range={start_date}~{end_date}"
+        )
+        self._logger.debug(
+            "获取数据: %s | %s ~ %s | %s | %s", stock_code, start_date, end_date, period, adjust
+        )
 
         # ── 结果缓存命中检查 ──────────────────────────────────────────────────────
         # 自定义周期（非基础周期）每次都要从 1m/1d 重新计算，代价极高；通过跨实例
         # 类级 TTL 缓存，切换品种再切回时直接命中，无需重算。
-        _cache_key = (self.duckdb_path, stock_code, period, start_date, end_date, adjust)
+        _cache_key = self._build_result_cache_key(
+            stock_code=stock_code,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
+            adjust=adjust,
+        )
         _cache_enabled = str(self.duckdb_path) not in (":memory:", "", "None")
         if _cache_enabled:
             _cached = UnifiedDataInterface._cache_get(_cache_key)
             if _cached is not None and not _cached.empty:
-                self._logger.debug("结果缓存命中: %s %s %s~%s", stock_code, period, start_date, end_date)
+                self._logger.debug(
+                    "结果缓存命中: %s %s %s~%s", stock_code, period, start_date, end_date
+                )
                 return _cached
         # ──────────────────────────────────────────────────────────────────────────
 
@@ -1298,9 +1727,10 @@ class UnifiedDataInterface:
 
         # 确保表存在（修复首次使用问题）
         self._ensure_tables_exist()
-        self._check_qmt()
-        self._check_akshare()
-        self._check_tushare()
+        # 关键：不要在本地数据已足够时预探测 QMT / 第三方在线源。
+        # 启动首屏图表通常可直接从 DuckDB 读取；若此处抢先 import xtdata，
+        # 会把 GUI 启动路径重新拖入 xtquant C 扩展，触发 bsonobj 断言崩溃。
+        # 在线数据源探测下沉到 need_download 分支，仅在本地数据不足时才触发。
 
         # Step 1: 尝试从DuckDB读取
         # FiveFoldAdjustmentManager 只适用于日线/周线/月线（含五维复权列）；
@@ -1331,7 +1761,9 @@ class UnifiedDataInterface:
                     except Exception as e:
                         self._logger.warning("FiveFoldAdjustmentManager查询失败: %s", e)
                         self._logger.debug("降级到原有的_read_from_duckdb方法")
-                        data = self._read_from_duckdb(stock_code, start_date, end_date, period, adjust)
+                        data = self._read_from_duckdb(
+                            stock_code, start_date, end_date, period, adjust
+                        )
                 else:
                     data = self._read_from_duckdb(stock_code, start_date, end_date, period, adjust)
             else:
@@ -1349,6 +1781,7 @@ class UnifiedDataInterface:
 
         if data is None or data.empty:
             self._logger.debug("DuckDB 无数据，需要从在线数据源获取")
+            _xt_trace("get_stock_data local miss -> need_download")
             need_download = True
             try:
                 dat_data = self.data_registry.get_data(
@@ -1374,18 +1807,156 @@ class UnifiedDataInterface:
                         need_download = False
                         self._logger.debug("从QMT本地DAT获取成功 %d 条记录", len(data))
                 else:
-                    self._logger.warning("QMT本地DAT不完整，缺失 %d 个交易日，继续在线补充", missing_days)
+                    self._logger.warning(
+                        "QMT本地DAT不完整，缺失 %d 个交易日，继续在线补充", missing_days
+                    )
         else:
             # 检查是否有缺失
             missing_days = self._check_missing_trading_days(data, start_date, end_date, period)
             sparse_intraday = self._is_intraday_sparse(data, period)
             if missing_days > 0 or sparse_intraday:
                 sparse_text = "，分钟K线稀疏" if sparse_intraday else ""
-                self._logger.debug("DuckDB 数据不完整，缺失 %d 个交易日%s，需要补充", missing_days, sparse_text)
+                self._logger.debug(
+                    "DuckDB 数据不完整，缺失 %d 个交易日%s，需要补充", missing_days, sparse_text
+                )
+                _xt_trace(
+                    f"get_stock_data local incomplete missing_days={missing_days} sparse_intraday={sparse_intraday}"
+                )
                 need_download = True
 
         # Step 3: 如需下载，使用QMT获取
         if need_download:
+            _xt_trace("get_stock_data enter online branch")
+            # ── 日内自定义周期（10m / 15m / 30m 等）：QMT 只原生存储 1m/5m/1d DAT 文件，
+            # 其余分钟周期需先下载 1m 数据，再聚合派生，与 _read_from_duckdb 路径保持一致。
+            if period in self._INTRADAY_CUSTOM_PERIODS:
+                self._logger.debug(
+                    "%s 为日内自定义周期，先下载 1m 数据，再聚合为 %s", period, period
+                )
+                try:
+                    _src_1m = self.get_stock_data(
+                        stock_code, start_date, end_date, "1m", adjust, auto_save=True
+                    )
+                    if _src_1m is not None and not _src_1m.empty:
+                        _daily_ref: pd.DataFrame | None = None
+                        try:
+                            _daily_ref = self.get_stock_data(
+                                stock_code, start_date, end_date, "1d", adjust, auto_save=False
+                            )
+                        except Exception:
+                            pass
+                        _period_minutes = self._INTRADAY_CUSTOM_PERIODS[period]
+                        _period_metadata = self._resolve_period_build_metadata(
+                            period,
+                            stock_code=stock_code,
+                            trade_date=end_date,
+                        )
+                        _result = self._make_period_bar_builder(
+                            stock_code,
+                            trade_date=end_date,
+                        ).build_intraday_bars(
+                            data_1m=_src_1m,
+                            period_minutes=_period_minutes,
+                            daily_ref=_daily_ref,
+                            **_period_metadata,
+                        )
+                        if _result is not None and not _result.empty:
+                            self._logger.debug("从 1m 聚合得到 %d 条 %s 数据", len(_result), period)
+                            # 写入 custom_period_bars 缓存表，下次从 DuckDB 读取无需重算
+                            if auto_save and self.duckdb_available and self.con:
+                                try:
+                                    _adj_hash = self._compute_adj_factor_hash(
+                                        stock_code=stock_code,
+                                        start_date=start_date,
+                                        end_date=end_date,
+                                        adjust=adjust,
+                                        source_period="1m",
+                                    )
+                                    _governance_hash = (
+                                        self._compute_derived_period_governance_hash(
+                                            period,
+                                            stock_code=stock_code,
+                                            trade_date=end_date,
+                                        )
+                                    )
+                                    self._save_custom_period_bars(
+                                        _result,
+                                        stock_code,
+                                        period,
+                                        adjust,
+                                        adj_factor_hash=_adj_hash,
+                                        governance_hash=_governance_hash,
+                                    )
+                                except Exception as _se:
+                                    self._logger.warning("保存 custom_period_bars 失败: %s", _se)
+                            UnifiedDataInterface._cache_put(_cache_key, _result)
+                            return _result
+                except Exception as _e:
+                    self._logger.warning("%s 从 1m 聚合失败: %s，继续常规在线路径", period, _e)
+            # ── 多日自定义周期（5d / 10d 等）：QMT 无原生多日K线，
+            # 必须先下载 1d 数据，再由 PeriodBarBuilder 聚合。
+            if period in self._MULTIDAY_CUSTOM_PERIODS:
+                self._logger.debug("%s 为多日自定义周期，先下载 1d 数据，再构建 %s", period, period)
+                try:
+                    _listing_date = self.get_listing_date(stock_code) or start_date
+                    # 从上市首日起拉全量1d，确保 period_num 左对齐计数正确
+                    _src_1d = self.get_stock_data(
+                        stock_code, _listing_date, end_date, "1d", adjust, auto_save=True
+                    )
+                    if _src_1d is not None and not _src_1d.empty:
+                        _trading_days = self._MULTIDAY_CUSTOM_PERIODS[period]
+                        _period_metadata = self._resolve_period_build_metadata(
+                            period,
+                            stock_code=stock_code,
+                            trade_date=end_date,
+                        )
+                        _result = self._make_period_bar_builder(
+                            stock_code=stock_code,
+                            trade_date=end_date,
+                        ).build_multiday_bars(
+                            data_1d=_src_1d,
+                            trading_days_per_period=_trading_days,
+                            listing_date=_listing_date,
+                            **_period_metadata,
+                        )
+                        if _result is not None and not _result.empty:
+                            self._logger.debug("从 1d 构建得到 %d 条 %s 数据", len(_result), period)
+                            if auto_save and self.duckdb_available and self.con:
+                                try:
+                                    _adj_hash = self._compute_adj_factor_hash(
+                                        stock_code=stock_code,
+                                        start_date=_listing_date,
+                                        end_date=end_date,
+                                        adjust=adjust,
+                                        source_period="1d",
+                                    )
+                                    _governance_hash = (
+                                        self._compute_derived_period_governance_hash(
+                                            period,
+                                            stock_code=stock_code,
+                                            trade_date=end_date,
+                                        )
+                                    )
+                                    self._save_custom_period_bars(
+                                        _result,
+                                        stock_code,
+                                        period,
+                                        adjust,
+                                        adj_factor_hash=_adj_hash,
+                                        governance_hash=_governance_hash,
+                                    )
+                                except Exception as _se:
+                                    self._logger.warning(
+                                        "保存 multiday custom_period_bars 失败: %s", _se
+                                    )
+                            # 按视图范围裁剪（不影响计数对齐）
+                            if start_date:
+                                _result = _result[_result["time"] >= pd.Timestamp(start_date)]
+                            if not _result.empty:
+                                UnifiedDataInterface._cache_put(_cache_key, _result)
+                                return _result
+                except Exception as _e:
+                    self._logger.warning("%s 从 1d 构建失败: %s，继续常规在线路径", period, _e)
             # 1w / 1M 属于派生周期，从源周期 (1d) 获取并聚合，
             # 避免直接请求 QMT 周线/月线（QMT 月线不支持、周线复权列问题）。
             if period in self._PERIOD_AGGREGATION:
@@ -1397,9 +1968,20 @@ class UnifiedDataInterface:
                             stock_code, start_date, end_date, src_period, adjust, auto_save=True
                         )
                         if src_data is not None and not src_data.empty:
-                            resampled = self._resample_ohlcv(src_data, rule)
+                            resampled = self._build_natural_calendar_aggregate(
+                                src_data,
+                                stock_code=stock_code,
+                                period=period,
+                                rule=rule,
+                                trade_date=end_date,
+                            )
                             if resampled is not None and not resampled.empty:
-                                self._logger.debug("从 %s 聚合得到 %d 条 %s 数据", src_period, len(resampled), period)
+                                self._logger.debug(
+                                    "从 %s 聚合得到 %d 条 %s 数据",
+                                    src_period,
+                                    len(resampled),
+                                    period,
+                                )
                                 return resampled
                     except Exception as _e:
                         self._logger.warning("从 %s 聚合失败: %s，继续尝试直接获取", src_period, _e)
@@ -1418,15 +2000,18 @@ class UnifiedDataInterface:
                         error_message=None,
                     )
                 return data if data is not None else pd.DataFrame()
-            qmt_data: Optional[pd.DataFrame] = None
+            qmt_data: pd.DataFrame | None = None
             if not self.qmt_available:
+                _xt_trace("get_stock_data refreshing qmt status")
                 self._refresh_qmt_status()
             if self.qmt_available:
                 self._logger.debug("从 QMT 获取在线数据")
                 try:
+                    _xt_trace("get_stock_data calling _read_from_qmt")
                     qmt_data = self._read_from_qmt(stock_code, start_date, end_date, period)
                 except Exception as e:
                     self._logger.error("QMT获取异常: %s", e)
+                    _xt_trace(f"get_stock_data _read_from_qmt failed: {type(e).__name__}: {e}")
                     qmt_data = None
                 if qmt_data is not None and not qmt_data.empty:
                     ingestion_source = "qmt"
@@ -1454,6 +2039,10 @@ class UnifiedDataInterface:
                 # 期货/港股代码不走 Tushare/AKShare（不支持该资产类别）
                 # 批量入库模式下跳过第三方回退（QMT download_history_data 已尝试，无数据即跳过）
                 if not self._is_futures_or_hk(stock_code) and not self._skip_third_party_fallback:
+                    if not self._akshare_checked:
+                        self._check_akshare()
+                    if not self._tushare_checked:
+                        self._check_tushare()
                     if qmt_data is None or qmt_data.empty:
                         self._logger.debug("经由 DataSourceRegistry 尝试 Tushare / AKShare 兜底")
                         try:
@@ -1486,9 +2075,20 @@ class UnifiedDataInterface:
                                 stock_code, start_date, end_date, src_period, adjust, auto_save=True
                             )
                             if src_data is not None and not src_data.empty:
-                                resampled = self._resample_ohlcv(src_data, rule)
+                                resampled = self._build_natural_calendar_aggregate(
+                                    src_data,
+                                    stock_code=stock_code,
+                                    period=period,
+                                    rule=rule,
+                                    trade_date=end_date,
+                                )
                                 if resampled is not None and not resampled.empty:
-                                    self._logger.debug("从 %s 聚合得到 %d 条 %s 数据", src_period, len(resampled), period)
+                                    self._logger.debug(
+                                        "从 %s 聚合得到 %d 条 %s 数据",
+                                        src_period,
+                                        len(resampled),
+                                        period,
+                                    )
                                     return resampled
                         except Exception as _e:
                             self._logger.warning("从 %s 聚合失败: %s", src_period, _e)
@@ -1520,11 +2120,59 @@ class UnifiedDataInterface:
             else:
                 data = qmt_data
 
-            # Step 3.5: 数据合约验证（在保存之前执行，拦截问题数据入库）
+            # Step 3.4: 日线/周线/月线 数据预清洗 — 去除 NaT 及非交易日行
+            # QMT DAT 文件有时包含全历法日期（含周六/节假日），需在 DataContract 前过滤
+            if data is not None and not data.empty and period in ("1d", "1w", "1M"):
+                _t_candidates = ("time", "datetime", "date")
+                _t_col = next((c for c in _t_candidates if c in data.columns), None)
+                if _t_col is not None:
+                    data = data.copy()
+                    _ts = pd.to_datetime(data[_t_col], errors="coerce")
+                    # Step 3.4a: 去 NaT
+                    _valid = _ts.notna()
+                    _dropped_nat = int((~_valid).sum())
+                    if _dropped_nat > 0:
+                        self._logger.debug(
+                            "日线预清洗 NaT: 丢弃 %d 行 [%s %s]",
+                            _dropped_nat,
+                            stock_code,
+                            period,
+                        )
+                        _ts = _ts[_valid]
+                        data = data[_valid]
+                    # Step 3.4b: 去非交易日行（周末/节假日），仅对 1d 有意义
+                    if period == "1d":
+                        try:
+                            from data_manager.data_contract_validator import _get_trading_calendar
+
+                            _cal = _get_trading_calendar()
+                            _td_mask = _ts.dt.date.apply(
+                                lambda d: d is not None and _cal.is_trading_day(d)
+                            )
+                            _dropped_ntd = int((~_td_mask).sum())
+                            if _dropped_ntd > 0:
+                                self._logger.debug(
+                                    "日线预清洗 非交易日: 丢弃 %d 行 [%s]",
+                                    _dropped_ntd,
+                                    stock_code,
+                                )
+                                data = data[_td_mask.values]
+                        except Exception as _pre_err:
+                            self._logger.debug("非交易日预清洗失败（忽略）: %s", _pre_err)
+
+            if data is not None and not data.empty:
+                data = self._apply_canonical_data_contract(
+                    data,
+                    period=period,
+                    stock_code=stock_code,
+                    trade_date=end_date,
+                )
+
             _contract_pass = True
             if data is not None and not data.empty:
                 try:
                     from data_manager.data_contract_validator import DataContractValidator
+
                     _cv_result = DataContractValidator().validate(
                         data, stock_code, ingestion_source, period=period
                     )
@@ -1542,7 +2190,9 @@ class UnifiedDataInterface:
                 self._logger.debug("保存数据到 DuckDB")
                 try:
                     self._save_to_duckdb(
-                        data, stock_code, period,
+                        data,
+                        stock_code,
+                        period,
                         _ingest_source=ingestion_source,
                         _ingest_start=start_date,
                         _ingest_end=end_date,
@@ -1566,7 +2216,13 @@ class UnifiedDataInterface:
             if data is None:
                 data = pd.DataFrame()
             # DAT 首次加载时缓存到 DuckDB，下次直接从 DuckDB 读取（避免重复 DAT 查询）
-            if ingestion_source == "dat" and auto_save and self.duckdb_available and self.con and not data.empty:
+            if (
+                ingestion_source == "dat"
+                and auto_save
+                and self.duckdb_available
+                and self.con
+                and not data.empty
+            ):
                 try:
                     self._save_to_duckdb(data, stock_code, period)
                 except Exception:
@@ -1588,27 +2244,54 @@ class UnifiedDataInterface:
         if data is None:
             data = pd.DataFrame()
         if not data.empty and adjust != "none":
+            # P1-4: 检测复权列 NULL，自动触发 repair
+            if period == "1d" and adjust in ("front", "back"):
+                adj_col_map = {"front": "open_front", "back": "open_back"}
+                adj_col = adj_col_map.get(adjust)
+                if adj_col and adj_col in data.columns:
+                    null_count = data[adj_col].isna().sum()
+                    null_ratio = null_count / len(data) if len(data) > 0 else 0
+                    if null_ratio > 0.05:  # 超过5% NULL 触发 repair
+                        self._logger.warning(
+                            "检测到 %s 复权列 %.1f%% NULL，自动触发 repair",
+                            adjust,
+                            null_ratio * 100,
+                        )
+                        try:
+                            self.repair_daily_adjustments([stock_code])
+                        except Exception as _repair_err:
+                            self._logger.error("自动 repair 失败: %s", _repair_err)
+
             data = self._apply_adjustment(data, adjust)
 
         # Step 6: 对 DuckDB 直读数据做二次合约验证（可配置采样，下载路径已在 Step 3.5 完成）
         if not data.empty and self._last_contract_validation is None:
-            self._step6_validation_metrics["total"] = int(self._step6_validation_metrics.get("total", 0)) + 1
+            self._step6_validation_metrics["total"] = (
+                int(self._step6_validation_metrics.get("total", 0)) + 1
+            )
             sample_basis = f"{stock_code}|{period}|{start_date}|{end_date}|{len(data)}"
             sample_hit = self._step6_should_validate(sample_basis)
             if not sample_hit:
-                self._step6_validation_metrics["skipped"] = int(self._step6_validation_metrics.get("skipped", 0)) + 1
+                self._step6_validation_metrics["skipped"] = (
+                    int(self._step6_validation_metrics.get("skipped", 0)) + 1
+                )
                 self._last_contract_validation = None
                 self._last_ingestion_source = ingestion_source
                 return data
-            self._step6_validation_metrics["sampled"] = int(self._step6_validation_metrics.get("sampled", 0)) + 1
+            self._step6_validation_metrics["sampled"] = (
+                int(self._step6_validation_metrics.get("sampled", 0)) + 1
+            )
             try:
                 from data_manager.data_contract_validator import DataContractValidator
+
                 _cv6 = DataContractValidator().validate(
                     data, stock_code, ingestion_source, period=period
                 )
                 self._last_contract_validation = _cv6
                 if not _cv6.pass_gate:
-                    self._step6_validation_metrics["hard_failed"] = int(self._step6_validation_metrics.get("hard_failed", 0)) + 1
+                    self._step6_validation_metrics["hard_failed"] = (
+                        int(self._step6_validation_metrics.get("hard_failed", 0)) + 1
+                    )
                     _hard_viols = [
                         v for v in _cv6.violations if getattr(v, "severity", "") == "hard"
                     ]
@@ -1616,13 +2299,18 @@ class UnifiedDataInterface:
                     self._logger.critical(
                         "DataContract CACHE-STALE [%s | %s | period=%s | %d 行]: "
                         "DuckDB 缓存数据存在硬违规，已触发隔离队列 — %s",
-                        stock_code, ingestion_source, period, len(data), _viol_summary,
+                        stock_code,
+                        ingestion_source,
+                        period,
+                        len(data),
+                        _viol_summary,
                     )
                     if self._cache_stale_quarantine_enabled:
                         try:
                             _date_col = next(
                                 (
-                                    c for c in ("time", "date", "trade_date", "datetime")
+                                    c
+                                    for c in ("time", "date", "trade_date", "datetime")
                                     if c in data.columns
                                 ),
                                 None,
@@ -1648,9 +2336,9 @@ class UnifiedDataInterface:
                                 reason="cache-stale-hard-violation",
                                 details={"violations": [v.detail for v in _hard_viols[:5]]},
                             )
-                            self._step6_validation_metrics["quarantined"] = int(
-                                self._step6_validation_metrics.get("quarantined", 0)
-                            ) + 1
+                            self._step6_validation_metrics["quarantined"] = (
+                                int(self._step6_validation_metrics.get("quarantined", 0)) + 1
+                            )
                         except Exception as _q_err:
                             self._logger.warning("Step6 quarantine 写入失败（不阻断）: %s", _q_err)
                     else:
@@ -1667,6 +2355,31 @@ class UnifiedDataInterface:
             self._last_contract_validation = None
 
         self._last_ingestion_source = ingestion_source
+
+        # ── 融合当日实时数据 ──────────────────────────────────────────────────────
+        if data is not None and not data.empty:
+            today = pd.Timestamp.now().normalize()
+            period_is_intraday = period in ("1m", "5m", "15m", "30m", "60m")
+            if period_is_intraday:
+                try:
+                    data_dates = pd.to_datetime(
+                        data.index if hasattr(data.index, "tolist") else [], errors="coerce"
+                    )
+                    if not data.empty and len(data_dates) > 0:
+                        latest_date = data_dates.max()
+                        if latest_date.tz is None:
+                            latest_date = latest_date.tz_localize("Asia/Shanghai")
+                        if latest_date.normalize() < today:
+                            self._logger.debug(
+                                "历史数据最新为 %s，尝试融合当日实时数据", latest_date.date()
+                            )
+                            realtime_df = self._get_realtime_bars(stock_code, period)
+                            if realtime_df is not None and not realtime_df.empty:
+                                data = self._merge_history_realtime(data, realtime_df, period)
+                                self._logger.debug("融合实时数据成功，总计 %d 条", len(data))
+                except Exception as e:
+                    self._logger.debug("融合实时数据失败（不影响主流程）: %s", e)
+
         # ── 写入结果缓存 ──────────────────────────────────────────────────────────
         if _cache_enabled and data is not None and not data.empty:
             UnifiedDataInterface._cache_put(_cache_key, data)
@@ -1681,28 +2394,64 @@ class UnifiedDataInterface:
         period: str = "1d",
         adjust: str = "none",
     ) -> pd.DataFrame:
+        period = self._canonicalize_period_code(period)
         # ── 日内自定义周期 ──
         if period in self._INTRADAY_CUSTOM_PERIODS:
             period_minutes = self._INTRADAY_CUSTOM_PERIODS[period]
-            src_1m = self.get_stock_data_local(stock_code, start_date, end_date, period="1m", adjust=adjust)
+            src_1m = self.get_stock_data_local(
+                stock_code, start_date, end_date, period="1m", adjust=adjust
+            )
             if src_1m is None or src_1m.empty:
                 return pd.DataFrame()
-            daily_ref = self.get_stock_data_local(stock_code, start_date, end_date, period="1d", adjust=adjust)
-            result = self._make_period_bar_builder(stock_code=stock_code).build_intraday_bars(
-                data_1m=src_1m, period_minutes=period_minutes, daily_ref=daily_ref
+            daily_ref = self.get_stock_data_local(
+                stock_code, start_date, end_date, period="1d", adjust=adjust
+            )
+            period_metadata = self._resolve_period_build_metadata(
+                period,
+                stock_code=stock_code,
+                trade_date=end_date,
+            )
+            result = self._make_period_bar_builder(
+                stock_code=stock_code,
+                trade_date=end_date,
+            ).build_intraday_bars(
+                data_1m=src_1m,
+                period_minutes=period_minutes,
+                daily_ref=daily_ref,
+                **period_metadata,
             )
             return result if result is not None and not result.empty else pd.DataFrame()
 
         # ── 多日自定义周期 ──
         if period in self._MULTIDAY_CUSTOM_PERIODS:
             trading_days = self._MULTIDAY_CUSTOM_PERIODS[period]
-            src_1d = self.get_stock_data_local(stock_code, start_date, end_date, period="1d", adjust=adjust)
+            # 刚性约束：必须从上市首日拉全量 1d，否则左对齐计数从视图起点开始导致边界漂移
+            _listing_date = self.get_listing_date(stock_code) or start_date
+            src_1d = self.get_stock_data_local(
+                stock_code, _listing_date, end_date, period="1d", adjust=adjust
+            )
             if src_1d is None or src_1d.empty:
                 return pd.DataFrame()
-            result = self._make_period_bar_builder(stock_code=stock_code).build_multiday_bars(
-                data_1d=src_1d, trading_days_per_period=trading_days
+            period_metadata = self._resolve_period_build_metadata(
+                period,
+                stock_code=stock_code,
+                trade_date=end_date,
             )
-            return result if result is not None and not result.empty else pd.DataFrame()
+            result = self._make_period_bar_builder(
+                stock_code=stock_code,
+                trade_date=end_date,
+            ).build_multiday_bars(
+                data_1d=src_1d,
+                trading_days_per_period=trading_days,
+                listing_date=_listing_date,
+                **period_metadata,
+            )
+            if result is None or result.empty:
+                return pd.DataFrame()
+            # 按视图范围裁剪输出（不影响从上市首日起的计数对齐）
+            if start_date:
+                result = result[result["time"] >= pd.Timestamp(start_date)]
+            return result if not result.empty else pd.DataFrame()
 
         if period in self._PERIOD_AGGREGATION:
             src_period, rule = self._PERIOD_AGGREGATION[period]
@@ -1715,7 +2464,13 @@ class UnifiedDataInterface:
             )
             if src_df is None or src_df.empty:
                 return pd.DataFrame()
-            aggregated = self._resample_ohlcv(src_df, rule)
+            aggregated = self._build_natural_calendar_aggregate(
+                src_df,
+                stock_code=stock_code,
+                period=period,
+                rule=rule,
+                trade_date=end_date,
+            )
             if aggregated is None or aggregated.empty:
                 return pd.DataFrame()
             return aggregated
@@ -1726,23 +2481,38 @@ class UnifiedDataInterface:
                 pass
         if self.con is not None:
             self._ensure_tables_exist()
+        preferred_sources = self._get_local_preferred_sources()
         data = self.data_registry.get_data(
             symbol=stock_code,
             start_date=start_date,
             end_date=end_date,
             period=period,
             adjust=adjust,
-            preferred_sources=["duckdb", "dat", "parquet"],
+            preferred_sources=preferred_sources,
         )
         if data is None or data.empty:
             data = pd.DataFrame()
+        if not data.empty:
+            data = self._apply_canonical_data_contract(
+                data,
+                period=period,
+                stock_code=stock_code,
+                trade_date=end_date,
+            )
         if not data.empty and adjust != "none":
             data = self._apply_adjustment(data, adjust)
         return data
 
+    def _get_local_preferred_sources(self) -> list[str]:
+        sources: list[str] = []
+        if self._sqlite_primary_enabled and self._sqlite_primary_store is not None:
+            sources.append("sqlite_primary")
+        sources.extend(["duckdb", "dat", "parquet"])
+        return sources
+
     # ─────────── 数据库修复工具：清理历史遗留的脏数据 ────────────
 
-    def repair_daily_adjustments(self, stock_codes: Optional[list[str]] = None) -> dict[str, str]:
+    def repair_daily_adjustments(self, stock_codes: list[str] | None = None) -> dict[str, str]:
         """批量修复 stock_daily 中复权列全 NULL 的历史遗留问题。
 
         扫描 stock_daily 表，找出 open_front 全为 NULL 的股票代码，
@@ -1788,9 +2558,7 @@ class UnifiedDataInterface:
 
             for code in stock_codes:
                 try:
-                    self.adjustment_manager._try_repair_adjustment(
-                        code, "1990-01-01", "2099-12-31"
-                    )
+                    self.adjustment_manager._try_repair_adjustment(code, "1990-01-01", "2099-12-31")
                     results[code] = "repaired"
                 except Exception as e:
                     results[code] = f"error: {e}"
@@ -1828,9 +2596,7 @@ class UnifiedDataInterface:
             self._logger.warning("PURGE: 清理失败: %s", e)
             return 0
 
-    def _compute_data_lineage(
-        self, data: pd.DataFrame
-    ) -> tuple[str, Optional[Any]]:
+    def _compute_data_lineage(self, data: pd.DataFrame) -> tuple[str, Any | None]:
         """计算数据血缘字段：(raw_hash, source_event_time)
 
         口径规范见 docs/lineage_spec.md §三：
@@ -1860,6 +2626,1032 @@ class UnifiedDataInterface:
                 pass
         return raw_hash, source_event_time
 
+    @staticmethod
+    def _resolve_quality_grade(
+        *,
+        contract_pass: bool,
+        cross_source_pass: bool,
+        tick_verified: bool,
+        lineage_complete: bool,
+    ) -> str:
+        if contract_pass and cross_source_pass and tick_verified and lineage_complete:
+            return "golden"
+        if contract_pass and cross_source_pass:
+            return "partial_trust"
+        if contract_pass and not cross_source_pass:
+            return "degraded"
+        return "unknown"
+
+    @staticmethod
+    def _classify_gate_reject_reason(
+        *,
+        source_status: str,
+        contract_pass: bool,
+        cross_source_pass: bool,
+        tick_verified: bool,
+        lineage_complete: bool,
+        replayable: bool,
+        result_status: str,
+    ) -> str:
+        normalized_status = str(source_status or "").strip().lower()
+        if normalized_status not in {"success", "queued", "running"}:
+            return f"upstream_{normalized_status or 'unknown'}"
+        if not contract_pass:
+            return "contract_failed"
+        if not cross_source_pass:
+            return "cross_source_conflict"
+        if not tick_verified:
+            return "tick_mismatch"
+        if not lineage_complete:
+            return "lineage_incomplete"
+        if not replayable:
+            return "not_replayable"
+        if str(result_status or "").strip().lower() != "pass":
+            return "manual_review"
+        return "passed"
+
+    @staticmethod
+    def _classify_gate_reject_severity(reason: str | None) -> str:
+        normalized = str(reason or "").strip().lower()
+        if normalized in {"passed"}:
+            return "ok"
+        if normalized in {"tick_mismatch", "lineage_incomplete", "manual_review", "not_replayable"}:
+            return "warning"
+        if normalized in {"contract_failed", "cross_source_conflict"}:
+            return "critical"
+        if normalized.startswith("upstream_"):
+            return "critical"
+        return "unknown"
+
+    @staticmethod
+    def _map_severity_to_sla_impact(severity: str | None) -> str:
+        normalized = str(severity or "").strip().lower()
+        if normalized == "ok":
+            return "within_sla"
+        if normalized == "warning":
+            return "monitor"
+        if normalized == "critical":
+            return "gate_block"
+        return "manual_review"
+
+    def _evaluate_tick_verified(
+        self,
+        *,
+        stock_code: str,
+        period: str,
+        start_date: str,
+        end_date: str,
+        fallback: bool,
+    ) -> bool:
+        con = getattr(self, "con", None)
+        if not con:
+            return bool(fallback)
+        canonical_period = self._canonicalize_period_code(period, allow_disabled=True)
+        if canonical_period in {"1d", "1w", "1M", "1Q", "6M", "1Y", "2Y", "3Y", "5Y", "10Y"}:
+            return bool(fallback)
+        try:
+            row = con.execute(
+                """
+                SELECT COUNT(*), MIN(datetime), MAX(datetime)
+                FROM stock_tick
+                WHERE stock_code = ?
+                  AND period = 'tick'
+                  AND DATE(datetime) >= CAST(? AS DATE)
+                  AND DATE(datetime) <= CAST(? AS DATE)
+                """,
+                [stock_code, start_date, end_date],
+            ).fetchone()
+        except Exception:
+            return bool(fallback)
+        if not row:
+            return bool(fallback)
+        count, min_dt, max_dt = row
+        if int(count or 0) <= 0 or min_dt is None or max_dt is None:
+            return bool(fallback)
+        if canonical_period == "1m":
+            try:
+                tick_frame = con.execute(
+                    """
+                    SELECT date_trunc('minute', datetime) AS minute_ts,
+                           arg_min(open, datetime) AS open_tick,
+                           MIN(low) AS low_tick,
+                           MAX(high) AS high_tick,
+                           arg_max(close, datetime) AS close_tick,
+                           SUM(volume) AS volume_tick,
+                           SUM(amount) AS amount_tick
+                    FROM stock_tick
+                    WHERE stock_code = ?
+                      AND period = 'tick'
+                      AND DATE(datetime) >= CAST(? AS DATE)
+                      AND DATE(datetime) <= CAST(? AS DATE)
+                    GROUP BY 1
+                    ORDER BY 1
+                    """,
+                    [stock_code, start_date, end_date],
+                ).fetchdf()
+                minute_frame = con.execute(
+                    """
+                    SELECT datetime AS minute_ts, open, high, low, close, volume, amount
+                    FROM stock_1m
+                    WHERE stock_code = ?
+                      AND period = '1m'
+                      AND DATE(datetime) >= CAST(? AS DATE)
+                      AND DATE(datetime) <= CAST(? AS DATE)
+                    ORDER BY datetime
+                    """,
+                    [stock_code, start_date, end_date],
+                ).fetchdf()
+            except Exception:
+                return True
+            if tick_frame is None or tick_frame.empty or minute_frame is None or minute_frame.empty:
+                return True
+            merged = tick_frame.merge(minute_frame, on="minute_ts", how="inner")
+            if merged.empty:
+                return True
+            open_match = (merged["open_tick"].fillna(0).astype(float).round(6) == merged["open"].fillna(0).astype(float).round(6)).all()
+            close_match = (merged["close_tick"].fillna(0).astype(float).round(6) == merged["close"].fillna(0).astype(float).round(6)).all()
+            volume_match = (merged["volume_tick"].fillna(0).astype(float) == merged["volume"].fillna(0).astype(float)).all()
+            amount_match = (merged["amount_tick"].fillna(0).astype(float).round(6) == merged["amount"].fillna(0).astype(float).round(6)).all()
+            high_match = (merged["high_tick"].fillna(0).astype(float).round(6) == merged["high"].fillna(0).astype(float).round(6)).all()
+            low_match = (merged["low_tick"].fillna(0).astype(float).round(6) == merged["low"].fillna(0).astype(float).round(6)).all()
+            return bool(open_match and close_match and volume_match and amount_match and high_match and low_match)
+        return True
+
+    @staticmethod
+    def _infer_source_grade(source: str, status: str) -> str:
+        if str(status or "").strip().lower() != "success":
+            return "unknown"
+        normalized = str(source or "").strip().lower()
+        if normalized in {"sqlite_primary", "duckdb", "qmt"}:
+            return "golden"
+        if normalized in {"dat", "parquet"}:
+            return "partial_trust"
+        if normalized in {"akshare", "tushare"}:
+            return "degraded"
+        return "unknown"
+
+    def _build_gate_status_metadata(
+        self,
+        *,
+        stock_code: str,
+        period: str,
+        start_date: str,
+        end_date: str,
+        source: str,
+        status: str,
+        contract_pass: bool | None = None,
+        cross_source_pass: bool | None = None,
+        tick_verified: bool | None = None,
+        source_grade: str | None = None,
+        raw_hash: str | None = None,
+        source_event_time: Any | None = None,
+    ) -> dict[str, object]:
+        resolved_session = self._resolve_session_profile(stock_code, trade_date=end_date)
+        resolved_threshold = self._resolve_period_thresholds(
+            period,
+            market=self._infer_market_from_symbol(stock_code),
+            source_grade=source_grade or self._infer_source_grade(source, status),
+            as_of_date=end_date,
+        )
+        period_registry_version = self._get_period_registry().registry_version
+        resolved_contract_pass = True if contract_pass is None else bool(contract_pass)
+        resolved_cross_source_pass = self._evaluate_cross_source_gate(
+            stock_code=stock_code,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
+            fallback=(
+                resolved_contract_pass if cross_source_pass is None else bool(cross_source_pass)
+            ),
+        )
+        resolved_tick_verified = self._evaluate_tick_verified(
+            stock_code=stock_code,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
+            fallback=bool(tick_verified) if tick_verified is not None else False,
+        )
+        lineage_complete = all(
+            [
+                bool(resolved_session.profile_version),
+                bool(resolved_threshold.threshold_version),
+                bool(period_registry_version),
+                bool(TIMESTAMP_CONTRACT_VERSION),
+                bool(raw_hash),
+                source_event_time is not None,
+            ]
+        )
+        replayable = resolved_contract_pass and resolved_cross_source_pass and lineage_complete
+        quality_grade = self._resolve_quality_grade(
+            contract_pass=resolved_contract_pass,
+            cross_source_pass=resolved_cross_source_pass,
+            tick_verified=resolved_tick_verified,
+            lineage_complete=lineage_complete,
+        )
+        result_status = "pass" if (resolved_contract_pass and resolved_cross_source_pass and replayable) else "review"
+        gate_reject_reason = self._classify_gate_reject_reason(
+            source_status=status,
+            contract_pass=resolved_contract_pass,
+            cross_source_pass=resolved_cross_source_pass,
+            tick_verified=resolved_tick_verified,
+            lineage_complete=lineage_complete,
+            replayable=replayable,
+            result_status=result_status,
+        )
+        return {
+            "threshold_version": resolved_threshold.threshold_version,
+            "session_profile_version": resolved_session.profile_version,
+            "timestamp_contract_version": TIMESTAMP_CONTRACT_VERSION,
+            "period_registry_version": period_registry_version,
+            "source_grade": source_grade or self._infer_source_grade(source, status),
+            "contract_pass": resolved_contract_pass,
+            "cross_source_pass": resolved_cross_source_pass,
+            "tick_verified": resolved_tick_verified,
+            "lineage_complete": lineage_complete,
+            "replayable": replayable,
+            "quality_grade": quality_grade,
+            "gate_reject_reason": gate_reject_reason,
+            "result_status": result_status,
+            "gate_policy_version": GATE_POLICY_VERSION,
+            "range_start": self._normalize_date_str(start_date),
+            "range_end": self._normalize_date_str(end_date),
+        }
+
+    def _evaluate_cross_source_gate(
+        self,
+        *,
+        stock_code: str,
+        period: str,
+        start_date: str,
+        end_date: str,
+        fallback: bool,
+    ) -> bool:
+        con = getattr(self, "con", None)
+        if not con:
+            return bool(fallback)
+        try:
+            conflict_count = con.execute(
+                """
+                SELECT COUNT(*)
+                FROM source_conflict_audit
+                WHERE stock_code = ?
+                  AND period = ?
+                  AND event_ts >= CAST(? AS TIMESTAMP)
+                  AND event_ts <= CAST(? AS TIMESTAMP)
+                """,
+                [
+                    stock_code,
+                    period,
+                    self._normalize_date_str(start_date),
+                    self._normalize_date_str(end_date),
+                ],
+            ).fetchone()[0]
+        except Exception:
+            conflict_count = 0
+        try:
+            failed_verify_count = con.execute(
+                """
+                SELECT COUNT(*)
+                FROM write_audit_log
+                WHERE stock_code = ?
+                  AND period = ?
+                  AND CAST(date_min AS TIMESTAMP) <= CAST(? AS TIMESTAMP)
+                  AND CAST(date_max AS TIMESTAMP) >= CAST(? AS TIMESTAMP)
+                  AND COALESCE(post_verify_pass, FALSE) = FALSE
+                """,
+                [
+                    stock_code,
+                    period,
+                    self._normalize_date_str(end_date),
+                    self._normalize_date_str(start_date),
+                ],
+            ).fetchone()[0]
+        except Exception:
+            failed_verify_count = 0
+        if conflict_count > 0 or failed_verify_count > 0:
+            return False
+        return bool(fallback)
+
+    def get_latest_gate_status(
+        self, stock_code: str, period: str
+    ) -> dict[str, Any]:
+        if self.con is None:
+            if not self.connect(read_only=True):
+                return {}
+            self._ensure_tables_exist()
+        resolved_period = self._canonicalize_period_code(period, allow_disabled=True)
+        try:
+            row = self.con.execute(
+                """
+                SELECT stock_code, period, start_date, end_date, status, record_count,
+                       gate_receipt_id, threshold_version, session_profile_version,
+                       timestamp_contract_version, period_registry_version, source_grade,
+                       contract_pass, cross_source_pass, tick_verified, lineage_complete, replayable,
+                       quality_grade, gate_reject_reason, last_updated
+                FROM data_ingestion_status
+                WHERE stock_code = ? AND period = ?
+                ORDER BY last_updated DESC
+                LIMIT 1
+                """,
+                [stock_code, resolved_period],
+            ).fetchone()
+        except Exception:
+            return {}
+        if not row:
+            return {}
+        columns = [
+            "stock_code",
+            "period",
+            "start_date",
+            "end_date",
+            "status",
+            "record_count",
+            "gate_receipt_id",
+            "threshold_version",
+            "session_profile_version",
+            "timestamp_contract_version",
+            "period_registry_version",
+            "source_grade",
+            "contract_pass",
+            "cross_source_pass",
+            "tick_verified",
+            "lineage_complete",
+            "replayable",
+            "quality_grade",
+            "gate_reject_reason",
+            "last_updated",
+        ]
+        return dict(zip(columns, row))
+
+    def get_publish_gate_summary(self) -> dict[str, Any]:
+        if self.con is None:
+            if not self.connect(read_only=True):
+                return {}
+            self._ensure_tables_exist()
+        summary = {
+            "total": 0,
+            "golden": 0,
+            "partial_trust": 0,
+            "degraded": 0,
+            "unknown": 0,
+            "replayable_true": 0,
+            "lineage_complete_true": 0,
+            "tick_verified_true": 0,
+            "reject_reason_counts": {},
+            "reject_severity_counts": {},
+            "sla_impact_counts": {},
+        }
+        try:
+            rows = self.con.execute(
+                """
+                SELECT quality_grade, COUNT(*) AS cnt
+                FROM publish_gate_receipt
+                GROUP BY quality_grade
+                """
+            ).fetchall()
+            for quality_grade, count in rows:
+                key = str(quality_grade or "unknown")
+                summary["total"] += int(count or 0)
+                if key in summary:
+                    summary[key] = int(count or 0)
+        except Exception:
+            return summary
+        try:
+            summary["replayable_true"] = int(
+                self.con.execute(
+                    "SELECT COUNT(*) FROM publish_gate_receipt WHERE replayable = TRUE"
+                ).fetchone()[0]
+            )
+            summary["lineage_complete_true"] = int(
+                self.con.execute(
+                    "SELECT COUNT(*) FROM publish_gate_receipt WHERE lineage_complete = TRUE"
+                ).fetchone()[0]
+            )
+            summary["tick_verified_true"] = int(
+                self.con.execute(
+                    "SELECT COUNT(*) FROM publish_gate_receipt WHERE tick_verified = TRUE"
+                ).fetchone()[0]
+            )
+            summary["reject_reason_counts"] = self.get_gate_reject_reason_summary()
+            summary["reject_severity_counts"] = self.get_gate_reject_severity_summary()
+            summary["sla_impact_counts"] = self.get_gate_sla_impact_summary()
+        except Exception:
+            pass
+        return summary
+
+    def _get_latest_gate_receipt_id(self, stock_code: str, period: str) -> str:
+        con = getattr(self, "con", None)
+        if not con:
+            return ""
+        try:
+            row = con.execute(
+                """
+                SELECT gate_receipt_id
+                FROM data_ingestion_status
+                WHERE stock_code = ? AND period = ?
+                ORDER BY last_updated DESC
+                LIMIT 1
+                """,
+                [stock_code, self._canonicalize_period_code(period, allow_disabled=True)],
+            ).fetchone()
+        except Exception:
+            return ""
+        return str(row[0] or "") if row else ""
+
+    def _get_latest_receipt_id(self, table_name: str, stock_code: str, period: str) -> str:
+        con = getattr(self, "con", None)
+        if not con:
+            return ""
+        try:
+            row = con.execute(
+                f"""
+                SELECT receipt_id
+                FROM {table_name}
+                WHERE stock_code = ? AND period = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                [stock_code, self._canonicalize_period_code(period, allow_disabled=True)],
+            ).fetchone()
+        except Exception:
+            return ""
+        return str(row[0] or "") if row else ""
+
+    def _get_latest_lineage_anchor(self, stock_code: str, period: str) -> str:
+        con = getattr(self, "con", None)
+        if not con:
+            return ""
+        canonical_period = self._canonicalize_period_code(period, allow_disabled=True)
+        query = """
+            SELECT lineage_anchor, created_at FROM publish_gate_receipt WHERE stock_code = ? AND period = ?
+            UNION ALL
+            SELECT lineage_anchor, created_at FROM repair_receipt WHERE stock_code = ? AND period = ?
+            UNION ALL
+            SELECT lineage_anchor, created_at FROM replay_receipt WHERE stock_code = ? AND period = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+        """
+        try:
+            row = con.execute(
+                query,
+                [
+                    stock_code,
+                    canonical_period,
+                    stock_code,
+                    canonical_period,
+                    stock_code,
+                    canonical_period,
+                ],
+            ).fetchone()
+        except Exception:
+            return ""
+        return str(row[0] or "") if row else ""
+
+    def record_repair_receipt(
+        self,
+        *,
+        stock_code: str,
+        period: str,
+        start_date: str,
+        end_date: str,
+        reason: str,
+        status: str,
+        task_count: int,
+        queued_tasks: int,
+        failed_tasks: int,
+        source: str = "golden_1d_repair_orchestrator",
+    ) -> str:
+        con = getattr(self, "con", None)
+        if not con or self._read_only_connection:
+            return ""
+        receipt_id = str(uuid.uuid4())
+        gate_receipt_id = self._get_latest_gate_receipt_id(stock_code, period)
+        lineage_anchor = self._get_latest_lineage_anchor(stock_code, period) or gate_receipt_id or receipt_id
+        gate_status = self.get_latest_gate_status(stock_code, period)
+        try:
+            con.execute(
+                """
+                INSERT INTO repair_receipt (
+                    receipt_id, stock_code, period, range_start, range_end,
+                    reason, source, status, task_count, queued_tasks, failed_tasks,
+                    related_gate_receipt_id, session_profile_version, timestamp_contract_version,
+                    threshold_version, period_registry_version, lineage_anchor
+                ) VALUES (?, ?, ?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    receipt_id,
+                    stock_code,
+                    self._canonicalize_period_code(period, allow_disabled=True),
+                    self._normalize_date_str(start_date),
+                    self._normalize_date_str(end_date),
+                    reason,
+                    source,
+                    status,
+                    int(task_count),
+                    int(queued_tasks),
+                    int(failed_tasks),
+                    gate_receipt_id,
+                    gate_status.get("session_profile_version"),
+                    gate_status.get("timestamp_contract_version"),
+                    gate_status.get("threshold_version"),
+                    gate_status.get("period_registry_version"),
+                    lineage_anchor,
+                ],
+            )
+            return receipt_id
+        except Exception as exc:
+            self._logger.warning("写入repair_receipt失败: %s", exc)
+            return ""
+
+    def _record_replay_receipt(
+        self,
+        *,
+        quarantine_id: str,
+        stock_code: str,
+        period: str,
+        start_date: str,
+        end_date: str,
+        replay_kind: str,
+        status: str,
+        last_error: str | None = None,
+    ) -> str:
+        con = getattr(self, "con", None)
+        if not con or self._read_only_connection:
+            return ""
+        receipt_id = str(uuid.uuid4())
+        gate_receipt_id = self._get_latest_gate_receipt_id(stock_code, period)
+        repair_receipt_id = self._get_latest_receipt_id("repair_receipt", stock_code, period)
+        lineage_anchor = self._get_latest_lineage_anchor(stock_code, period) or gate_receipt_id or repair_receipt_id or receipt_id
+        gate_status = self.get_latest_gate_status(stock_code, period)
+        try:
+            con.execute(
+                """
+                INSERT INTO replay_receipt (
+                    receipt_id, quarantine_id, stock_code, period, range_start, range_end,
+                    replay_kind, status, last_error, related_gate_receipt_id, related_repair_receipt_id,
+                    tick_verified, replayable, lineage_anchor
+                ) VALUES (?, ?, ?, ?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    receipt_id,
+                    quarantine_id,
+                    stock_code,
+                    self._canonicalize_period_code(period, allow_disabled=True),
+                    self._normalize_date_str(start_date),
+                    self._normalize_date_str(end_date),
+                    replay_kind,
+                    status,
+                    last_error,
+                    gate_receipt_id,
+                    repair_receipt_id,
+                    gate_status.get("tick_verified"),
+                    gate_status.get("replayable"),
+                    lineage_anchor,
+                ],
+            )
+            return receipt_id
+        except Exception as exc:
+            self._logger.warning("写入replay_receipt失败: %s", exc)
+            return ""
+
+    def get_receipt_history(
+        self,
+        receipt_type: str,
+        *,
+        symbol: str = "",
+        period: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        con = getattr(self, "con", None)
+        if con is None:
+            if not self.connect(read_only=True):
+                return []
+            self._ensure_tables_exist()
+            con = self.con
+        table_map = {
+            "publish_gate": "publish_gate_receipt",
+            "repair": "repair_receipt",
+            "replay": "replay_receipt",
+        }
+        table_name = table_map.get(str(receipt_type or "").strip())
+        if not table_name:
+            return []
+        filters: list[str] = []
+        params: list[Any] = []
+        if symbol:
+            filters.append("stock_code = ?")
+            params.append(symbol)
+        if period:
+            filters.append("period = ?")
+            params.append(self._canonicalize_period_code(period, allow_disabled=True))
+        where_clause = ("WHERE " + " AND ".join(filters)) if filters else ""
+        query = f"SELECT * FROM {table_name} {where_clause} ORDER BY created_at DESC LIMIT ?"
+        params.append(max(int(limit), 1))
+        try:
+            frame = con.execute(query, params).fetchdf()
+        except Exception:
+            return []
+        if frame is None or frame.empty:
+            return []
+        return cast(list[dict[str, Any]], frame.to_dict(orient="records"))
+
+    def get_receipt_timeline(
+        self,
+        *,
+        symbol: str = "",
+        period: str = "",
+        lineage_anchor: str = "",
+        receipt_type: str = "",
+        gate_reject_reason: str = "",
+        severity: str = "",
+        lookback_days: int = 0,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        con = getattr(self, "con", None)
+        if con is None:
+            if not self.connect(read_only=True):
+                return []
+            self._ensure_tables_exist()
+            con = self.con
+        filters: list[str] = []
+        params: list[Any] = []
+        if symbol:
+            filters.append("stock_code = ?")
+            params.append(symbol)
+        if period:
+            filters.append("period = ?")
+            params.append(self._canonicalize_period_code(period, allow_disabled=True))
+        if lineage_anchor:
+            filters.append("lineage_anchor = ?")
+            params.append(lineage_anchor)
+        if int(lookback_days or 0) > 0:
+            filters.append("created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')")
+            params.append(max(int(lookback_days), 1))
+        publish_filters = list(filters)
+        publish_params = list(params)
+        if gate_reject_reason:
+            publish_filters.append("gate_reject_reason = ?")
+            publish_params.append(gate_reject_reason)
+        if severity:
+            matching_reasons = [
+                reason
+                for reason in [
+                    "passed",
+                    "contract_failed",
+                    "cross_source_conflict",
+                    "tick_mismatch",
+                    "lineage_incomplete",
+                    "not_replayable",
+                    "manual_review",
+                    "upstream_error",
+                    "upstream_failed",
+                    "upstream_unknown",
+                ]
+                if self._classify_gate_reject_severity(reason) == severity
+            ]
+            if matching_reasons:
+                placeholders = ", ".join(["?"] * len(matching_reasons))
+                publish_filters.append(f"gate_reject_reason IN ({placeholders})")
+                publish_params.extend(matching_reasons)
+        where_clause = ("WHERE " + " AND ".join(filters)) if filters else ""
+        publish_where_clause = ("WHERE " + " AND ".join(publish_filters)) if publish_filters else ""
+        receipt_type_clause = str(receipt_type or "").strip()
+        query = f"""
+            SELECT 'publish_gate' AS receipt_type, receipt_id, stock_code, period, range_start, range_end,
+                   status, result_status, gate_reject_reason, lineage_anchor, related_repair_receipt_id,
+                   related_replay_receipt_id, NULL AS related_gate_receipt_id, created_at
+            FROM publish_gate_receipt
+            {publish_where_clause}
+            UNION ALL
+            SELECT 'repair' AS receipt_type, receipt_id, stock_code, period, range_start, range_end,
+                   status, reason AS result_status, NULL AS gate_reject_reason, lineage_anchor, NULL AS related_repair_receipt_id,
+                   NULL AS related_replay_receipt_id, related_gate_receipt_id, created_at
+            FROM repair_receipt
+            {where_clause}
+            UNION ALL
+            SELECT 'replay' AS receipt_type, receipt_id, stock_code, period, range_start, range_end,
+                   status, replay_kind AS result_status, NULL AS gate_reject_reason, lineage_anchor, related_repair_receipt_id,
+                   NULL AS related_replay_receipt_id, related_gate_receipt_id, created_at
+            FROM replay_receipt
+            {where_clause}
+            ORDER BY created_at DESC
+            LIMIT ?
+        """
+        all_params = publish_params + params + params + [max(int(limit), 1)]
+        try:
+            frame = con.execute(query, all_params).fetchdf()
+        except Exception:
+            return []
+        if frame is None or frame.empty:
+            return []
+        if receipt_type_clause:
+            frame = frame[frame["receipt_type"] == receipt_type_clause]
+        if severity:
+            frame["severity"] = frame["gate_reject_reason"].apply(self._classify_gate_reject_severity)
+            frame = frame[frame["severity"] == severity]
+        else:
+            frame["severity"] = frame["gate_reject_reason"].apply(self._classify_gate_reject_severity)
+        frame["sla_impact"] = frame["severity"].apply(self._map_severity_to_sla_impact)
+        if frame.empty:
+            return []
+        return cast(list[dict[str, Any]], frame.to_dict(orient="records"))
+
+    def get_gate_reject_reason_summary(self) -> dict[str, int]:
+        con = getattr(self, "con", None)
+        if con is None:
+            if not self.connect(read_only=True):
+                return {}
+            self._ensure_tables_exist()
+            con = self.con
+        try:
+            rows = con.execute(
+                """
+                SELECT gate_reject_reason, COUNT(*) AS cnt
+                FROM publish_gate_receipt
+                GROUP BY gate_reject_reason
+                """
+            ).fetchall()
+        except Exception:
+            return {}
+        summary: dict[str, int] = {}
+        for reason, count in rows:
+            summary[str(reason or "unknown")] = int(count or 0)
+        return summary
+
+    def get_gate_reject_severity_summary(self) -> dict[str, int]:
+        reason_summary = self.get_gate_reject_reason_summary()
+        severity_summary: dict[str, int] = {}
+        for reason, count in reason_summary.items():
+            severity = self._classify_gate_reject_severity(reason)
+            severity_summary[severity] = severity_summary.get(severity, 0) + int(count or 0)
+        return severity_summary
+
+    def get_gate_sla_impact_summary(self) -> dict[str, int]:
+        severity_summary = self.get_gate_reject_severity_summary()
+        sla_summary: dict[str, int] = {}
+        for severity, count in severity_summary.items():
+            impact = self._map_severity_to_sla_impact(severity)
+            sla_summary[impact] = sla_summary.get(impact, 0) + int(count or 0)
+        return sla_summary
+
+    def get_gate_trend_summary(self, days: int = 7) -> list[dict[str, Any]]:
+        con = getattr(self, "con", None)
+        if con is None:
+            if not self.connect(read_only=True):
+                return []
+            self._ensure_tables_exist()
+            con = self.con
+        lookback_days = max(int(days), 1)
+        try:
+            frame = con.execute(
+                """
+                SELECT CAST(created_at AS DATE) AS trade_day,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN quality_grade = 'golden' THEN 1 ELSE 0 END) AS golden,
+                       SUM(CASE WHEN quality_grade = 'degraded' THEN 1 ELSE 0 END) AS degraded,
+                       SUM(CASE WHEN gate_reject_reason <> 'passed' THEN 1 ELSE 0 END) AS rejected,
+                       SUM(CASE WHEN gate_reject_reason = 'tick_mismatch' THEN 1 ELSE 0 END) AS tick_mismatch,
+                       SUM(CASE WHEN gate_reject_reason = 'cross_source_conflict' THEN 1 ELSE 0 END) AS cross_source_conflict
+                FROM publish_gate_receipt
+                WHERE created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+                GROUP BY 1
+                ORDER BY 1 DESC
+                """,
+                [lookback_days],
+            ).fetchdf()
+        except Exception:
+            return []
+        if frame is None or frame.empty:
+            return []
+        return cast(list[dict[str, Any]], frame.to_dict(orient="records"))
+
+    def get_gate_dimension_trend_summary(
+        self,
+        *,
+        days: int = 7,
+        dimension: str = "symbol",
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        con = getattr(self, "con", None)
+        if con is None:
+            if not self.connect(read_only=True):
+                return []
+            self._ensure_tables_exist()
+            con = self.con
+        lookback_days = max(int(days), 1)
+        top_limit = max(int(limit), 1)
+        dimension_map = {
+            "symbol": "stock_code",
+            "period": "period",
+        }
+        dim_column = dimension_map.get(str(dimension or "").strip(), "stock_code")
+        try:
+            frame = con.execute(
+                f"""
+                WITH top_dimensions AS (
+                    SELECT {dim_column} AS dimension_value,
+                           SUM(CASE WHEN gate_reject_reason <> 'passed' THEN 1 ELSE 0 END) AS rejected_total
+                    FROM publish_gate_receipt
+                    WHERE created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+                    GROUP BY 1
+                    ORDER BY rejected_total DESC, dimension_value
+                    LIMIT ?
+                )
+                SELECT CAST(p.created_at AS DATE) AS trade_day,
+                       p.{dim_column} AS dimension_value,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN p.gate_reject_reason <> 'passed' THEN 1 ELSE 0 END) AS rejected,
+                       SUM(CASE WHEN p.gate_reject_reason IN ('contract_failed', 'cross_source_conflict')
+                                 OR p.gate_reject_reason LIKE 'upstream_%'
+                                THEN 1 ELSE 0 END) AS critical,
+                       SUM(CASE WHEN p.gate_reject_reason IN ('tick_mismatch', 'lineage_incomplete', 'manual_review', 'not_replayable')
+                                THEN 1 ELSE 0 END) AS warning
+                FROM publish_gate_receipt p
+                INNER JOIN top_dimensions t
+                    ON p.{dim_column} = t.dimension_value
+                WHERE p.created_at >= CURRENT_TIMESTAMP - (? * INTERVAL '1 day')
+                GROUP BY 1, 2
+                ORDER BY trade_day DESC, rejected DESC, dimension_value
+                """,
+                [lookback_days, top_limit, lookback_days],
+            ).fetchdf()
+        except Exception:
+            return []
+        if frame is None or frame.empty:
+            return []
+        frame["dimension"] = str(dimension or "").strip() or "symbol"
+        return cast(list[dict[str, Any]], frame.to_dict(orient="records"))
+
+    def get_lineage_anchor_detail(self, lineage_anchor: str) -> dict[str, Any]:
+        normalized_anchor = str(lineage_anchor or "").strip()
+        if not normalized_anchor:
+            return {}
+        timeline = self.get_receipt_timeline(lineage_anchor=normalized_anchor, limit=200)
+        if not timeline:
+            return {}
+        symbols = sorted({str(item.get("stock_code") or "") for item in timeline if item.get("stock_code")})
+        periods = sorted({str(item.get("period") or "") for item in timeline if item.get("period")})
+        receipt_counts: dict[str, int] = {}
+        for item in timeline:
+            receipt_type = str(item.get("receipt_type") or "unknown")
+            receipt_counts[receipt_type] = receipt_counts.get(receipt_type, 0) + 1
+        traceability_records: list[dict[str, Any]] = []
+        con = getattr(self, "con", None)
+        if con is not None:
+            symbol_period_pairs = sorted(
+                {
+                    (str(item.get("stock_code") or ""), str(item.get("period") or ""))
+                    for item in timeline
+                    if item.get("stock_code") and item.get("period")
+                }
+            )
+            for stock_code, period in symbol_period_pairs:
+                try:
+                    frame = con.execute(
+                        """
+                        SELECT stock_code, period, source, status, record_count, start_date, end_date,
+                               last_updated, ingest_run_id, error_message, gate_receipt_id,
+                               quality_grade, gate_reject_reason
+                        FROM data_ingestion_status
+                        WHERE stock_code = ? AND period = ?
+                        ORDER BY last_updated DESC
+                        LIMIT 5
+                        """,
+                        [stock_code, period],
+                    ).fetchdf()
+                except Exception:
+                    continue
+                if frame is None or frame.empty:
+                    continue
+                traceability_records.extend(cast(list[dict[str, Any]], frame.to_dict(orient="records")))
+        return {
+            "lineage_anchor": normalized_anchor,
+            "symbols": symbols,
+            "periods": periods,
+            "receipt_counts": receipt_counts,
+            "timeline": timeline,
+            "traceability_records": traceability_records,
+            "latest_receipt_id": timeline[0].get("receipt_id"),
+            "latest_status": timeline[0].get("status"),
+        }
+
+    def get_sla_alert_threshold_panel(self) -> dict[str, Any]:
+        return self.get_sla_alert_threshold_panel_with_overrides(None)
+
+    def get_sla_alert_threshold_panel_with_overrides(
+        self,
+        overrides: dict[str, int] | None,
+    ) -> dict[str, Any]:
+        threshold_defs = {
+            "gate_block": int(os.getenv("EASYXT_SLA_GATE_BLOCK_THRESHOLD", "0") or 0),
+            "monitor": int(os.getenv("EASYXT_SLA_MONITOR_THRESHOLD", "5") or 5),
+            "degraded": int(os.getenv("EASYXT_SLA_DEGRADED_THRESHOLD", "0") or 0),
+            "reject_total": int(os.getenv("EASYXT_SLA_REJECT_TOTAL_THRESHOLD", "10") or 10),
+        }
+        for key, value in (overrides or {}).items():
+            if key in threshold_defs:
+                threshold_defs[key] = int(value)
+        publish_gate = self.get_publish_gate_summary()
+        sla_impact = self.get_gate_sla_impact_summary()
+        current = {
+            "gate_block": int(sla_impact.get("gate_block", 0) or 0),
+            "monitor": int(sla_impact.get("monitor", 0) or 0),
+            "degraded": int(publish_gate.get("degraded", 0) or 0),
+            "reject_total": sum(int(v or 0) for k, v in (publish_gate.get("reject_reason_counts") or {}).items() if k != "passed"),
+        }
+        breaches = {
+            key: current[key] > threshold_defs[key]
+            for key in threshold_defs
+        }
+        status = "ok" if not any(breaches.values()) else "warning"
+        if breaches.get("gate_block") or breaches.get("degraded"):
+            status = "critical"
+        return {
+            "status": status,
+            "thresholds": threshold_defs,
+            "current": current,
+            "breaches": breaches,
+        }
+
+    def get_receipt_store_summary(self) -> dict[str, int]:
+        con = getattr(self, "con", None)
+        if con is None:
+            if not self.connect(read_only=True):
+                return {}
+            self._ensure_tables_exist()
+            con = self.con
+        tables = {
+            "publish_gate": "publish_gate_receipt",
+            "repair": "repair_receipt",
+            "replay": "replay_receipt",
+        }
+        summary: dict[str, int] = {}
+        for key, table_name in tables.items():
+            try:
+                summary[key] = int(con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0])
+            except Exception:
+                summary[key] = 0
+        return summary
+
+    def _record_publish_gate_receipt(
+        self,
+        *,
+        stock_code: str,
+        period: str,
+        source: str,
+        status: str,
+        result_status: str,
+        gate_metadata: dict[str, object],
+    ) -> str:
+        if not self.con or self._read_only_connection:
+            return ""
+        receipt_id = str(uuid.uuid4())
+        repair_receipt_id = self._get_latest_receipt_id("repair_receipt", stock_code, period)
+        replay_receipt_id = self._get_latest_receipt_id("replay_receipt", stock_code, period)
+        lineage_anchor = self._get_latest_lineage_anchor(stock_code, period) or receipt_id
+        try:
+            self.con.execute(
+                """
+                INSERT INTO publish_gate_receipt (
+                    receipt_id, stock_code, period, range_start, range_end,
+                    source, status, result_status, contract_pass, cross_source_pass,
+                    tick_verified, lineage_complete, replayable, quality_grade, gate_reject_reason,
+                    session_profile_version, timestamp_contract_version, threshold_version,
+                    period_registry_version, gate_policy_version, lineage_anchor,
+                    related_repair_receipt_id, related_replay_receipt_id
+                ) VALUES (?, ?, ?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    receipt_id,
+                    stock_code,
+                    period,
+                    gate_metadata.get("range_start"),
+                    gate_metadata.get("range_end"),
+                    source,
+                    status,
+                    result_status,
+                    gate_metadata.get("contract_pass"),
+                    gate_metadata.get("cross_source_pass"),
+                    gate_metadata.get("tick_verified"),
+                    gate_metadata.get("lineage_complete"),
+                    gate_metadata.get("replayable"),
+                    gate_metadata.get("quality_grade"),
+                    gate_metadata.get("gate_reject_reason"),
+                    gate_metadata.get("session_profile_version"),
+                    gate_metadata.get("timestamp_contract_version"),
+                    gate_metadata.get("threshold_version"),
+                    gate_metadata.get("period_registry_version"),
+                    gate_metadata.get("gate_policy_version"),
+                    lineage_anchor,
+                    repair_receipt_id,
+                    replay_receipt_id,
+                ],
+            )
+            return receipt_id
+        except Exception as exc:
+            self._logger.warning("写入publish_gate_receipt失败: %s", exc)
+            return ""
+
     def _record_ingestion_status(
         self,
         stock_code: str,
@@ -1869,15 +3661,41 @@ class UnifiedDataInterface:
         source: str,
         status: str,
         record_count: int,
-        error_message: Optional[str],
+        error_message: str | None,
         *,
-        raw_hash: Optional[str] = None,
-        source_event_time: Optional[Any] = None,
+        raw_hash: str | None = None,
+        source_event_time: Any | None = None,
+        contract_pass: bool | None = None,
+        cross_source_pass: bool | None = None,
+        tick_verified: bool | None = None,
+        source_grade: str | None = None,
     ) -> None:
         if not self.con:
             return
         ingest_run_id = str(uuid.uuid4())
         schema_version = CURRENT_SCHEMA_VERSION
+        gate_metadata = self._build_gate_status_metadata(
+            stock_code=stock_code,
+            period=period,
+            start_date=start_date,
+            end_date=end_date,
+            source=source,
+            status=status,
+            contract_pass=contract_pass,
+            cross_source_pass=cross_source_pass,
+            tick_verified=tick_verified,
+            source_grade=source_grade,
+            raw_hash=raw_hash,
+            source_event_time=source_event_time,
+        )
+        gate_receipt_id = self._record_publish_gate_receipt(
+            stock_code=stock_code,
+            period=period,
+            source=source,
+            status=status,
+            result_status=str(gate_metadata["result_status"]),
+            gate_metadata=gate_metadata,
+        )
 
         _ts_start = self._normalize_date_str(start_date)
         _ts_end = self._normalize_date_str(end_date)
@@ -1897,13 +3715,27 @@ class UnifiedDataInterface:
                     schema_version,
                     ingest_run_id,
                     raw_hash,
-                    source_event_time
+                    source_event_time,
+                    gate_receipt_id,
+                    threshold_version,
+                    session_profile_version,
+                    timestamp_contract_version,
+                    period_registry_version,
+                    source_grade,
+                    contract_pass,
+                    cross_source_pass,
+                    tick_verified,
+                    lineage_complete,
+                    replayable,
+                    quality_grade,
+                    gate_reject_reason
                 )
                 VALUES (
                     ?, ?,
                     CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP),
                     ?, ?, ?, ?,
-                    ?, ?, ?, ?
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 [
@@ -1919,6 +3751,19 @@ class UnifiedDataInterface:
                     ingest_run_id,
                     raw_hash,
                     source_event_time,
+                    gate_receipt_id,
+                    gate_metadata["threshold_version"],
+                    gate_metadata["session_profile_version"],
+                    gate_metadata["timestamp_contract_version"],
+                    gate_metadata["period_registry_version"],
+                    gate_metadata["source_grade"],
+                    gate_metadata["contract_pass"],
+                    gate_metadata["cross_source_pass"],
+                    gate_metadata["tick_verified"],
+                    gate_metadata["lineage_complete"],
+                    gate_metadata["replayable"],
+                    gate_metadata["quality_grade"],
+                    gate_metadata["gate_reject_reason"],
                 ],
             )
 
@@ -1939,7 +3784,7 @@ class UnifiedDataInterface:
                     pass
             self._logger.warning("写入data_ingestion_status失败: %s", exc)
 
-    def _get_existing_date_bounds(self, stock_code: str, period: str) -> Optional[tuple[Any, Any]]:
+    def _get_existing_date_bounds(self, stock_code: str, period: str) -> tuple[Any, Any] | None:
         if not self.con:
             return None
         table_map = {"1d": "stock_daily", "1m": "stock_1m", "5m": "stock_5m", "tick": "stock_tick"}
@@ -1948,7 +3793,12 @@ class UnifiedDataInterface:
         date_col = "date" if table_name == "stock_daily" else "datetime"
         try:
             row = self.con.execute(
-                "SELECT MIN(" + date_col + "), MAX(" + date_col + ") FROM " + table_name
+                "SELECT MIN("
+                + date_col
+                + "), MAX("
+                + date_col
+                + ") FROM "
+                + table_name  # noqa: S608
                 + " WHERE stock_code = ? AND period = ?",
                 [stock_code, stored_period],
             ).fetchone()
@@ -2001,6 +3851,51 @@ class UnifiedDataInterface:
                 existing = self._read_from_duckdb(stock_code, start_date, end_date, period, "none")
                 if existing is None or existing.empty:
                     return [{"start_date": start_date, "end_date": end_date, "mode": "full"}]
+
+                # P0-1: 检测复权列 NULL，强制 refresh 触发 repair
+                if period == "1d":
+                    for col in ("open_front", "open_back"):
+                        if col in existing.columns and existing[col].isna().any():
+                            self._logger.warning(
+                                "检测到 %s %s 存在NULL复权列(%s)，强制refresh重新计算",
+                                stock_code,
+                                period,
+                                col,
+                            )
+                            return [
+                                {"start_date": start_date, "end_date": end_date, "mode": "refresh"}
+                            ]
+
+                # P1-5: 派生周期（1w/1M）源数据健康检查
+                if period in self._PERIOD_AGGREGATION:
+                    src_period, _rule = self._PERIOD_AGGREGATION[period]
+                    # 检查源周期（1d）的复权列健康
+                    if src_period == "1d":
+                        try:
+                            src_data = self._read_from_duckdb(
+                                stock_code, start_date, end_date, "1d", "none"
+                            )
+                            if src_data is not None and not src_data.empty:
+                                for col in ("open_front", "open_back"):
+                                    if col in src_data.columns:
+                                        null_ratio = src_data[col].isna().sum() / len(src_data)
+                                        if null_ratio > 0.05:  # >5% NULL
+                                            self._logger.warning(
+                                                "检测到 %s %s 源数据(1d)复权列%.1f%% NULL，强制refresh",
+                                                stock_code,
+                                                period,
+                                                null_ratio * 100,
+                                            )
+                                            return [
+                                                {
+                                                    "start_date": start_date,
+                                                    "end_date": end_date,
+                                                    "mode": "refresh",
+                                                }
+                                            ]
+                        except Exception:
+                            pass  # 源数据检查失败不阻断
+
                 missing_days = self._check_missing_trading_days(existing, start_date, end_date)
                 if missing_days > 0:
                     return [{"start_date": start_date, "end_date": end_date, "mode": "refresh"}]
@@ -2010,7 +3905,7 @@ class UnifiedDataInterface:
         return plan
 
     def get_ingestion_status(
-        self, stock_code: Optional[str] = None, period: Optional[str] = None
+        self, stock_code: str | None = None, period: str | None = None
     ) -> pd.DataFrame:
         if self.con is None:
             if not self.connect(read_only=True):
@@ -2037,8 +3932,8 @@ class UnifiedDataInterface:
 
     def get_data_coverage(
         self,
-        stock_codes: Optional[list[str]] = None,
-        periods: Optional[list[str]] = None,
+        stock_codes: list[str] | None = None,
+        periods: list[str] | None = None,
     ) -> pd.DataFrame:
         """查询数据覆盖率矩阵。
 
@@ -2054,6 +3949,11 @@ class UnifiedDataInterface:
         Returns:
             pd.DataFrame（pivot 格式，行=标的，列=周期）
         """
+        # P2-4: 调用前确保连接
+        if self.con is None:
+            if not self.connect(read_only=True):
+                return pd.DataFrame()
+
         if periods is None:
             periods = ["1d", "1m", "5m", "tick"]
 
@@ -2070,8 +3970,103 @@ class UnifiedDataInterface:
             "tick": ("stock_tick", "datetime"),
         }
 
+        # 日内自定义周期（10m/15m/30m/…）：从 stock_1m 或 stock_5m 推断覆盖范围
+        # 而不是直接查询不存在的自定义表——否则永远返回空，导致"本地无数据"错误
+        _INTRADAY_SOURCE_MAP: dict[str, tuple[str, str]] = {}
+        for _cp in self._INTRADAY_CUSTOM_PERIODS:
+            _pm = self._INTRADAY_CUSTOM_PERIODS[_cp]
+            if _pm % 5 == 0 and _pm >= 5:
+                _INTRADAY_SOURCE_MAP[_cp] = ("stock_5m", "datetime")
+            else:
+                _INTRADAY_SOURCE_MAP[_cp] = ("stock_1m", "datetime")
+
         rows: list[dict] = []
         for period in periods:
+            # 日内自定义周期（10m / 15m / 30m / …）：从源表推断覆盖，避免永远"无数据"
+            if period not in _PERIOD_TABLE and period in _INTRADAY_SOURCE_MAP:
+                table, date_col = _INTRADAY_SOURCE_MAP[period]
+                # 源表周期：5m 倍数用 "5m"，否则用 "1m"
+                src_period = "5m" if date_col == "datetime" and table == "stock_5m" else "1m"
+                where_codes = ""
+                params: list[Any] = [src_period]
+                if stock_codes:
+                    placeholders = ",".join(["?"] * len(stock_codes))
+                    where_codes = f" AND stock_code IN ({placeholders})"
+                    params.extend(stock_codes)
+                sql = f"""
+                    SELECT stock_code,
+                           MIN({date_col}) AS min_dt,
+                           MAX({date_col}) AS max_dt,
+                           COUNT(*) AS cnt
+                    FROM {table}
+                    WHERE period = ?
+                      AND {date_col} >= '1990-01-01'{where_codes}
+                    GROUP BY stock_code
+                    ORDER BY stock_code
+                """
+                try:
+                    df = self.con.execute(sql, params).fetchdf()
+                except Exception as exc:
+                    self._logger.warning("get_data_coverage %s 查询失败: %s", period, exc)
+                    continue
+                for _, r in df.iterrows():
+                    code = str(r["stock_code"])
+                    min_d = str(r["min_dt"])[:10]
+                    max_d = str(r["max_dt"])[:10]
+                    cnt = int(r["cnt"])
+                    rows.append(
+                        {
+                            "stock_code": code,
+                            "period": period,
+                            "summary": f"{min_d}~{max_d}({cnt}条/{src_period})",
+                            "min_date": min_d,
+                            "max_date": max_d,
+                            "count": cnt,
+                        }
+                    )
+                continue
+
+            # 多日自定义周期（2d / 5d / 10d / 25d …）：从 custom_period_bars 查询实际预计算结果
+            # 使用 adjust_type='none' 作为覆盖范围代表（不同复权类型 bar 数相同）
+            if period not in _PERIOD_TABLE and period.endswith("d") and period != "1d":
+                where_codes = ""
+                params = [period, "none"]
+                if stock_codes:
+                    placeholders = ",".join(["?"] * len(stock_codes))
+                    where_codes = f" AND stock_code IN ({placeholders})"
+                    params.extend(stock_codes)
+                sql = f"""
+                    SELECT stock_code,
+                           MIN(datetime) AS min_dt,
+                           MAX(datetime) AS max_dt,
+                           COUNT(*) AS cnt
+                    FROM custom_period_bars
+                    WHERE period = ? AND adjust_type = ?{where_codes}
+                    GROUP BY stock_code
+                    ORDER BY stock_code
+                """
+                try:
+                    df = self.con.execute(sql, params).fetchdf()
+                except Exception as exc:
+                    self._logger.warning("get_data_coverage %s 查询失败: %s", period, exc)
+                    continue
+                for _, r in df.iterrows():
+                    code = str(r["stock_code"])
+                    min_d = str(r["min_dt"])[:10]
+                    max_d = str(r["max_dt"])[:10]
+                    cnt = int(r["cnt"])
+                    rows.append(
+                        {
+                            "stock_code": code,
+                            "period": period,
+                            "summary": f"{min_d}~{max_d}({cnt}条/1d预计算)",
+                            "min_date": min_d,
+                            "max_date": max_d,
+                            "count": cnt,
+                        }
+                    )
+                continue
+
             if period not in _PERIOD_TABLE:
                 continue
             table, date_col = _PERIOD_TABLE[period]
@@ -2086,8 +4081,9 @@ class UnifiedDataInterface:
                        MIN({date_col}) AS min_dt,
                        MAX({date_col}) AS max_dt,
                        COUNT(*) AS cnt
-                FROM {table}
-                WHERE period = ?{where_codes}
+                FROM {table}  /* noqa: S608 -- values from hardcoded _PERIOD_TABLE */
+                WHERE period = ?
+                  AND {date_col} >= '1990-01-01'{where_codes}
                 GROUP BY stock_code
                 ORDER BY stock_code
             """
@@ -2101,14 +4097,16 @@ class UnifiedDataInterface:
                 min_d = str(r["min_dt"])[:10]
                 max_d = str(r["max_dt"])[:10]
                 cnt = int(r["cnt"])
-                rows.append({
-                    "stock_code": code,
-                    "period": period,
-                    "summary": f"{min_d}~{max_d}({cnt}条)",
-                    "min_date": min_d,
-                    "max_date": max_d,
-                    "count": cnt,
-                })
+                rows.append(
+                    {
+                        "stock_code": code,
+                        "period": period,
+                        "summary": f"{min_d}~{max_d}({cnt}条)",
+                        "min_date": min_d,
+                        "max_date": max_d,
+                        "count": cnt,
+                    }
+                )
 
         if not rows:
             return pd.DataFrame()
@@ -2126,12 +4124,76 @@ class UnifiedDataInterface:
         pivot.index.name = "stock_code"
         return pivot
 
+    def get_health_summary(self) -> dict[str, Any]:
+        """P2-4: 全局数据健康摘要 API
+
+        返回：
+        - 表行数统计
+        - NULL 复权列比例
+        - 未修复 quarantine 数量
+        - audit 近期记录数
+        """
+        if self.con is None:
+            if not self.connect(read_only=True):
+                return {"error": "数据库未连接"}
+
+        result = {
+            "table_counts": {},
+            "null_adj_ratios": {},
+            "quarantine_pending": 0,
+            "audit_recent_count": 0,
+        }
+
+        try:
+            # 表行数
+            for table in ["stock_daily", "stock_1m", "stock_5m", "stock_tick"]:
+                try:
+                    cnt = self.con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    result["table_counts"][table] = cnt
+                except Exception:
+                    pass
+
+            # NULL 复权列比例
+            for col in ["open_front", "open_back"]:
+                try:
+                    total = self.con.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0]
+                    null_cnt = self.con.execute(
+                        f"SELECT COUNT(*) FROM stock_daily WHERE {col} IS NULL"
+                    ).fetchone()[0]
+                    result["null_adj_ratios"][col] = null_cnt / total if total > 0 else 0
+                except Exception:
+                    pass
+
+            # quarantine 待处理数量
+            try:
+                result["quarantine_pending"] = self.con.execute(
+                    "SELECT COUNT(*) FROM data_quarantine_log WHERE replay_status = 'pending'"
+                ).fetchone()[0]
+            except Exception:
+                pass
+
+            # audit 近期记录（最近 24 小时）
+            try:
+                result["audit_recent_count"] = self.con.execute(
+                    """SELECT COUNT(*) FROM write_audit_log
+                    WHERE created_at > datetime('now', '-1 day')"""
+                ).fetchone()[0]
+            except Exception:
+                pass
+
+        except Exception as e:
+            result["error"] = str(e)
+
+        return result
+
     def _run_quarantine_replay_core(
         self,
         limit: int = 50,
         max_retries: int = 3,
         *,
-        reason_regex: Optional[str] = None,
+        reason_regex: str | None = None,
+        stock_code: str = "",
+        period: str = "",
     ) -> dict[str, int]:
         if self.con is None:
             if not self.connect(read_only=False):
@@ -2142,16 +4204,26 @@ class UnifiedDataInterface:
         if reason_regex:
             fetch_limit = fetch_limit * 6
         try:
+            filters = [
+                "replay_status IN ('pending', 'failed')",
+                "COALESCE(retry_count, 0) < ?",
+            ]
+            params: list[Any] = [capped_retries]
+            if stock_code:
+                filters.append("stock_code = ?")
+                params.append(stock_code)
+            if period:
+                filters.append("period = ?")
+                params.append(period)
             rows = self.con.execute(
-                """
+                f"""
                 SELECT quarantine_id, stock_code, period, date_min, date_max, COALESCE(retry_count, 0), COALESCE(reason, '')
                 FROM data_quarantine_log
-                WHERE replay_status IN ('pending', 'failed')
-                  AND COALESCE(retry_count, 0) < ?
+                WHERE {' AND '.join(filters)}
                 ORDER BY replay_status ASC, created_at ASC
                 LIMIT ?
                 """,
-                [capped_retries, fetch_limit],
+                params + [fetch_limit],
             ).fetchall()
         except Exception as e:
             self._logger.warning("读取quarantine待重放队列失败: %s", e)
@@ -2170,6 +4242,7 @@ class UnifiedDataInterface:
         for quarantine_id, stock_code, period, date_min, date_max, retry_count, _reason in rows:
             processed += 1
             target_period = "1m" if str(period) == "tick" else str(period or "1d")
+            replay_kind = "late_event" if reason_regex else "quarantine"
             start_date = str(date_min or "")[:10]
             end_date = str(date_max or "")[:10]
             if not start_date or start_date.lower() == "none":
@@ -2207,6 +4280,16 @@ class UnifiedDataInterface:
                         WHERE quarantine_id = ?
                         """,
                         [quarantine_id],
+                    )
+                    self._record_replay_receipt(
+                        quarantine_id=quarantine_id,
+                        stock_code=stock_code,
+                        period=target_period,
+                        start_date=start_date,
+                        end_date=end_date,
+                        replay_kind=replay_kind,
+                        status="resolved",
+                        last_error=None,
                     )
                 else:
                     failed += 1
@@ -2248,7 +4331,9 @@ class UnifiedDataInterface:
                         stock_code=stock_code,
                         period=target_period,
                         level="error" if next_status == "dead_letter" else "warning",
-                        reason="quarantine_dead_letter" if next_status == "dead_letter" else "quarantine_replay_failed",
+                        reason="quarantine_dead_letter"
+                        if next_status == "dead_letter"
+                        else "quarantine_replay_failed",
                         details={
                             "quarantine_id": quarantine_id,
                             "start_date": start_date,
@@ -2259,24 +4344,56 @@ class UnifiedDataInterface:
                             "last_error": err_msg,
                         },
                     )
+                    self._record_replay_receipt(
+                        quarantine_id=quarantine_id,
+                        stock_code=stock_code,
+                        period=target_period,
+                        start_date=start_date,
+                        end_date=end_date,
+                        replay_kind=replay_kind,
+                        status=next_status,
+                        last_error=err_msg,
+                    )
             except Exception as e:
                 failed += 1
                 self._logger.warning("更新quarantine replay状态失败 %s: %s", quarantine_id, e)
-        return {"processed": processed, "succeeded": succeeded, "failed": failed, "dead_letter": dead_letter}
+        return {
+            "processed": processed,
+            "succeeded": succeeded,
+            "failed": failed,
+            "dead_letter": dead_letter,
+        }
 
-    def run_quarantine_replay(self, limit: int = 50, max_retries: int = 3) -> dict[str, int]:
-        return self._run_quarantine_replay_core(limit=limit, max_retries=max_retries)
+    def run_quarantine_replay(
+        self,
+        limit: int = 50,
+        max_retries: int = 3,
+        *,
+        stock_code: str = "",
+        period: str = "",
+    ) -> dict[str, int]:
+        return self._run_quarantine_replay_core(
+            limit=limit,
+            max_retries=max_retries,
+            stock_code=stock_code,
+            period=period,
+        )
 
     def run_late_event_replay(
         self,
         limit: int = 80,
         max_retries: int = 4,
         reason_regex: str = r"(late|out_of_order|watermark|stale|reorder)",
+        *,
+        stock_code: str = "",
+        period: str = "",
     ) -> dict[str, int]:
         return self._run_quarantine_replay_core(
             limit=limit,
             max_retries=max_retries,
             reason_regex=reason_regex,
+            stock_code=stock_code,
+            period=period,
         )
 
     def run_multiperiod_rebuild(
@@ -2284,7 +4401,7 @@ class UnifiedDataInterface:
         stock_code: str,
         start_date: str,
         end_date: str,
-        periods: Optional[list[str]] = None,
+        periods: list[str] | None = None,
     ) -> dict[str, Any]:
         if self.con is None:
             if not self.connect(read_only=False):
@@ -2299,14 +4416,29 @@ class UnifiedDataInterface:
         self._ensure_tables_exist()
         symbol = str(stock_code or "").strip()
         if not symbol:
-            return {"ok": False, "error": "stock_code_empty", "processed": 0, "succeeded": 0, "failed": 0, "details": []}
-        target_periods = [str(p).strip() for p in (periods or ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1M"]) if str(p).strip()]
+            return {
+                "ok": False,
+                "error": "stock_code_empty",
+                "processed": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "details": [],
+            }
+        target_periods: list[str] = []
+        for raw_period in periods or ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1M"]:
+            normalized = self._canonicalize_period_code(str(raw_period).strip())
+            if normalized and normalized not in target_periods:
+                target_periods.append(normalized)
         try:
-            data_1m = self.get_stock_data(symbol, start_date, end_date, "1m", "none", auto_save=True)
+            data_1m = self.get_stock_data(
+                symbol, start_date, end_date, "1m", "none", auto_save=True
+            )
         except Exception:
             data_1m = pd.DataFrame()
         try:
-            data_1d = self.get_stock_data(symbol, start_date, end_date, "1d", "none", auto_save=True)
+            data_1d = self.get_stock_data(
+                symbol, start_date, end_date, "1d", "none", auto_save=True
+            )
         except Exception:
             data_1d = pd.DataFrame()
 
@@ -2330,7 +4462,9 @@ class UnifiedDataInterface:
         data_1m = _ensure_time_column(data_1m)
         data_1d = _ensure_time_column(data_1d)
 
-        builder = self._make_period_bar_builder(stock_code=symbol)
+        builder = self._make_period_bar_builder(stock_code=symbol, trade_date=end_date)
+        resolved_session_profile = self._resolve_session_profile(symbol, trade_date=end_date)
+        period_metadata_map: dict[str, dict[str, str]] = {}
         details: list[dict[str, Any]] = []
         rebuilt_map: dict[str, pd.DataFrame] = {}
         succeeded = 0
@@ -2338,6 +4472,12 @@ class UnifiedDataInterface:
         for p in target_periods:
             try:
                 rebuilt = pd.DataFrame()
+                period_metadata = self._resolve_period_build_metadata(
+                    p,
+                    stock_code=symbol,
+                    trade_date=end_date,
+                )
+                period_metadata_map[p] = dict(period_metadata)
                 if p == "1m":
                     rebuilt = data_1m.copy()
                 elif p == "1d":
@@ -2346,17 +4486,24 @@ class UnifiedDataInterface:
                     _src = data_1m.copy()
                     if "time" in _src.columns:
                         _src = _src.set_index("time")
-                    rebuilt = self._resample_ohlcv(_src, "5min") if _src is not None else pd.DataFrame()
+                    rebuilt = (
+                        self._resample_ohlcv(_src, "5min") if _src is not None else pd.DataFrame()
+                    )
                 elif p in self._INTRADAY_CUSTOM_PERIODS:
                     rebuilt = builder.build_intraday_bars(
                         data_1m=data_1m.copy(),
                         period_minutes=int(self._INTRADAY_CUSTOM_PERIODS[p]),
                         daily_ref=data_1d.copy() if data_1d is not None else None,
+                        **period_metadata,
                     )
                     # 构建完成后执行跨周期校验，写入 period_validation_report.jsonl
                     if rebuilt is not None and not rebuilt.empty:
                         try:
-                            builder.cross_validate(p, rebuilt, daily_ref=data_1d.copy() if data_1d is not None else None)
+                            builder.cross_validate(
+                                p,
+                                rebuilt,
+                                daily_ref=data_1d.copy() if data_1d is not None else None,
+                            )
                         except Exception:
                             pass
                 elif p in self._MULTIDAY_CUSTOM_PERIODS:
@@ -2364,23 +4511,38 @@ class UnifiedDataInterface:
                         data_1d=data_1d.copy(),
                         trading_days_per_period=int(self._MULTIDAY_CUSTOM_PERIODS[p]),
                         listing_date=self.get_listing_date(symbol),
+                        **period_metadata,
                     )
                     if rebuilt is not None and not rebuilt.empty:
                         try:
-                            builder.cross_validate(p, rebuilt, daily_ref=data_1d.copy() if data_1d is not None else None)
+                            builder.cross_validate(
+                                p,
+                                rebuilt,
+                                daily_ref=data_1d.copy() if data_1d is not None else None,
+                            )
                         except Exception:
                             pass
                 elif p in self._PERIOD_AGGREGATION:
                     _src, rule = self._PERIOD_AGGREGATION[p]
-                    rebuilt = builder.build_natural_calendar_bars(data_1d=data_1d.copy(), freq=rule)
+                    rebuilt = builder.build_natural_calendar_bars(
+                        data_1d=data_1d.copy(),
+                        freq=rule,
+                        **period_metadata,
+                    )
                     if rebuilt is not None and not rebuilt.empty:
                         try:
-                            builder.cross_validate(p, rebuilt, daily_ref=data_1d.copy() if data_1d is not None else None)
+                            builder.cross_validate(
+                                p,
+                                rebuilt,
+                                daily_ref=data_1d.copy() if data_1d is not None else None,
+                            )
                         except Exception:
                             pass
                 if rebuilt is None or rebuilt.empty:
                     failed += 1
-                    details.append({"period": p, "status": "failed", "rows": 0, "reason": "rebuilt_empty"})
+                    details.append(
+                        {"period": p, "status": "failed", "rows": 0, "reason": "rebuilt_empty"}
+                    )
                     continue
                 rebuilt_map[p] = rebuilt.copy()
                 succeeded += 1
@@ -2421,6 +4583,12 @@ class UnifiedDataInterface:
             row_stats=row_stats,
             status="success" if atomic_ok else "failed",
             error_message=atomic_error,
+            session_profile_id=resolved_session_profile.profile_id,
+            session_profile_version=resolved_session_profile.profile_version,
+            auction_policy=resolved_session_profile.auction_policy,
+            period_registry_version=self._get_period_registry().registry_version,
+            threshold_registry_version=self._get_threshold_registry().registry_version,
+            period_metadata=period_metadata_map,
         )
         try:
             self.con.execute(
@@ -2474,7 +4642,11 @@ class UnifiedDataInterface:
             return False, "no_persisted_periods"
         if self.con is None:
             return False, "duckdb_connection_missing"
-        table_map = {"1m": ("stock_1m", "datetime"), "5m": ("stock_5m", "datetime"), "1d": ("stock_daily", "date")}
+        table_map = {
+            "1m": ("stock_1m", "datetime"),
+            "5m": ("stock_5m", "datetime"),
+            "1d": ("stock_daily", "date"),
+        }
         write_lock = getattr(self, "_db_manager", None)
         write_lock = getattr(write_lock, "_write_lock", None) if write_lock else None
         if write_lock is not None:
@@ -2507,14 +4679,23 @@ class UnifiedDataInterface:
                     df["created_at"] = now_ts
                 if "updated_at" not in df.columns:
                     df["updated_at"] = now_ts
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="Could not infer format, so each element will be parsed individually.*",
+                        category=UserWarning,
+                    )
+                    parsed_time = pd.to_datetime(df["time"], errors="coerce")
                 if date_col == "date":
-                    df["date"] = pd.to_datetime(df["time"], errors="coerce").dt.date
+                    df["date"] = parsed_time.dt.date
                 else:
-                    df["datetime"] = pd.to_datetime(df["time"], errors="coerce")
+                    df["datetime"] = parsed_time
                 df = df[df[date_col].notna()]
                 if df.empty:
                     raise ValueError(f"{period}_coerce_time_empty")
-                table_columns = self.con.execute(f"DESCRIBE {table_name}").fetchdf()["column_name"].tolist()
+                table_columns = (
+                    self.con.execute(f"DESCRIBE {table_name}").fetchdf()["column_name"].tolist()
+                )
                 df_ordered = pd.DataFrame()
                 for col in table_columns:
                     if col in df.columns:
@@ -2522,16 +4703,33 @@ class UnifiedDataInterface:
                     else:
                         df_ordered[col] = None
                 df_ordered = df_ordered.drop_duplicates(
-                    subset=[c for c in [date_col, "stock_code", "period", "adjust_type"] if c in df_ordered.columns],
+                    subset=[
+                        c
+                        for c in [date_col, "stock_code", "period", "adjust_type"]
+                        if c in df_ordered.columns
+                    ],
                     keep="last",
                 )
                 self.con.execute(
-                    "DELETE FROM " + table_name + " WHERE stock_code = ? AND period = ? AND " + date_col + " >= ? AND " + date_col + " <= ?",
-                    [stock_code, period, str(df_ordered[date_col].min()), str(df_ordered[date_col].max())],
+                    "DELETE FROM "
+                    + table_name
+                    + " WHERE stock_code = ? AND period = ? AND "
+                    + date_col
+                    + " >= ? AND "
+                    + date_col
+                    + " <= ?",
+                    [
+                        stock_code,
+                        period,
+                        str(df_ordered[date_col].min()),
+                        str(df_ordered[date_col].max()),
+                    ],
                 )
                 temp_name = f"rebuild_temp_{period.replace(' ', '_').replace('/', '_')}"
                 self.con.register(temp_name, df_ordered)
-                self.con.execute("INSERT OR REPLACE INTO " + table_name + " SELECT * FROM " + temp_name)
+                self.con.execute(
+                    "INSERT OR REPLACE INTO " + table_name + " SELECT * FROM " + temp_name
+                )
                 self.con.unregister(temp_name)
                 self.con.execute(
                     """
@@ -2554,7 +4752,9 @@ class UnifiedDataInterface:
                         CURRENT_SCHEMA_VERSION,
                         str(uuid.uuid4()),
                         hashlib.sha256(
-                            df_ordered.head(200).to_json(orient="records", date_format="iso", force_ascii=False).encode("utf-8")
+                            df_ordered.head(200)
+                            .to_json(orient="records", date_format="iso", force_ascii=False)
+                            .encode("utf-8")
                         ).hexdigest(),
                         pd.to_datetime(df_ordered[date_col], errors="coerce").max(),
                     ],
@@ -2583,6 +4783,12 @@ class UnifiedDataInterface:
         row_stats: dict[str, int],
         status: str,
         error_message: str,
+        session_profile_id: str,
+        session_profile_version: str,
+        auction_policy: str,
+        period_registry_version: str,
+        threshold_registry_version: str,
+        period_metadata: dict[str, dict[str, str]],
     ) -> dict[str, Any]:
         payload = {
             "rebuild_id": rebuild_id,
@@ -2594,6 +4800,14 @@ class UnifiedDataInterface:
             "row_stats": row_stats,
             "status": status,
             "error_message": error_message,
+            "governance": {
+                "session_profile_id": session_profile_id,
+                "session_profile_version": session_profile_version,
+                "auction_policy": auction_policy,
+                "period_registry_version": period_registry_version,
+                "threshold_registry_version": threshold_registry_version,
+                "period_metadata": period_metadata,
+            },
             "created_at": pd.Timestamp.now().isoformat(),
         }
         payload_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -2603,8 +4817,12 @@ class UnifiedDataInterface:
             artifacts_dir.mkdir(parents=True, exist_ok=True)
             latest_path = artifacts_dir / "rebuild_audit_latest.json"
             history_path = artifacts_dir / f"rebuild_audit_{rebuild_id}.json"
-            latest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            history_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            latest_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            history_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         except Exception:
             pass
         return payload
@@ -2685,7 +4903,7 @@ class UnifiedDataInterface:
         bucket = int(h[:8], 16) / float(0xFFFFFFFF)
         return bucket <= r
 
-    def generate_daily_sla_report(self, report_date: Optional[str] = None) -> dict[str, Any]:
+    def generate_daily_sla_report(self, report_date: str | None = None) -> dict[str, Any]:
         if self.con is None:
             if not self.connect(read_only=False):
                 return {}
@@ -2695,7 +4913,7 @@ class UnifiedDataInterface:
         write_stats = (0, 0)
         conflict_count = 0
         reject_count = 0
-        lag_p95_ms: Optional[float] = None
+        lag_p95_ms: float | None = None
         try:
             write_row = self.con.execute(
                 """
@@ -2755,7 +4973,9 @@ class UnifiedDataInterface:
         step6_skipped = int(step6_metrics.get("skipped", 0) or 0)
         step6_hard_failed = int(step6_metrics.get("hard_failed", 0) or 0)
         step6_hard_fail_rate = float(step6_metrics.get("hard_fail_rate", 0.0) or 0.0)
-        step6_sample_rate = float(step6_metrics.get("sample_rate", self._step6_validate_sample_rate) or 0.0)
+        step6_sample_rate = float(
+            step6_metrics.get("sample_rate", self._step6_validate_sample_rate) or 0.0
+        )
         canary_shadow_write_enabled = bool(self._canary_shadow_write_enabled)
         canary_shadow_only = bool(self._canary_shadow_only)
         gate_pass = (
@@ -2838,75 +5058,421 @@ class UnifiedDataInterface:
 
     # --- 自然日历派生周期 → 源周期 + pandas resample freq ---
     # 仅保留自然日历周期（右边界对齐），日内/多日自定义周期由 PeriodBarBuilder 处理
-    _PERIOD_AGGREGATION: dict[str, tuple[str, str]] = {
-        "1w":  ("1d", "W-FRI"),
-        "1M":  ("1d", "ME"),
-        "1Q":  ("1d", "QE-DEC"),
-        "6M":  ("1d", "6ME"),
-        "1Y":  ("1d", "YE"),
-        "2Y":  ("1d", "2YE"),
-        "3Y":  ("1d", "3YE"),
-        "5Y":  ("1d", "5YE"),
-        "10Y": ("1d", "10YE"),
-    }
+    _PERIOD_AGGREGATION: dict[str, tuple[str, str]] = dict(
+        _PERIOD_RUNTIME_CONTRACTS["calendar_aggregation"]
+    )
 
     #: 日内自定义周期：{period_str: period_minutes}
     #: 从 1m 构建，A 股时段对齐，最后一根 K 线严格收敛于 1D 黄金标准
     #: 15m/30m/60m 由此路由（取代旧的简单 resample）
-    _INTRADAY_CUSTOM_PERIODS: dict[str, int] = {
-        "2m": 2, "10m": 10, "15m": 15, "20m": 20, "25m": 25,
-        "30m": 30, "50m": 50, "60m": 60, "70m": 70, "120m": 120, "125m": 125,
-    }
+    _INTRADAY_CUSTOM_PERIODS: dict[str, int] = dict(
+        _PERIOD_RUNTIME_CONTRACTS["intraday_periods"]
+    )
 
     #: 多日自定义周期：{period_str: trading_days}
     #: 从 1D 构建，上市首日左对齐；5d ≠ 1W（自然周），3M ≠ 1Q（自然季度）
-    _MULTIDAY_CUSTOM_PERIODS: dict[str, int] = {
-        "2d": 2, "3d": 3, "5d": 5, "10d": 10, "25d": 25, "50d": 50, "75d": 75,
-        "2M": 42, "3M": 63, "5M": 105,
-    }
+    _MULTIDAY_CUSTOM_PERIODS: dict[str, int] = dict(
+        _PERIOD_RUNTIME_CONTRACTS["multiday_periods"]
+    )
 
-    def _resolve_session_profile_for_symbol(self, stock_code: Optional[str]) -> str:
-        explicit_profile = str(os.environ.get("EASYXT_SESSION_PROFILE", "CN_A")).strip()
-        if explicit_profile and explicit_profile.upper() != "AUTO":
-            return explicit_profile
-        rules_file = str(os.environ.get("EASYXT_SESSION_PROFILE_RULES_FILE", "config/session_profile_rules.json")).strip()
-        path = Path(rules_file)
-        if not path.is_absolute():
-            path = (Path.cwd() / path).resolve()
-        if not path.exists() or not stock_code:
-            return "CN_A"
+    def _get_session_profile_registry(self) -> SessionProfileRegistry:
+        versions_file = str(
+            os.environ.get(
+                "EASYXT_SESSION_PROFILE_VERSIONS_FILE",
+                "config/session_profile_versions.json",
+            )
+        ).strip()
+        rules_file = str(
+            os.environ.get("EASYXT_SESSION_PROFILE_RULES_FILE", "config/session_profile_rules.json")
+        ).strip()
+        cache_key = (versions_file, rules_file)
+        cached = getattr(self, "_session_profile_registry_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        registry = SessionProfileRegistry(versions_file=versions_file, rules_file=rules_file)
+        self._session_profile_registry_cache = (cache_key, registry)
+        return registry
+
+    def _get_period_registry(self) -> PeriodRegistry:
+        file_path = str(
+            os.environ.get("EASYXT_PERIOD_REGISTRY_FILE", "config/period_registry.json")
+        ).strip()
+        cache_key = (file_path,)
+        cached = getattr(self, "_period_registry_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        registry = PeriodRegistry(file_path=file_path)
+        self._period_registry_cache = (cache_key, registry)
+        return registry
+
+    def _get_threshold_registry(self) -> ThresholdRegistry:
+        thresholds_file = str(
+            os.environ.get("EASYXT_PERIOD_THRESHOLDS_FILE", "config/period_thresholds.json")
+        ).strip()
+        period_registry_file = str(
+            os.environ.get("EASYXT_PERIOD_REGISTRY_FILE", "config/period_registry.json")
+        ).strip()
+        cache_key = (thresholds_file, period_registry_file)
+        cached = getattr(self, "_threshold_registry_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        registry = ThresholdRegistry(
+            file_path=thresholds_file,
+            period_registry=self._get_period_registry(),
+            period_registry_file=period_registry_file,
+        )
+        self._threshold_registry_cache = (cache_key, registry)
+        return registry
+
+    def _resolve_period_definition(self, period: str | None, *, allow_disabled: bool = False):
+        return self._get_period_registry().resolve(period, allow_disabled=allow_disabled)
+
+    def _canonicalize_period_code(self, period: str | None, *, allow_disabled: bool = False) -> str:
+        requested = str(period or "").strip()
+        if not requested:
+            return requested
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            resolved = self._resolve_period_definition(requested, allow_disabled=allow_disabled)
         except Exception:
-            return "CN_A"
-        if not isinstance(payload, dict):
-            return "CN_A"
-        rules = payload.get("rules")
-        if not isinstance(rules, list):
-            return str(payload.get("default_profile") or "CN_A")
-        symbol = str(stock_code).strip().upper()
-        for item in rules:
-            if not isinstance(item, dict):
-                continue
-            pattern = str(item.get("pattern") or "").strip().upper()
-            profile = str(item.get("profile") or "").strip()
-            if not pattern or not profile:
-                continue
-            if fnmatchcase(symbol, pattern):
-                return profile
-        return str(payload.get("default_profile") or "CN_A")
+            return requested
+        return str(resolved.runtime_code or resolved.period_code)
 
-    def _make_period_bar_builder(self, stock_code: Optional[str] = None):
+    def _resolve_period_thresholds(
+        self,
+        period: str | None,
+        *,
+        market: str | None = None,
+        source_grade: str | None = None,
+        as_of_date: Any | None = None,
+    ):
+        return self._get_threshold_registry().resolve(
+            period,
+            market=market,
+            source_grade=source_grade,
+            as_of_date=as_of_date,
+        )
+
+    @staticmethod
+    def _infer_market_from_symbol(stock_code: str | None) -> str | None:
+        symbol = str(stock_code or "").strip().upper()
+        if "." not in symbol:
+            return None
+        return symbol.rsplit(".", 1)[1].upper() or None
+
+    def _resolve_period_build_metadata(
+        self,
+        period: str | None,
+        *,
+        stock_code: str | None = None,
+        trade_date: Any | None = None,
+        source_grade: str | None = None,
+    ) -> dict[str, str]:
+        resolved_period = self._resolve_period_definition(period, allow_disabled=True)
+        thresholds = self._resolve_period_thresholds(
+            period,
+            market=self._infer_market_from_symbol(stock_code),
+            source_grade=source_grade,
+            as_of_date=trade_date,
+        )
+        return {
+            "period_code": resolved_period.period_code,
+            "period_family": resolved_period.period_family,
+            "threshold_version": thresholds.threshold_version,
+        }
+
+    def _resolve_derived_period_contract(self, period: str | None) -> tuple[str, str]:
+        resolved = self._resolve_period_definition(period, allow_disabled=True)
+        runtime = resolved.runtime_code or resolved.period_code
+        if resolved.period_family == "natural_calendar" or runtime in self._PERIOD_AGGREGATION:
+            return ("calendar_right", "period_end")
+        alignment = str(resolved.alignment or "").strip() or str(
+            os.environ.get("EASYXT_PERIOD_ALIGNMENT", "left")
+        )
+        anchor = str(resolved.anchor or "").strip() or str(
+            os.environ.get("EASYXT_PERIOD_ANCHOR", "daily_close")
+        )
+        return (alignment, anchor)
+
+    def _build_period_metadata_columns(
+        self,
+        period: str | None,
+        *,
+        stock_code: str | None = None,
+        trade_date: Any | None = None,
+        alignment: str,
+        anchor: str,
+        source_grade: str | None = None,
+    ) -> dict[str, object]:
+        from data_manager.period_bar_builder import PERIOD_BAR_BUILDER_VERSION
+
+        period_metadata = self._resolve_period_build_metadata(
+            period,
+            stock_code=stock_code,
+            trade_date=trade_date,
+            source_grade=source_grade,
+        )
+        resolved_session_profile = self._resolve_session_profile(stock_code, trade_date=trade_date)
+        source_rule_kind = self._resolve_source_rule_kind(
+            period_metadata["period_family"],
+            resolved_session_profile.auction_policy,
+        )
+        return {
+            "alignment": alignment,
+            "anchor": anchor,
+            "session_profile": resolved_session_profile.profile_id,
+            "session_profile_id": resolved_session_profile.profile_id,
+            "session_profile_version": resolved_session_profile.profile_version,
+            "auction_policy": resolved_session_profile.auction_policy,
+            "timestamp_contract_version": TIMESTAMP_CONTRACT_VERSION,
+            "source_rule_kind": source_rule_kind,
+            "period_code": period_metadata["period_code"],
+            "period_family": period_metadata["period_family"],
+            "period_registry_version": self._get_period_registry().registry_version,
+            "threshold_version": period_metadata["threshold_version"],
+            "bar_builder_version": PERIOD_BAR_BUILDER_VERSION,
+        }
+
+    def _build_derived_period_metadata(
+        self,
+        period: str | None,
+        *,
+        stock_code: str | None = None,
+        trade_date: Any | None = None,
+        source_grade: str | None = None,
+    ) -> dict[str, object]:
+        alignment, anchor = self._resolve_derived_period_contract(period)
+        return self._build_period_metadata_columns(
+            period,
+            stock_code=stock_code,
+            trade_date=trade_date,
+            alignment=alignment,
+            anchor=anchor,
+            source_grade=source_grade,
+        )
+
+    def _compute_derived_period_governance_hash(
+        self,
+        period: str | None,
+        *,
+        stock_code: str | None = None,
+        trade_date: Any | None = None,
+        source_grade: str | None = None,
+    ) -> str:
+        canonical = self._canonicalize_period_code(period, allow_disabled=True)
+        if canonical not in (
+            set(self._INTRADAY_CUSTOM_PERIODS)
+            | set(self._MULTIDAY_CUSTOM_PERIODS)
+            | set(self._PERIOD_AGGREGATION.keys())
+        ):
+            return ""
+        metadata = self._build_derived_period_metadata(
+            canonical,
+            stock_code=stock_code,
+            trade_date=trade_date,
+            source_grade=source_grade,
+        )
+        payload = json.dumps(metadata, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+    def _build_result_cache_key(
+        self,
+        *,
+        stock_code: str,
+        period: str,
+        start_date: str,
+        end_date: str,
+        adjust: str,
+    ) -> tuple:
+        base_key = (
+            getattr(self, "duckdb_path", None),
+            stock_code,
+            period,
+            start_date,
+            end_date,
+            adjust,
+        )
+        governance_hash = self._compute_derived_period_governance_hash(
+            period,
+            stock_code=stock_code,
+            trade_date=end_date,
+        )
+        if governance_hash:
+            return base_key + (governance_hash,)
+        return base_key
+
+    def _annotate_derived_period_frame(
+        self,
+        df: pd.DataFrame | None,
+        *,
+        period: str,
+        stock_code: str | None,
+        trade_date: Any | None,
+        alignment: str,
+        anchor: str,
+        is_partial: bool | None = False,
+        source_grade: str | None = None,
+    ) -> pd.DataFrame | None:
+        if df is None or df.empty:
+            return df
+        out = df.copy()
+        metadata = self._build_period_metadata_columns(
+            period,
+            stock_code=stock_code,
+            trade_date=trade_date,
+            alignment=alignment,
+            anchor=anchor,
+            source_grade=source_grade,
+        )
+        if "is_partial" in out.columns:
+            out["is_partial"] = out["is_partial"].fillna(False).astype(bool)
+        elif is_partial is not None:
+            out["is_partial"] = bool(is_partial)
+        for key, value in metadata.items():
+            out[key] = value
+        return out
+
+    def _annotate_cached_custom_bars(
+        self,
+        df: pd.DataFrame | None,
+        *,
+        period: str,
+        stock_code: str | None,
+        trade_date: Any | None,
+        source_grade: str | None = None,
+    ) -> pd.DataFrame | None:
+        alignment, anchor = self._resolve_derived_period_contract(period)
+        return self._annotate_derived_period_frame(
+            df,
+            period=period,
+            stock_code=stock_code,
+            trade_date=trade_date,
+            alignment=alignment,
+            anchor=anchor,
+            is_partial=None,
+            source_grade=source_grade,
+        )
+
+    def _build_natural_calendar_aggregate(
+        self,
+        src_df: pd.DataFrame | None,
+        *,
+        stock_code: str | None,
+        period: str,
+        rule: str,
+        trade_date: Any | None = None,
+        source_grade: str | None = None,
+    ) -> pd.DataFrame | None:
+        resampled = self._resample_ohlcv(src_df, rule)
+        if resampled is None or resampled.empty:
+            return resampled
+        return self._annotate_derived_period_frame(
+            resampled,
+            period=period,
+            stock_code=stock_code,
+            trade_date=trade_date,
+            alignment="calendar_right",
+            anchor="period_end",
+            is_partial=False,
+            source_grade=source_grade,
+        )
+
+    def _resolve_session_profile(
+        self,
+        stock_code: str | None,
+        trade_date: Any | None = None,
+        exchange: str | None = None,
+        instrument_type: str | None = None,
+    ):
+        explicit_profile = str(os.environ.get("EASYXT_SESSION_PROFILE", "CN_A")).strip()
+        registry = self._get_session_profile_registry()
+        return registry.resolve(
+            symbol=stock_code,
+            trade_date=trade_date,
+            exchange=exchange,
+            instrument_type=instrument_type,
+            explicit_profile=explicit_profile,
+        )
+
+    def _resolve_session_profile_for_symbol(
+        self,
+        stock_code: str | None,
+        trade_date: Any | None = None,
+        exchange: str | None = None,
+        instrument_type: str | None = None,
+    ) -> str:
+        return self._resolve_session_profile(
+            stock_code,
+            trade_date=trade_date,
+            exchange=exchange,
+            instrument_type=instrument_type,
+        ).profile_id
+
+    @staticmethod
+    def _resolve_source_rule_kind(period_family: str | None, auction_policy: str | None) -> str:
+        if str(period_family or "").strip() == "intraday":
+            if str(auction_policy or "").strip() == "merged_open_auction":
+                return "canonical_1m_merged"
+            return "canonical_1m"
+        if str(period_family or "").strip() in {"multiday_trading", "natural_calendar"}:
+            return "canonical_1d"
+        return "canonical_input"
+
+    def _apply_canonical_data_contract(
+        self,
+        data: pd.DataFrame,
+        *,
+        period: str,
+        stock_code: str | None,
+        trade_date: Any | None = None,
+    ) -> pd.DataFrame:
+        if data is None or data.empty:
+            return pd.DataFrame() if data is None else data
+        canonical_period = self._canonicalize_period_code(period, allow_disabled=True)
+        if canonical_period == "1m":
+            resolved = self._resolve_session_profile(stock_code, trade_date=trade_date)
+            return normalize_canonical_1m(
+                data,
+                auction_policy=resolved.auction_policy,
+                source_rule_kind="auto",
+            )
+        if canonical_period in {"5m", "tick", "1d"}:
+            return normalize_timestamp_frame(data, period=canonical_period)
+        return data
+
+    def _make_period_bar_builder(
+        self,
+        stock_code: str | None = None,
+        trade_date: Any | None = None,
+        exchange: str | None = None,
+        instrument_type: str | None = None,
+    ):
         from data_manager.period_bar_builder import PeriodBarBuilder
 
+        resolved = self._resolve_session_profile(
+            stock_code,
+            trade_date=trade_date,
+            exchange=exchange,
+            instrument_type=instrument_type,
+        )
+
         return PeriodBarBuilder(
-            session_profile=self._resolve_session_profile_for_symbol(stock_code),
-            session_profile_file=str(os.environ.get("EASYXT_SESSION_PROFILE_FILE", "config/session_profiles.json")),
+            session_profile=resolved.profile_id,
+            session_profile_file=str(
+                os.environ.get("EASYXT_SESSION_PROFILE_FILE", "config/session_profiles.json")
+            ),
             alignment=str(os.environ.get("EASYXT_PERIOD_ALIGNMENT", "left")),
             anchor=str(os.environ.get("EASYXT_PERIOD_ANCHOR", "daily_close")),
             validation_report_file=str(
-                os.environ.get("EASYXT_PERIOD_VALIDATION_REPORT_PATH", "artifacts/period_validation_report.jsonl")
+                os.environ.get(
+                    "EASYXT_PERIOD_VALIDATION_REPORT_PATH",
+                    "artifacts/period_validation_report.jsonl",
+                )
             ),
+            session_profile_version=resolved.profile_version,
+            auction_policy=resolved.auction_policy,
+            timestamp_contract_version=TIMESTAMP_CONTRACT_VERSION,
+            source_rule_kind=self._resolve_source_rule_kind("intraday", resolved.auction_policy),
+            period_registry_version=self._get_period_registry().registry_version,
         )
 
     @staticmethod
@@ -2922,9 +5488,17 @@ class UnifiedDataInterface:
                 if len(sv) == 8:
                     return pd.to_datetime(str(iv), format="%Y%m%d", errors="coerce")
                 if abs(iv) >= 10**12:
-                    return pd.to_datetime(iv, unit="ms", utc=True, errors="coerce").tz_convert("Asia/Shanghai").tz_localize(None)
+                    return (
+                        pd.to_datetime(iv, unit="ms", utc=True, errors="coerce")
+                        .tz_convert("Asia/Shanghai")
+                        .tz_localize(None)
+                    )
                 if abs(iv) >= 10**9:
-                    return pd.to_datetime(iv, unit="s", utc=True, errors="coerce").tz_convert("Asia/Shanghai").tz_localize(None)
+                    return (
+                        pd.to_datetime(iv, unit="s", utc=True, errors="coerce")
+                        .tz_convert("Asia/Shanghai")
+                        .tz_localize(None)
+                    )
                 return pd.to_datetime(v, errors="coerce")
             s = str(v).strip()
             if not s:
@@ -2940,7 +5514,9 @@ class UnifiedDataInterface:
 
     @staticmethod
     def _get_storage_target_period(period: str) -> tuple[str, str]:
-        table_period = {"15m": "1m", "30m": "1m", "60m": "1m", "1w": "1d", "1M": "1d"}.get(period, period)
+        table_period = {"15m": "1m", "30m": "1m", "60m": "1m", "1w": "1d", "1M": "1d"}.get(
+            period, period
+        )
         stored_period = period
         return table_period, stored_period
 
@@ -2994,23 +5570,53 @@ class UnifiedDataInterface:
         end_date: str,
         adjust: str = "none",
         expected_adj_factor_hash: str = "",
-    ) -> Optional[pd.DataFrame]:
+        expected_governance_hash: str = "",
+    ) -> pd.DataFrame | None:
         """从 custom_period_bars 表读取预计算缓存，命中返回 DataFrame，未命中返回 None。"""
         try:
             if not self.con:
                 return None
-            table_exists = (
-                self.con.execute(
-                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'custom_period_bars'"
-                ).fetchone()[0] > 0
-            )
+            _db_key = self._get_duckdb_cache_key()
+            _cpb_key = f"{_db_key}:custom_period_bars" if _db_key is not None else None
+            if _db_key in {None, ":memory:"}:
+                table_exists = (
+                    self.con.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'custom_period_bars'"
+                    ).fetchone()[0]
+                    > 0
+                )
+            elif _cpb_key not in UnifiedDataInterface._known_tables:
+                table_exists = (
+                    self.con.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'custom_period_bars'"
+                    ).fetchone()[0]
+                    > 0
+                )
+                if table_exists:
+                    UnifiedDataInterface._known_tables.add(_cpb_key)
+            else:
+                table_exists = True
             if not table_exists:
                 return None
-            has_hash_col = "adj_factor_hash" in set(self._get_table_columns("custom_period_bars"))
-            hash_expr = "COALESCE(adj_factor_hash, '') AS adj_factor_hash" if has_hash_col else "'' AS adj_factor_hash"
+            columns = set(self._get_table_columns("custom_period_bars"))
+            has_hash_col = "adj_factor_hash" in columns
+            has_governance_hash_col = "governance_hash" in columns
+            hash_expr = (
+                "COALESCE(adj_factor_hash, '') AS adj_factor_hash"
+                if has_hash_col
+                else "'' AS adj_factor_hash"
+            )
+            governance_hash_expr = (
+                "COALESCE(governance_hash, '') AS governance_hash"
+                if has_governance_hash_col
+                else "'' AS governance_hash"
+            )
             df = self.con.execute(
                 "SELECT stock_code, datetime, open, high, low, close, volume, amount, is_partial, "
-                + hash_expr + " "
+                + hash_expr
+                + ", "
+                + governance_hash_expr
+                + " "
                 "FROM custom_period_bars "
                 "WHERE stock_code = ? AND period = ? AND adjust_type = ? "
                 "AND datetime >= ? AND datetime <= ? "
@@ -3023,7 +5629,9 @@ class UnifiedDataInterface:
                 hashes = {str(v or "") for v in df["adj_factor_hash"].tolist()}
                 is_legacy_empty = hashes == {""}
                 expected_is_non_adj = str(expected_adj_factor_hash).startswith("na:")
-                if hashes != {expected_adj_factor_hash} and not (is_legacy_empty and expected_is_non_adj):
+                if hashes != {expected_adj_factor_hash} and not (
+                    is_legacy_empty and expected_is_non_adj
+                ):
                     self._logger.debug(
                         "custom_period_bars 缓存失效（adj_factor_hash mismatch）: %s %s expected=%s got=%s",
                         stock_code,
@@ -3032,15 +5640,33 @@ class UnifiedDataInterface:
                         sorted(hashes),
                     )
                     return None
+            if expected_governance_hash and has_governance_hash_col:
+                governance_hashes = {str(v or "") for v in df["governance_hash"].tolist()}
+                if governance_hashes != {expected_governance_hash}:
+                    self._logger.debug(
+                        "custom_period_bars 缓存失效（governance_hash mismatch）: %s %s expected=%s got=%s",
+                        stock_code,
+                        period,
+                        expected_governance_hash,
+                        sorted(governance_hashes),
+                    )
+                    return None
             df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
             df = df[df["datetime"].notna()]
             if "adj_factor_hash" in df.columns:
                 df = df.drop(columns=["adj_factor_hash"])
+            if "governance_hash" in df.columns:
+                df = df.drop(columns=["governance_hash"])
             df.set_index("datetime", inplace=True)
             self._logger.debug(
                 "custom_period_bars 缓存命中: %s %s %d 行", stock_code, period, len(df)
             )
-            return df
+            return self._annotate_cached_custom_bars(
+                df,
+                period=period,
+                stock_code=stock_code,
+                trade_date=end_date,
+            )
         except Exception as exc:
             self._logger.debug("custom_period_bars 缓存读取失败: %s", exc)
             return None
@@ -3052,6 +5678,7 @@ class UnifiedDataInterface:
         period: str,
         adjust: str = "none",
         adj_factor_hash: str = "",
+        governance_hash: str = "",
     ) -> None:
         """将构建好的自定义周期 K 线写入 custom_period_bars 缓存表。
 
@@ -3086,11 +5713,37 @@ class UnifiedDataInterface:
             df_save["period"] = period
             df_save["adjust_type"] = adjust
             df_save["adj_factor_hash"] = str(adj_factor_hash or "")
+            if not governance_hash:
+                try:
+                    _trade_date = pd.to_datetime(
+                        df_save.get("datetime"), errors="coerce"
+                    ).max()
+                except Exception:
+                    _trade_date = None
+                governance_hash = self._compute_derived_period_governance_hash(
+                    period,
+                    stock_code=stock_code,
+                    trade_date=_trade_date,
+                )
+            df_save["governance_hash"] = str(governance_hash or "")
             if "is_partial" not in df_save.columns:
                 df_save["is_partial"] = False
             # 只保留需要的列（与 DDL 列顺序一致，不含 created_at）
-            target_cols = ["stock_code", "period", "datetime", "open", "high", "low",
-                           "close", "volume", "amount", "adjust_type", "adj_factor_hash", "is_partial"]
+            target_cols = [
+                "stock_code",
+                "period",
+                "datetime",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "amount",
+                "adjust_type",
+                "adj_factor_hash",
+                "governance_hash",
+                "is_partial",
+            ]
             # amount 列可能不存在，补 0
             if "amount" not in df_save.columns:
                 df_save["amount"] = 0
@@ -3102,10 +5755,15 @@ class UnifiedDataInterface:
                 [stock_code, period, adjust],
             )
             # INSERT（显式列名，跳过 created_at DEFAULT）
-            col_list = ", ".join(target_cols)
+            df_insert = df_save[target_cols].copy()
+            self.con.register("df_custom_period_insert_temp", df_insert)
             self.con.execute(
-                f"INSERT INTO custom_period_bars ({col_list}) SELECT {col_list} FROM df_save"
+                "INSERT INTO custom_period_bars "
+                "(stock_code, period, datetime, open, high, low, close, volume, amount, adjust_type, adj_factor_hash, governance_hash, is_partial) "
+                "SELECT stock_code, period, datetime, open, high, low, close, volume, amount, adjust_type, adj_factor_hash, governance_hash, is_partial "
+                "FROM df_custom_period_insert_temp"
             )
+            self.con.unregister("df_custom_period_insert_temp")
             self._logger.debug(
                 "custom_period_bars 写入: %s %s %d 行", stock_code, period, len(df_save)
             )
@@ -3116,13 +5774,24 @@ class UnifiedDataInterface:
                 write_lock.release()
 
     @staticmethod
-    def _resample_ohlcv(df: pd.DataFrame, rule: str) -> Optional[pd.DataFrame]:
+    def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame | None:
         """将细粒度 OHLCV DataFrame resample 到更粗的周期"""
         if df is None or df.empty:
             return df
+
+        # P2-2: 聚合前验证索引顺序
+        if not df.index.is_monotonic_increasing:
+            df = df.sort_index()
+
         agg: dict[str, Any] = {}
-        for col, fn in [("open", "first"), ("high", "max"), ("low", "min"),
-                        ("close", "last"), ("volume", "sum"), ("amount", "sum")]:
+        for col, fn in [
+            ("open", "first"),
+            ("high", "max"),
+            ("low", "min"),
+            ("close", "last"),
+            ("volume", "sum"),
+            ("amount", "sum"),
+        ]:
             if col in df.columns:
                 agg[col] = fn
         if not agg:
@@ -3150,8 +5819,8 @@ class UnifiedDataInterface:
         period: str,
         adjust: str,
         _allow_aggregate: bool = True,
-        listing_date: Optional[str] = None,
-    ) -> Optional[pd.DataFrame]:
+        listing_date: str | None = None,
+    ) -> pd.DataFrame | None:
         """从DuckDB读取数据 - 修复版（添加表存在性检查 + 派生周期聚合）"""
         try:
             start_date = self._normalize_date_str(start_date)
@@ -3166,6 +5835,11 @@ class UnifiedDataInterface:
                     adjust=adjust,
                     source_period="1m",
                 )
+                expected_governance_hash = self._compute_derived_period_governance_hash(
+                    period,
+                    stock_code=stock_code,
+                    trade_date=end_date,
+                )
                 # 优先读缓存
                 cached = self._read_cached_custom_bars(
                     stock_code,
@@ -3174,6 +5848,7 @@ class UnifiedDataInterface:
                     end_date,
                     adjust,
                     expected_adj_factor_hash=expected_hash,
+                    expected_governance_hash=expected_governance_hash,
                 )
                 if cached is not None and not cached.empty:
                     return cached
@@ -3181,16 +5856,44 @@ class UnifiedDataInterface:
                 src_1m = self._read_from_duckdb(
                     stock_code, start_date, end_date, "1m", adjust, _allow_aggregate=False
                 )
+                # ── 1m 不可用时降级：从 5m 数据聚合（period 须为5的倍数）──
                 if src_1m is None or src_1m.empty:
-                    return src_1m
+                    if period_minutes % 5 == 0 and period_minutes >= 10:
+                        src_5m = self._read_from_duckdb(
+                            stock_code, start_date, end_date, "5m", adjust, _allow_aggregate=False
+                        )
+                        if src_5m is not None and not src_5m.empty:
+                            self._logger.debug(
+                                "%s %s：1m 不可用，从 stock_5m 聚合（%d×5m）",
+                                stock_code,
+                                period,
+                                period_minutes // 5,
+                            )
+                            src_1m = src_5m
+                            period_minutes = period_minutes // 5
+                        else:
+                            return None
+                    else:
+                        return None
                 try:
                     daily_ref = self._read_from_duckdb(
                         stock_code, start_date, end_date, "1d", adjust, _allow_aggregate=False
                     )
                 except Exception:
                     daily_ref = None
-                result = self._make_period_bar_builder(stock_code=stock_code).build_intraday_bars(
-                    data_1m=src_1m, period_minutes=period_minutes, daily_ref=daily_ref
+                period_metadata = self._resolve_period_build_metadata(
+                    period,
+                    stock_code=stock_code,
+                    trade_date=end_date,
+                )
+                result = self._make_period_bar_builder(
+                    stock_code=stock_code,
+                    trade_date=end_date,
+                ).build_intraday_bars(
+                    data_1m=src_1m,
+                    period_minutes=period_minutes,
+                    daily_ref=daily_ref,
+                    **period_metadata,
                 )
                 if result is not None and not result.empty:
                     self._save_custom_period_bars(
@@ -3199,6 +5902,7 @@ class UnifiedDataInterface:
                         period,
                         adjust,
                         adj_factor_hash=expected_hash,
+                        governance_hash=expected_governance_hash,
                     )
                 return result if result is not None and not result.empty else None
 
@@ -3212,6 +5916,11 @@ class UnifiedDataInterface:
                     adjust=adjust,
                     source_period="1d",
                 )
+                expected_governance_hash = self._compute_derived_period_governance_hash(
+                    period,
+                    stock_code=stock_code,
+                    trade_date=end_date,
+                )
                 # 优先读缓存
                 cached = self._read_cached_custom_bars(
                     stock_code,
@@ -3220,6 +5929,7 @@ class UnifiedDataInterface:
                     end_date,
                     adjust,
                     expected_adj_factor_hash=expected_hash,
+                    expected_governance_hash=expected_governance_hash,
                 )
                 if cached is not None and not cached.empty:
                     return cached
@@ -3230,10 +5940,19 @@ class UnifiedDataInterface:
                 )
                 if src_1d is None or src_1d.empty:
                     return src_1d
-                result = self._make_period_bar_builder(stock_code=stock_code).build_multiday_bars(
+                period_metadata = self._resolve_period_build_metadata(
+                    period,
+                    stock_code=stock_code,
+                    trade_date=end_date,
+                )
+                result = self._make_period_bar_builder(
+                    stock_code=stock_code,
+                    trade_date=end_date,
+                ).build_multiday_bars(
                     data_1d=src_1d,
                     trading_days_per_period=trading_days,
                     listing_date=listing_date,
+                    **period_metadata,
                 )
                 if result is None or result.empty:
                     return None
@@ -3244,6 +5963,7 @@ class UnifiedDataInterface:
                     period,
                     adjust,
                     adj_factor_hash=expected_hash,
+                    governance_hash=expected_governance_hash,
                 )
                 # 按用户请求的视图范围裁剪输出（不影响从上市首日起的计数对齐）
                 if start_date:
@@ -3266,10 +5986,18 @@ class UnifiedDataInterface:
                     if direct is not None and not direct.empty:
                         return direct
                 # 从源周期聚合
-                src_df = self._read_from_duckdb(stock_code, start_date, end_date, src_period, adjust)
+                src_df = self._read_from_duckdb(
+                    stock_code, start_date, end_date, src_period, adjust
+                )
                 if src_df is None or src_df.empty:
                     return src_df
-                return self._resample_ohlcv(src_df, rule)
+                return self._build_natural_calendar_aggregate(
+                    src_df,
+                    stock_code=stock_code,
+                    period=period,
+                    rule=rule,
+                    trade_date=end_date,
+                )
 
             # 确定表名
             table_map = {
@@ -3283,13 +6011,29 @@ class UnifiedDataInterface:
             date_col = "date" if table_name == "stock_daily" else "datetime"
 
             # 检查表是否存在（修复首次使用问题）
-            table_exists = (
-                self.con.execute(
-                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
-                    [table_name],
-                ).fetchone()[0]
-                > 0
-            )
+            # 使用类级 _known_tables 缓存避免每次都查 information_schema.tables
+            _db_key = self._get_duckdb_cache_key()
+            _table_cache_key = f"{_db_key}:{table_name}" if _db_key is not None else None
+            if _db_key in {None, ":memory:"}:
+                table_exists = (
+                    self.con.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                        [table_name],
+                    ).fetchone()[0]
+                    > 0
+                )
+            elif _table_cache_key not in UnifiedDataInterface._known_tables:
+                table_exists = (
+                    self.con.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                        [table_name],
+                    ).fetchone()[0]
+                    > 0
+                )
+                if table_exists:
+                    UnifiedDataInterface._known_tables.add(_table_cache_key)
+            else:
+                table_exists = True
 
             if not table_exists:
                 self._logger.debug("表 %s 不存在，返回空数据", table_name)
@@ -3332,8 +6076,7 @@ class UnifiedDataInterface:
                 " " + price_cols[2] + " as low,"
                 " " + price_cols[3] + " as close,"
                 " volume, amount"
-                " FROM " + table_name +
-                " WHERE stock_code = ?"
+                " FROM " + table_name + " WHERE stock_code = ?"
                 " AND period = ?"
                 " AND " + date_col + " >= ?"
                 " AND " + date_col + " <= ?"
@@ -3363,27 +6106,48 @@ class UnifiedDataInterface:
         优先级：XTQuant → DuckDB stock_daily 最早记录 → '1990-01-01'。
         结果内存缓存，频繁画面滚动时无开销。
         """
-        if not hasattr(self, "_listing_date_cache") or not isinstance(self._listing_date_cache, dict):
+        if not hasattr(self, "_listing_date_cache") or not isinstance(
+            self._listing_date_cache, dict
+        ):
             self._listing_date_cache = {}
         cached = self._listing_date_cache.get(stock_code)
         if cached:
             return cached
 
         # 1. XTQuant 在线（OpenDate = 股票 IPO 日, CreateDate = 期货上市日）
-        if os.environ.get("EASYXT_ENABLE_XT_LISTING_DATE", "0") in ("1", "true", "True"):
-            try:
+        # 注：移除 EASYXT_ENABLE_XT_LISTING_DATE 门禁——始终优先尝试 XTQuant 获取真实上市首日，
+        # 这是黄金标准1D左对齐和缺口检测的数据基础；若 XTQuant 不可用则异常被捕获。
+        try:
+
+            def _xt_detail():
                 from xtquant import xtdata
-                detail = xtdata.get_instrument_detail(stock_code)
-                if detail:
-                    raw = detail.get("OpenDate") or detail.get("CreateDate")
-                    if raw:
-                        s = str(int(raw)).strip()
-                        if len(s) == 8:
-                            dt_str = f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-                            self._listing_date_cache[stock_code] = dt_str
-                            return dt_str
-            except Exception:
-                pass
+
+                return xtdata.get_instrument_detail(stock_code)
+
+            detail = self._run_xtdata_callable(_xt_detail)
+            if detail:
+                raw = detail.get("OpenDate") or detail.get("CreateDate")
+                if raw:
+                    s = str(int(raw)).strip()
+                    if len(s) == 8:
+                        # P1-3: IPO 日期范围验证
+                        dt_int = int(s)
+                        # 验证上市日期在 1990-01-01 到明天之间（A股1990年开市）
+                        max_date = int(
+                            (pd.Timestamp.now() + pd.Timedelta(days=1)).strftime("%Y%m%d")
+                        )
+                        if 19900101 <= dt_int <= max_date:
+                            try:
+                                # 验证日期合法性（如 02/30 无效）
+                                pd.to_datetime(f"{s[:4]}-{s[4:6]}-{s[6:8]}")
+                                dt_str = f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+                                self._listing_date_cache[stock_code] = dt_str
+                                return dt_str
+                            except Exception:
+                                # 日期格式无效，跳过
+                                pass
+        except Exception:
+            pass
 
         # 2. DuckDB stock_daily 最早记录
         if bool(getattr(self, "duckdb_available", True)) and self.con is not None:
@@ -3402,7 +6166,8 @@ class UnifiedDataInterface:
         # 3. 兜底：中国证券市场最早开业日
         return "1990-01-01"
 
-    def get_stock_date_range(self, stock_code: str, period: str) -> Optional[tuple[str, str]]:
+    def get_stock_date_range(self, stock_code: str, period: str) -> tuple[str, str] | None:
+        period = self._canonicalize_period_code(period)
         if not self.duckdb_available or not self.con:
             return None
         table_map = {
@@ -3417,6 +6182,7 @@ class UnifiedDataInterface:
             sql = (
                 "SELECT MIN(" + date_col + ") as start_date, MAX(" + date_col + ") as end_date"
                 " FROM " + table_name + " WHERE stock_code = ? AND period = ?"
+                " AND " + date_col + " >= '1990-01-01'"
             )
             df = self.con.execute(sql, [stock_code, stored_period]).df()
             if not df.empty:
@@ -3434,10 +6200,17 @@ class UnifiedDataInterface:
                 _src_period = "1d"
             if _src_period is not None:
                 src_table_period, src_stored_period = self._get_storage_target_period(_src_period)
-                src_table_name, src_date_col = table_map.get(src_table_period, ("stock_daily", "date"))
+                src_table_name, src_date_col = table_map.get(
+                    src_table_period, ("stock_daily", "date")
+                )
                 src_sql = (
-                    "SELECT MIN(" + src_date_col + ") as start_date, MAX(" + src_date_col + ") as end_date"
+                    "SELECT MIN("
+                    + src_date_col
+                    + ") as start_date, MAX("
+                    + src_date_col
+                    + ") as end_date"
                     " FROM " + src_table_name + " WHERE stock_code = ? AND period = ?"
+                    " AND " + src_date_col + " >= '1990-01-01'"
                 )
                 src_df = self.con.execute(src_sql, [stock_code, src_stored_period]).df()
                 if src_df.empty:
@@ -3451,12 +6224,23 @@ class UnifiedDataInterface:
         except Exception:
             return None
 
+    _xtdata_connection_warmed: bool = False
+
     def _read_from_qmt(
         self, stock_code: str, start_date: str, end_date: str, period: str
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         if os.environ.get("EASYXT_ENABLE_QMT_ONLINE", "1") not in ("1", "true", "True"):
             return None
+        _xt_trace(f"_read_from_qmt submit stock={stock_code} period={period}")
+        return self._run_xtdata_callable(
+            self._read_from_qmt_locked, stock_code, start_date, end_date, period
+        )
+
+    def _read_from_qmt_locked(
+        self, stock_code: str, start_date: str, end_date: str, period: str
+    ) -> pd.DataFrame | None:
         try:
+            _xt_trace(f"_read_from_qmt_locked enter stock={stock_code} period={period}")
             from xtquant import xtdata
 
             if period in {"tick", "l2transaction", "transaction"}:
@@ -3482,8 +6266,14 @@ class UnifiedDataInterface:
             start_str = start_date.replace("-", "")
             end_str = end_date.replace("-", "")
 
-            # 针对不同周期调整时间格式
-            if period in ["1m", "5m", "15m", "30m", "60m"]:
+            # 针对不同周期调整时间格式：所有日内周期（以 m 结尾或 tick）都需要 HHMMSS
+            _p_lower = str(period or "").strip().lower()
+            _is_intraday_period = (
+                (_p_lower.endswith("m") and _p_lower[:-1].isdigit())
+                or _p_lower == "tick"
+                or _p_lower in ("1m", "5m", "15m", "30m", "60m")
+            )
+            if _is_intraday_period:
                 if len(start_str) == 8:
                     start_str += "000000"
                 if len(end_str) == 8:
@@ -3492,76 +6282,98 @@ class UnifiedDataInterface:
                     end_str += "235959"
 
             qmt_period = period
-            self._logger.debug("QMT请求参数: %s %s~%s %s", stock_code, start_str, end_str, qmt_period)
+            _xt_trace(f"_read_from_qmt_locked DAT direct-read {stock_code} {qmt_period}")
 
-            # 下载数据
-            xtdata.download_history_data(
-                stock_code, period=qmt_period, start_time=start_str, end_time=end_str
-            )
+            # Step 1: 优先直接读取本地 DAT 数据（不依赖 download_history_data）
+            from data_manager.dat_binary_reader import read_dat
 
-            # 获取数据
-            data = xtdata.get_market_data_ex(
-                stock_list=[stock_code],
+            df = read_dat(
+                stock_code,
                 period=qmt_period,
-                start_time=start_str,
-                end_time=end_str,
-                count=-1
+                start_date=start_date,
+                end_date=end_date,
             )
 
-            if data is None:
-                self._logger.error("QMT返回None")
-                return None
+            # 如果日期范围内没有数据，尝试读取 DAT 中最新可用的数据
+            if df is None or df.empty:
+                try:
+                    start_dt = pd.to_datetime(start_date)
+                    fallback_start = (start_dt - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+                    df = read_dat(
+                        stock_code,
+                        period=qmt_period,
+                        start_date=fallback_start,
+                        end_date=end_date,
+                    )
+                except Exception:
+                    pass
 
-            if isinstance(data, dict):
-                if stock_code in data:
-                    df = data[stock_code]
-                else:
-                    self._logger.error("QMT返回字典中未找到 %s", stock_code)
-                    return None
-            else:
-                df = data
+            # 如果有数据，检查是否需要补充当日数据
+            if df is not None and not df.empty:
+                today = pd.Timestamp.now(tz="Asia/Shanghai").normalize()
+                latest_date = pd.to_datetime(df.index.max()) if not df.empty else None
+                if latest_date is not None:
+                    if latest_date.tz is None:
+                        latest_date = latest_date.tz_localize("Asia/Shanghai")
+                    # 如果历史数据最新日期是今天，直接返回
+                    if latest_date.normalize() >= today:
+                        return df
+                    # 如果不是今天，尝试下载补充数据（日线及日内周期均适用）
+                    if qmt_period in ("1m", "5m", "15m", "30m", "60m", "1d"):
+                        self._logger.debug(
+                            "QMT请求参数: %s %s~%s %s", stock_code, start_str, end_str, qmt_period
+                        )
+                        try:
+                            xtdata.download_history_data(
+                                stock_code,
+                                period=qmt_period,
+                                start_time=start_str,
+                                end_time=end_str,
+                            )
+                            time.sleep(1)
+                            df_new = read_dat(
+                                stock_code,
+                                period=qmt_period,
+                                start_date=start_date,
+                                end_date=end_date,
+                            )
+                            if df_new is not None and not df_new.empty:
+                                df = df_new
+                        except Exception as e:
+                            self._logger.debug("补充当日数据失败: %s", e)
 
             if df is None or df.empty:
-                self._logger.warning("QMT返回空DataFrame")
+                # Step 2: 如果本地没有数据，尝试下载
+                self._logger.debug(
+                    "QMT请求参数: %s %s~%s %s", stock_code, start_str, end_str, qmt_period
+                )
+                _xt_trace(f"_read_from_qmt_locked download_history_data {stock_code} {qmt_period}")
+                try:
+                    xtdata.download_history_data(
+                        stock_code, period=qmt_period, start_time=start_str, end_time=end_str
+                    )
+                    for _retry in range(3):
+                        df = read_dat(
+                            stock_code,
+                            period=qmt_period,
+                            start_date=start_date,
+                            end_date=end_date,
+                        )
+                        if df is not None and not df.empty:
+                            break
+                        if _retry < 2:
+                            time.sleep(0.5)
+                except Exception as e:
+                    self._logger.debug("QMT download 失败: %s", e)
+
+            if df is None or df.empty:
+                self._logger.warning("QMT DAT 直读为空: %s %s", stock_code, qmt_period)
                 return None
 
-            # 统一列名
-            df = df.reset_index()
-            # QMT返回的列名通常是 time, open, high, low, close, volume, amount 等
-            # 需要根据实际情况调整
-
-            if "time" in df.columns:
-                parsed_time = self._parse_qmt_time_series(df["time"])
-                df["time"] = parsed_time.dt.strftime("%Y-%m-%d %H:%M:%S")
-
-                # 如果是日线，只保留日期部分
-                if period == "1d":
-                    if "date" not in df.columns:
-                        df["date"] = df["time"].apply(lambda x: x.split(" ")[0])
-                    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-                    df["datetime"] = pd.to_datetime(df["date"], errors="coerce")
-                elif period in ("1w", "1M"):
-                    df["datetime"] = pd.to_datetime(parsed_time, errors="coerce").dt.normalize()
-                else:
-                    if "datetime" in df.columns:
-                        dt_src = df["datetime"]
-                    else:
-                        dt_src = df["time"]
-                    df["datetime"] = pd.to_datetime(dt_src, errors="coerce")
-            elif "datetime" in df.columns:
-                df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
-            elif "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-                df["datetime"] = pd.to_datetime(df["date"], errors="coerce")
-
-            if "datetime" not in df.columns:
-                return None
-            df = df[df["datetime"].notna()]
-            for col in ["open", "high", "low", "close"]:
-                if col not in df.columns:
-                    return None
-            if "volume" not in df.columns:
-                df["volume"] = 0
+            # DAT 直读返回 index=北京时间 Timestamp, columns=[open,high,low,close,volume]
+            # 统一添加 datetime 列以匹配下游契约
+            df = df.copy()
+            df["datetime"] = df.index
             if "amount" not in df.columns:
                 df["amount"] = 0
             df = df.set_index("datetime", drop=False).sort_index()
@@ -3571,12 +6383,28 @@ class UnifiedDataInterface:
         except Exception as e:
             self._logger.error("QMT 数据获取失败: %s", e)
             import traceback
+
             traceback.print_exc()
             return None
 
     def _read_tick_from_qmt(
         self, xtdata, stock_code: str, start_date: str, end_date: str
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
+        # ── 优先使用 DAT 直读路径（不依赖 xtquant C 扩展，不触发 bsonobj.cpp 崩溃）──
+        try:
+            from data_manager.dat_binary_reader import read_tick_dat
+
+            df_dat = read_tick_dat(stock_code, start_date, end_date)
+            if df_dat is not None and not df_dat.empty:
+                for col in ["lastPrice", "volume", "amount"]:
+                    if col not in df_dat.columns:
+                        df_dat[col] = 0
+                df_dat = df_dat[["lastPrice", "volume", "amount"]].copy()
+                df_dat.index.name = None
+                return df_dat
+        except Exception:
+            pass
+
         try:
             start_str = pd.to_datetime(start_date).strftime("%Y%m%d")
             end_str = pd.to_datetime(end_date).strftime("%Y%m%d")
@@ -3613,9 +6441,117 @@ class UnifiedDataInterface:
         except Exception:
             return None
 
+    def _get_realtime_bars(self, stock_code: str, period: str) -> pd.DataFrame | None:
+        """
+        获取当日实时 K 线数据（历史 DAT + 实时 Tick 融合）。
+
+        步骤：
+        1. 从 DAT 读取历史数据
+        2. 获取当日实时 Tick 数据
+        3. 将 Tick 聚合为 K 线
+        4. 合并历史 + 当日
+        """
+        try:
+            from core.xtdata_lock import xtdata_submit as _xtdata_submit
+
+            period_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600}.get(period)
+            if period_seconds is None:
+                return None
+
+            def _work():
+                xtdata = import_xtdata_module()
+                tick_data = xtdata.get_full_tick([stock_code])
+                if not tick_data or stock_code not in tick_data:
+                    return None
+                tick = tick_data[stock_code]
+                if not tick:
+                    return None
+
+                records = []
+                for field in ["time", "lastPrice", "volume", "amount", "open", "high", "low"]:
+                    if field not in tick:
+                        tick[field] = 0
+
+                current_time = tick.get("time", 0)
+                if current_time > 0:
+                    current_dt = pd.to_datetime(current_time, unit="ms", utc=True).tz_convert(
+                        "Asia/Shanghai"
+                    )
+
+                    bar = {
+                        "datetime": current_dt,
+                        "open": tick.get("open", tick.get("lastPrice", 0)),
+                        "high": tick.get("high", tick.get("lastPrice", 0)),
+                        "low": tick.get("low", tick.get("lastPrice", 0)),
+                        "close": tick.get("lastPrice", 0),
+                        "volume": tick.get("volume", 0),
+                        "amount": tick.get("amount", 0),
+                    }
+                    records.append(bar)
+
+                if not records:
+                    return None
+                df = pd.DataFrame(records)
+                df = df.set_index("datetime")
+                return df
+
+            realtime_df = _xtdata_submit(_work)
+            return realtime_df
+
+        except Exception as e:
+            self._logger.debug("获取实时K线失败: %s", e)
+            return None
+
+    def _merge_history_realtime(
+        self,
+        history_df: pd.DataFrame | None,
+        realtime_df: pd.DataFrame | None,
+        period: str,
+    ) -> pd.DataFrame | None:
+        """
+        合并历史 DAT 数据和当日实时数据。
+        """
+        if history_df is None or history_df.empty:
+            return realtime_df
+        if realtime_df is None or realtime_df.empty:
+            return history_df
+
+        try:
+            history_df = history_df.copy()
+            realtime_df = realtime_df.copy()
+
+            if "datetime" not in history_df.columns:
+                if history_df.index.name == "datetime":
+                    history_df["datetime"] = history_df.index
+                elif "date" in history_df.columns:
+                    history_df["datetime"] = pd.to_datetime(history_df["date"])
+                else:
+                    return history_df
+
+            if "datetime" not in realtime_df.columns:
+                if realtime_df.index.name == "datetime":
+                    realtime_df["datetime"] = realtime_df.index
+
+            history_df = history_df.set_index("datetime")
+            realtime_df = realtime_df.set_index("datetime")
+
+            combined = pd.concat([history_df, realtime_df])
+            combined = combined[~combined.index.duplicated(keep="last")]
+            combined = combined.sort_index()
+
+            for col in ["open", "high", "low", "close", "volume"]:
+                if col not in combined.columns:
+                    combined[col] = 0
+
+            return combined
+
+        except Exception as e:
+            self._logger.warning("合并历史和实时数据失败: %s", e)
+            return history_df
+
     def _read_transaction_from_qmt(
         self, xtdata, stock_code: str, start_date: str, end_date: str
-    ) -> tuple[Optional[pd.DataFrame], bool]:
+    ) -> tuple[pd.DataFrame | None, bool]:
         try:
             start_str = pd.to_datetime(start_date).strftime("%Y%m%d")
             end_str = pd.to_datetime(end_date).strftime("%Y%m%d")
@@ -3705,6 +6641,7 @@ class UnifiedDataInterface:
         cfg_path = Path(__file__).resolve().parent.parent / "config" / "akshare_routing.json"
         try:
             import json as _json
+
             with open(cfg_path, encoding="utf-8") as f:
                 cls._AKSHARE_ROUTING_CFG = _json.load(f)
         except Exception:
@@ -3713,9 +6650,9 @@ class UnifiedDataInterface:
                 "index_rules": {
                     "suffix_sh_prefixes": ["000", "399", "999", "688"],
                     "suffix_sz_prefixes": ["399"],
-                    "explicit_index_codes": []
+                    "explicit_index_codes": [],
                 },
-                "akshare_retry": {"max_retries": 2, "backoff_seconds": 5, "timeout_seconds": 20}
+                "akshare_retry": {"max_retries": 2, "backoff_seconds": 5, "timeout_seconds": 20},
             }
 
     @classmethod
@@ -3737,7 +6674,7 @@ class UnifiedDataInterface:
 
     def _read_from_akshare(
         self, stock_code: str, start_date: str, end_date: str, period: str
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         """AKShare 数据拉取：支持股票/指数接口自动路由 + 零配置重试。"""
         try:
             import akshare as ak
@@ -3756,8 +6693,8 @@ class UnifiedDataInterface:
         end_str = end_date.replace("-", "")
         is_index = self._is_index_code(stock_code)
 
-        def _fetch_once() -> Optional[pd.DataFrame]:
-            """  单次拉取，返回原始 df 或 None。"""
+        def _fetch_once() -> pd.DataFrame | None:
+            """单次拉取，返回原始 df 或 None。"""
             if period == "1d":
                 if is_index:
                     return ak.index_zh_a_hist(
@@ -3770,7 +6707,11 @@ class UnifiedDataInterface:
                     return stock_df
                 if symbol.startswith(("5", "15", "16", "18")):
                     return ak.fund_etf_hist_em(
-                        symbol=symbol, period="daily", start_date=start_str, end_date=end_str, adjust=""
+                        symbol=symbol,
+                        period="daily",
+                        start_date=start_str,
+                        end_date=end_str,
+                        adjust="",
                     )
                 return stock_df
             if period in {"1m", "5m"}:
@@ -3787,8 +6728,8 @@ class UnifiedDataInterface:
                 )
             return None  # 不支持的周期
 
-        df: Optional[pd.DataFrame] = None
-        last_err: Optional[Exception] = None
+        df: pd.DataFrame | None = None
+        last_err: Exception | None = None
         t0 = time.perf_counter()
         for attempt in range(max_retries + 1):
             try:
@@ -3798,7 +6739,7 @@ class UnifiedDataInterface:
                     src_tag = "index" if is_index else "stock"
                     self._log(
                         f"[INFO] AKShare {src_tag} 成功 {stock_code}"
-                        f" rows={len(df)} attempt={attempt+1} elapsed={elapsed:.1f}s"
+                        f" rows={len(df)} attempt={attempt + 1} elapsed={elapsed:.1f}s"
                     )
                     break
                 last_err = None
@@ -3807,14 +6748,14 @@ class UnifiedDataInterface:
                 elapsed = time.perf_counter() - t0
                 if attempt < max_retries:
                     self._log(
-                        f"[WARN] AKShare第{attempt+1}次失败 {stock_code}"
+                        f"[WARN] AKShare第{attempt + 1}次失败 {stock_code}"
                         f" elapsed={elapsed:.1f}s err={e}，{backoff_s}s后重试"
                     )
                     time.sleep(backoff_s)
                 else:
                     self._log(
                         f"[ERROR] AKShare全部重试耗尽 {stock_code}"
-                        f" {start_date}~{end_date} attempt={attempt+1} elapsed={elapsed:.1f}s: {e}"
+                        f" {start_date}~{end_date} attempt={attempt + 1} elapsed={elapsed:.1f}s: {e}"
                     )
                     return None
 
@@ -3857,7 +6798,7 @@ class UnifiedDataInterface:
 
     def _read_from_tushare(
         self, stock_code: str, start_date: str, end_date: str, period: str
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         if period != "1d":
             return None
         if not self._tushare_token:
@@ -3897,11 +6838,15 @@ class UnifiedDataInterface:
             self._log(f"[WARNING] Tushare 拉取失败 {stock_code}: {e}")
             return None
 
-    def _get_dividends_from_qmt(
-        self, stock_code: str, start_date, end_date
-    ) -> Optional[pd.DataFrame]:
-        """
-        从QMT获取分红数据，用于计算复权价格
+    def _get_dividends_from_qmt(self, stock_code: str, start_date, end_date) -> pd.DataFrame | None:
+        """从QMT获取分红数据，用于计算复权价格。
+
+        XTQuant get_divid_factors 返回格式（pd.DataFrame.T 后）：
+          - index: 除权日字符串，格式 "YYYYMMDDHHMMSS"（例如 "20120713000000"）
+          - columns: 命名列（优先）或整数列（兜底）
+            named: interest(每10股派息元), allotNum(配股数/10), allotPrice(配股价),
+                   bonus(送股/10), transfer(转增/10)
+            positional: [0]=interest, [1]=allotNum, [2]=allotPrice, [3]=bonus, [4]=transfer
 
         Args:
             stock_code: 股票代码
@@ -3909,74 +6854,92 @@ class UnifiedDataInterface:
             end_date: 结束日期
 
         Returns:
-            DataFrame: 分红数据，包含 ex_date, dividend_per_share 等列
+            DataFrame: 分红数据，包含 ex_date, dividend_per_share, bonus_ratio 列
+                       - dividend_per_share: 每股派息（元/股）= interest / 10
+                       - bonus_ratio: 每10股送转合计股数 = bonus + transfer
         """
         try:
-            from xtquant import xtdata
-
-            # 转换日期格式
             start_str = pd.to_datetime(start_date).strftime("%Y%m%d")
             end_str = pd.to_datetime(end_date).strftime("%Y%m%d")
 
-            # 调用QMT接口获取分红数据
-            divid_data = xtdata.get_divid_factors(stock_code, start_str, end_str)
+            def _xt_get_divid():
+                from xtquant import xtdata
 
-            if divid_data is None or divid_data.empty:
+                return xtdata.get_divid_factors(stock_code, start_str, end_str)
+
+            divid_data = self._run_xtdata_callable(_xt_get_divid)
+
+            if divid_data is None or not isinstance(divid_data, pd.DataFrame) or divid_data.empty:
                 self._logger.debug("无分红数据: %s", stock_code)
                 return pd.DataFrame()
 
-            # 转换为标准格式
-            # QMT返回的数据可能包含多列，我们需要提取必要的列
-            dividends_df = pd.DataFrame()
+            # ── 除权日从 index 提取（"20120713000000" → "2012-07-13"）──────────
+            raw_index = divid_data.index.astype(str)
+            ex_dates = pd.to_datetime(raw_index.str[:8], format="%Y%m%d", errors="coerce")
+            valid_mask = ex_dates.notna()
+            if not valid_mask.any():
+                self._logger.warning("分红数据 index 无法解析为日期: %s", stock_code)
+                return pd.DataFrame()
 
-            # 检查返回的数据结构并提取需要的字段
-            if isinstance(divid_data, pd.DataFrame):
-                # 尝试映射列名
-                col_mapping = {
-                    "date": "ex_date",
-                    "ex_date": "ex_date",
-                    "exDivDate": "ex_date",
-                    "bonus_date": "ex_date",
-                    "dividend": "dividend_per_share",
-                    "dividend_per_share": "dividend_per_share",
-                    "cashBonus": "dividend_per_share",
-                    "bonus_ratio": "bonus_ratio",
-                    "bonusRatio": "bonus_ratio",
-                    "rightsissue_ratio": "rights_issue_ratio",
-                }
+            divid_data = divid_data.loc[valid_mask]
+            ex_dates = ex_dates[valid_mask]
 
-                # 查找实际的列名
-                actual_cols = {}
-                for qmt_col, std_col in col_mapping.items():
-                    if qmt_col in divid_data.columns:
-                        actual_cols[std_col] = qmt_col
+            # ── 列名适配：XTQuant 命名列优先，整数位置兜底 ──────────────────
+            cols = divid_data.columns.tolist()
 
-                # 提取数据
-                for std_col, qmt_col in actual_cols.items():
-                    dividends_df[std_col] = divid_data[qmt_col]
+            def _get_col(named_candidates: list[str], pos: int) -> pd.Series | None:
+                """按名称列表依次查找，找到则返回；否则按位置兜底。"""
+                for name in named_candidates:
+                    if name in cols:
+                        return divid_data[name]
+                if isinstance(pos, int) and pos < len(cols):
+                    return divid_data.iloc[:, pos]
+                return None
 
-                # 确保有ex_date列
-                if "ex_date" not in dividends_df.columns and len(divid_data.columns) > 0:
-                    # 尝试使用第一列作为ex_date
-                    dividends_df["ex_date"] = divid_data.iloc[:, 0]
+            # interest: 每10股派息（元）
+            interest_s = _get_col(["interest", "Interest", "cash", "cashBonus", "dividend"], 0)
+            # bonus: 每10股送股数（股）
+            bonus_s = _get_col(["bonus", "Bonus", "stockBonus", "stockGift"], 3)
+            # transfer: 每10股转增数（股）
+            transfer_s = _get_col(["transfer", "Transfer", "stockTransfer"], 4)
 
-                # 确保有dividend_per_share列
-                if "dividend_per_share" not in dividends_df.columns and len(divid_data.columns) > 1:
-                    dividends_df["dividend_per_share"] = divid_data.iloc[:, 1]
+            rows = []
+            for i, ex_ts in enumerate(ex_dates):
+                cash = 0.0
+                bonus = 0.0
+                if interest_s is not None:
+                    v = pd.to_numeric(interest_s.iloc[i], errors="coerce")
+                    if pd.notna(v):
+                        cash = float(v)
+                if bonus_s is not None:
+                    v = pd.to_numeric(bonus_s.iloc[i], errors="coerce")
+                    if pd.notna(v):
+                        bonus += float(v)
+                if transfer_s is not None:
+                    v = pd.to_numeric(transfer_s.iloc[i], errors="coerce")
+                    if pd.notna(v):
+                        bonus += float(v)
+                # 只保留有实质内容的行
+                if cash == 0.0 and bonus == 0.0:
+                    continue
+                rows.append(
+                    {
+                        "ex_date": ex_ts.date(),
+                        "dividend_per_share": cash / 10.0,  # 元/股
+                        "bonus_ratio": bonus,  # 每10股合计送转股数
+                    }
+                )
 
-                if not dividends_df.empty and "ex_date" in dividends_df.columns:
-                    # 确保日期格式正确
-                    dividends_df["ex_date"] = pd.to_datetime(dividends_df["ex_date"]).dt.date
-                    self._logger.debug("获取 %d 条分红记录", len(dividends_df))
-                    return dividends_df
-                else:
-                    self._logger.warning("分红数据格式不符，无法使用")
-                    return pd.DataFrame()
+            if not rows:
+                self._logger.debug("分红数据解析后无有效行: %s", stock_code)
+                return pd.DataFrame()
 
-            return pd.DataFrame()
+            dividends_df = pd.DataFrame(rows)
+            self._logger.debug("QMT分红 %s: 共 %d 条除权记录", stock_code, len(dividends_df))
+            return dividends_df
 
         except Exception as e:
-            self._logger.warning("获取分红数据失败: %s", e)
+            self._logger.warning("获取分红数据失败: %s %s", stock_code, e)
             return pd.DataFrame()
 
     def _check_missing_trading_days(
@@ -3999,10 +6962,10 @@ class UnifiedDataInterface:
         if period in ("1w", "1M"):
             try:
                 start_ts = pd.to_datetime(start_date)
-                end_ts   = pd.to_datetime(end_date)
+                end_ts = pd.to_datetime(end_date)
                 delta_days = (end_ts - start_ts).days
                 expected = max(1, delta_days // 7) if period == "1w" else max(1, delta_days // 30)
-                actual   = len(data)
+                actual = len(data)
                 # Allow up to 30 % gap before flagging as incomplete
                 if actual >= int(expected * 0.7):
                     return 0
@@ -4012,24 +6975,22 @@ class UnifiedDataInterface:
 
         try:
             start = pd.to_datetime(start_date).date()
-            end   = pd.to_datetime(end_date).date()
+            end = pd.to_datetime(end_date).date()
             if start > end:
                 return 0
 
             # P1：精确交易日集合（chinese_calendar 优先，内置表兜底）
-            from data_manager.smart_data_detector import TradingCalendar
-            cal = TradingCalendar()
+            # 使用模块级单例避免每次调用都重建 TradingCalendar（_load_holidays n=11000 + 网络调用）
+            from data_manager.smart_data_detector import get_trading_calendar
+
+            cal = get_trading_calendar()
             expected_trading_days = cal.get_trading_days(start, end)
             if not expected_trading_days:
                 return 0
 
             # 将 data.index 归一化为 date 集合
             existing_dates: set = set(
-                pd.to_datetime(data.index, errors="coerce")
-                  .normalize()
-                  .to_series()
-                  .dt.date  # type: ignore[union-attr]
-                  .dropna()
+                pd.to_datetime(data.index, errors="coerce").normalize().to_series().dt.date.dropna()  # type: ignore[union-attr]
             )
             missing = [d for d in expected_trading_days if d not in existing_dates]
             return len(missing)
@@ -4038,7 +6999,7 @@ class UnifiedDataInterface:
             # 退化兜底：bdate_range × 0.935，阈值 0.85
             try:
                 start_ts = pd.to_datetime(start_date)
-                end_ts   = pd.to_datetime(end_date)
+                end_ts = pd.to_datetime(end_date)
                 bdays = len(pd.bdate_range(start=start_ts, end=end_ts))
                 expected = max(1, int(bdays * 0.935))
                 actual = len(data)
@@ -4051,11 +7012,12 @@ class UnifiedDataInterface:
     @staticmethod
     def _is_intraday_sparse(data: pd.DataFrame, period: str) -> bool:
         import re as _re
+
         # A 股全天 240 交易分钟；按周期分钟数推算每日预期 K 线数
         _KNOWN = {"1m": 240, "5m": 48, "15m": 16, "30m": 8, "60m": 4}
         expected = _KNOWN.get(period)
         if expected is None:
-            _m = _re.match(r'^(\d+)m$', period)
+            _m = _re.match(r"^(\d+)m$", period)
             if _m:
                 mins = int(_m.group(1))
                 if mins > 0:
@@ -4093,6 +7055,7 @@ class UnifiedDataInterface:
                 _build_dat_path,
                 _load_qmt_base_from_config,
             )
+
             stale_hours = float(os.environ.get("EASYXT_DAT_STALE_HOURS", "24"))
             qmt_base = _load_qmt_base_from_config()
             if qmt_base is None:
@@ -4121,6 +7084,9 @@ class UnifiedDataInterface:
         2. 必须包含 open/high/low/close 列
         3. 至少有一行的 OHLC 全部非 NaN
         4. 非 NaN 价格必须 > 0
+        5. P0-2: 日期列存在性和有效性检查
+        6. P0-2: OHLC 序列合法性检查（high>=low, high>=open, low<=close）
+        7. P0-2: volume 全0警告（不拒绝）
 
         Returns:
             (pass, reason) — pass=False 时 reason 说明拒绝原因。
@@ -4140,6 +7106,42 @@ class UnifiedDataInterface:
             total = len(valid_rows)
             if neg_count / total > 0.01:
                 return False, f"存在 {neg_count}/{total} 行非正价格"
+
+        # P0-2: 日期列存在性和有效性检查
+        date_col = next((c for c in ("date", "datetime") if c in df.columns), None)
+        if date_col is None and not isinstance(df.index, pd.DatetimeIndex):
+            return False, "缺少 date/datetime 列"
+        # 检查日期有效性
+        if date_col:
+            raw_dates = df[date_col]
+            parsed = pd.to_datetime(raw_dates, errors="coerce")
+            null_ratio = parsed.isna().mean()
+            if null_ratio > 0.1:
+                return False, f"date列有{null_ratio:.0%}无效值，超过10%阈值"
+        else:
+            # 检查索引
+            if not isinstance(df.index, pd.DatetimeIndex):
+                return False, "date列和索引都不是DatetimeIndex"
+            null_ratio = df.index.isna().mean()
+            if null_ratio > 0.1:
+                return False, f"索引有{null_ratio:.0%}无效值，超过10%阈值"
+
+        # P0-2: OHLC 序列合法性检查
+        bad_rows = (
+            (valid_rows["high"] < valid_rows["low"])
+            | (valid_rows["high"] < valid_rows["open"])
+            | (valid_rows["low"] > valid_rows["close"])
+        ).sum()
+        if bad_rows / len(valid_rows) > 0.01:
+            return False, f"OHLC序列破坏: {bad_rows}行 high<low 或 high<open 或 low>close"
+
+        # P0-2: volume 全0警告（仅警告，不拒绝）
+        if "volume" in df.columns:
+            zero_ratio = (df["volume"] == 0).mean()
+            if zero_ratio > 0.5:
+                # P2-3: volume 全0警告（仅 warning，不拒绝）
+                return True, f"volume列有{zero_ratio:.0%}为0（>50%警告）"
+
         return True, ""
 
     def _record_source_conflicts(self, rows: list[dict[str, Any]]) -> None:
@@ -4158,6 +7160,7 @@ class UnifiedDataInterface:
                     stock_code, period, event_ts, source_primary, source_secondary,
                     close_primary, close_secondary, delta_pct, decision, trace_id
                 FROM source_conflict_rows
+                ON CONFLICT DO NOTHING
                 """
             )
             self.con.unregister("source_conflict_rows")
@@ -4192,13 +7195,40 @@ class UnifiedDataInterface:
             delta = ((qmt_close - duck_close).abs() / baseline).dropna()
             conflict_delta = delta[delta > conflict_threshold]
             if not conflict_delta.empty:
+                # P1-2: 分层冲突阈值
+                extreme_conflicts = conflict_delta[conflict_delta > 0.20]  # >20% 极端冲突
+
+                # 极端冲突：强制告警
+                if not extreme_conflicts.empty:
+                    self._logger.error(
+                        "检测到极端价格冲突: %s %s count=%d threshold>20%%, 需要人工介入",
+                        stock_code,
+                        period,
+                        len(extreme_conflicts),
+                    )
+                    self._emit_data_quality_alert(
+                        stock_code=stock_code,
+                        period=period,
+                        level="error",
+                        reason="extreme_price_conflict",
+                        details={
+                            "conflict_count": len(extreme_conflicts),
+                            "max_delta_pct": float(extreme_conflicts.max() * 100),
+                            "conflict_indices": list(extreme_conflicts.index.astype(str)),
+                        },
+                    )
+
                 conflict_idx = conflict_delta.index
                 shared_cols = [c for c in duckdb_data.columns if c in merged.columns]
                 if shared_cols:
-                    merged.loc[conflict_idx, shared_cols] = duckdb_data.loc[conflict_idx, shared_cols]
+                    merged.loc[conflict_idx, shared_cols] = duckdb_data.loc[
+                        conflict_idx, shared_cols
+                    ]
                 trace_id = str(uuid.uuid4())
                 rows: list[dict[str, Any]] = []
                 for ts, d in conflict_delta.items():
+                    # P1-2: 标记冲突类型
+                    conflict_type = "extreme" if d > 0.20 else "medium"
                     rows.append(
                         {
                             "stock_code": stock_code,
@@ -4211,16 +7241,27 @@ class UnifiedDataInterface:
                             "delta_pct": float(d),
                             "decision": "prefer_duckdb_on_conflict",
                             "trace_id": trace_id,
+                            "conflict_type": conflict_type,  # P1-2: 新增字段
                         }
                     )
                 self._record_source_conflicts(rows)
-                self._logger.warning(
-                    "检测到跨源价格冲突: %s %s count=%s threshold=%.2f%%, 已优先保留DuckDB",
-                    stock_code,
-                    period,
-                    len(rows),
-                    conflict_threshold * 100,
-                )
+
+                # 根据冲突级别使用不同日志级别
+                if not extreme_conflicts.empty:
+                    self._logger.error(
+                        "检测到跨源价格冲突(极端): %s %s count=%d threshold>20%%, 已优先保留DuckDB",
+                        stock_code,
+                        period,
+                        len(extreme_conflicts),
+                    )
+                else:
+                    self._logger.warning(
+                        "检测到跨源价格冲突: %s %s count=%s threshold=%.2f%%, 已优先保留DuckDB",
+                        stock_code,
+                        period,
+                        len(rows),
+                        conflict_threshold * 100,
+                    )
 
         # 找出DuckDB中有但QMT中没有的日期（用DuckDB补充）
         duckdb_dates = set(pd.to_datetime(duckdb_data.index).unique())
@@ -4254,8 +7295,7 @@ class UnifiedDataInterface:
         """
         try:
             row = self.con.execute(
-                "SELECT COUNT(*) FROM " + table_name
-                + " WHERE stock_code = ? AND period = ?"
+                "SELECT COUNT(*) FROM " + table_name + " WHERE stock_code = ? AND period = ?"
                 " AND " + date_col + " >= ? AND " + date_col + " <= ?",
                 [stock_code, period, date_min, date_max],
             ).fetchone()
@@ -4278,7 +7318,7 @@ class UnifiedDataInterface:
         pre_gate_pass: bool,
         contract_pass: bool,
         post_verify_pass: bool,
-        error_message: Optional[str] = None,
+        error_message: str | None = None,
     ) -> str:
         """写入 write_audit_log 记录每次写操作的审计信息。"""
         if not self.con or self._read_only_connection:
@@ -4295,9 +7335,18 @@ class UnifiedDataInterface:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    audit_id, table_name, stock_code, period,
-                    expected_rows, actual_rows, date_min, date_max,
-                    raw_hash, pre_gate_pass, contract_pass, post_verify_pass,
+                    audit_id,
+                    table_name,
+                    stock_code,
+                    period,
+                    expected_rows,
+                    actual_rows,
+                    date_min,
+                    date_max,
+                    raw_hash,
+                    pre_gate_pass,
+                    contract_pass,
+                    post_verify_pass,
                     error_message,
                 ],
             )
@@ -4306,7 +7355,7 @@ class UnifiedDataInterface:
             self._logger.warning("写入write_audit_log失败: %s", e)
             return ""
 
-    def _build_quarantine_sample_json(self, df: Optional[pd.DataFrame], limit: int = 20) -> str:
+    def _build_quarantine_sample_json(self, df: pd.DataFrame | None, limit: int = 20) -> str:
         if df is None or df.empty:
             return ""
         try:
@@ -4328,11 +7377,11 @@ class UnifiedDataInterface:
         date_max: str,
         sample_json: str,
         *,
-        sequence_id: Optional[str] = None,
-        source_event_time: Optional[Any] = None,
-        ingest_time: Optional[Any] = None,
-        watermark_ms: Optional[int] = None,
-        lateness_ms: Optional[int] = None,
+        sequence_id: str | None = None,
+        source_event_time: Any | None = None,
+        ingest_time: Any | None = None,
+        watermark_ms: int | None = None,
+        lateness_ms: int | None = None,
         watermark_late: bool = False,
     ) -> None:
         if not self.con or self._read_only_connection:
@@ -4375,12 +7424,11 @@ class UnifiedDataInterface:
         period: str,
         level: str,
         reason: str,
-        details: Optional[dict[str, Any]] = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
-        if (
-            threading.current_thread() is not threading.main_thread()
-            and os.environ.get("EASYXT_ALLOW_CROSS_THREAD_UI_ALERT", "0") not in ("1", "true", "True")
-        ):
+        if threading.current_thread() is not threading.main_thread() and os.environ.get(
+            "EASYXT_ALLOW_CROSS_THREAD_UI_ALERT", "0"
+        ) not in ("1", "true", "True"):
             return
         try:
             from core.events import Events
@@ -4404,7 +7452,7 @@ class UnifiedDataInterface:
         stock_code: str,
         period: str,
         quarantine_id: str,
-        payload: Optional[dict[str, Any]] = None,
+        payload: dict[str, Any] | None = None,
     ) -> None:
         if not self.con or self._read_only_connection:
             return
@@ -4431,6 +7479,42 @@ class UnifiedDataInterface:
         except Exception as e:
             self._logger.warning("写入data_quality_incident失败: %s", e)
 
+    def upsert_realtime_bar(self, bar: dict, stock_code: str, period: str) -> None:
+        """HTAP 实时落盘：将一根刚完结的实时 bar 写入 DuckDB。
+
+        仅支持基础存储周期（1m / 5m / 1d）对应的表。
+        自定义周期 bar（10m/25m/70m 等）不单独落盘，而是在下次查询时由
+        build_intraday_bars 从 stock_1m / stock_5m 重新聚合。
+        """
+        _PERIOD_TABLE = {"1m": "stock_1m", "5m": "stock_5m", "1d": "stock_daily"}
+        table_name = _PERIOD_TABLE.get(str(period).lower())
+        if table_name is None:
+            return  # 自定义周期无需直接写盘
+        if not isinstance(bar, dict):
+            return
+        time_val = bar.get("time")
+        if not time_val:
+            return
+        try:
+            date_col = "date" if table_name == "stock_daily" else "datetime"
+            df = pd.DataFrame(
+                [
+                    {
+                        date_col: str(time_val)[:19],
+                        "open": float(bar.get("open") or 0),
+                        "high": float(bar.get("high") or 0),
+                        "low": float(bar.get("low") or 0),
+                        "close": float(bar.get("close") or 0),
+                        "volume": float(bar.get("volume") or 0),
+                        "stock_code": str(stock_code),
+                        "period": str(period),
+                    }
+                ]
+            )
+            self._save_to_duckdb(df, stock_code, period)
+        except Exception as e:
+            self._logger.debug("upsert_realtime_bar 跳过 %s %s: %s", stock_code, period, e)
+
     def _save_to_duckdb(
         self,
         data: pd.DataFrame,
@@ -4438,9 +7522,9 @@ class UnifiedDataInterface:
         period: str,
         _retry_after_reconnect: bool = False,
         *,
-        _ingest_source: Optional[str] = None,
-        _ingest_start: Optional[str] = None,
-        _ingest_end: Optional[str] = None,
+        _ingest_source: str | None = None,
+        _ingest_start: str | None = None,
+        _ingest_end: str | None = None,
     ):
         """保存数据到DuckDB - 修复版（确保表存在）
 
@@ -4540,7 +7624,7 @@ class UnifiedDataInterface:
                 df_to_save = df_to_save[df_to_save[date_col].notna()]
             else:
                 # date_col 既不在列中也无法通过重命名获得 — 尝试从 "date"/"datetime"/"time" 兜底
-                fallback_cols = (["date", "time"] if date_col == "datetime" else ["datetime", "time"])
+                fallback_cols = ["date", "time"] if date_col == "datetime" else ["datetime", "time"]
                 found = False
                 for fb in fallback_cols:
                     if fb in df_to_save.columns:
@@ -4554,9 +7638,40 @@ class UnifiedDataInterface:
                 if not found:
                     self._logger.error(
                         "保存跳过: DataFrame 缺少日期列 %r，stock=%s period=%s columns=%s",
-                        date_col, stock_code, period, list(df_to_save.columns),
+                        date_col,
+                        stock_code,
+                        period,
+                        list(df_to_save.columns),
                     )
                     return
+            if df_to_save.empty:
+                return
+
+            # ── 写入前日期净化：剔除 Unix epoch 零值和早于 A 股开市的无效记录 ───
+            # dat_s_to_beijing(0) → 1970-01-01 08:00，QMT 偶尔返回 time=0 行需过滤
+            _MIN_VALID_WRITE_DATE = pd.Timestamp("1990-01-01").date()
+            _before_filter = len(df_to_save)
+            if date_col in df_to_save.columns:
+                _col = df_to_save[date_col]
+                if date_col == "date":
+                    # dt.date 对象：直接比较
+                    df_to_save = df_to_save[
+                        df_to_save[date_col].apply(
+                            lambda d: d is not None and d >= _MIN_VALID_WRITE_DATE
+                        )
+                    ]
+                else:
+                    # datetime 列：转为 Timestamp 再比较
+                    _ts = pd.to_datetime(df_to_save[date_col], errors="coerce")
+                    df_to_save = df_to_save[_ts >= pd.Timestamp("1990-01-01")]
+            _dropped = _before_filter - len(df_to_save)
+            if _dropped > 0:
+                self._logger.warning(
+                    "DATE-PURGE: 剔除 %d 条早于1990年的无效记录（%s %s）",
+                    _dropped,
+                    stock_code,
+                    period,
+                )
             if df_to_save.empty:
                 return
 
@@ -4565,33 +7680,43 @@ class UnifiedDataInterface:
             if table_name != "stock_tick":
                 gate_ok, gate_reason = self._pre_write_validate(df_to_save)
                 if not gate_ok:
-                    self._logger.warning("GATE-REJECT: 预写入门禁拒绝: %s（%s %s）", gate_reason, stock_code, period)
-                    audit_id = self._record_write_audit(
-                        table_name=table_name,
-                        stock_code=stock_code,
-                        period=storage_period,
-                        expected_rows=len(df_to_save),
-                        actual_rows=0,
-                        date_min="",
-                        date_max="",
-                        raw_hash="",
-                        pre_gate_pass=False,
-                        contract_pass=False,
-                        post_verify_pass=False,
-                        error_message=f"pre_gate_reject: {gate_reason}",
+                    self._logger.warning(
+                        "GATE-REJECT: 预写入门禁拒绝: %s（%s %s）", gate_reason, stock_code, period
                     )
-                    self._record_quarantine_log(
-                        audit_id=audit_id,
-                        table_name=table_name,
-                        stock_code=stock_code,
-                        period=storage_period,
-                        reason="pre_gate_reject",
-                        expected_rows=len(df_to_save),
-                        actual_rows=0,
-                        date_min="",
-                        date_max="",
-                        sample_json=self._build_quarantine_sample_json(df_to_save),
-                    )
+                    # P1-1: audit/quarantine 异常非阻断包装
+                    try:
+                        audit_id = self._record_write_audit(
+                            table_name=table_name,
+                            stock_code=stock_code,
+                            period=storage_period,
+                            expected_rows=len(df_to_save),
+                            actual_rows=0,
+                            date_min="",
+                            date_max="",
+                            raw_hash="",
+                            pre_gate_pass=False,
+                            contract_pass=False,
+                            post_verify_pass=False,
+                            error_message=f"pre_gate_reject: {gate_reason}",
+                        )
+                    except Exception as _ae:
+                        self._logger.error("audit写入失败（非阻断）: %s", _ae)
+                        audit_id = ""
+                    try:
+                        self._record_quarantine_log(
+                            audit_id=audit_id,
+                            table_name=table_name,
+                            stock_code=stock_code,
+                            period=storage_period,
+                            reason="pre_gate_reject",
+                            expected_rows=len(df_to_save),
+                            actual_rows=0,
+                            date_min="",
+                            date_max="",
+                            sample_json=self._build_quarantine_sample_json(df_to_save),
+                        )
+                    except Exception as _qe:
+                        self._logger.error("quarantine写入失败（非阻断）: %s", _qe)
                     self._emit_data_quality_alert(
                         stock_code=stock_code,
                         period=storage_period,
@@ -4599,6 +7724,25 @@ class UnifiedDataInterface:
                         reason="pre_gate_reject",
                         details={"gate_reason": gate_reason, "table_name": table_name},
                     )
+                    return
+
+            if self._sqlite_primary_enabled and self._sqlite_primary_store is not None:
+                try:
+                    self._sqlite_primary_store.write_bars(
+                        stock_code=stock_code,
+                        period=storage_period,
+                        data=df_to_save,
+                        source=_ingest_source or "unified_data_interface",
+                    )
+                except Exception as sqlite_write_error:
+                    self._logger.error(
+                        "SQLite主写失败: stock=%s period=%s error=%s",
+                        stock_code,
+                        storage_period,
+                        sqlite_write_error,
+                    )
+                    raise
+                if not self._market_storage_topology.duckdb_shadow_inline_write:
                     return
 
             if self._canary_shadow_write_enabled:
@@ -4624,10 +7768,10 @@ class UnifiedDataInterface:
             date_max = str(df_to_save[date_col].max())
 
             delete_sql = (
-                "DELETE FROM " + table_name +
-                " WHERE stock_code = ? AND period = ?"
+                "DELETE FROM " + table_name + " WHERE stock_code = ? AND period = ?"
                 " AND " + date_col + " >= ? AND " + date_col + " <= ?"
             )
+            _adj_calc_failed = False  # P0-fix: 复权计算失败时不污染复权列
             self.con.execute("BEGIN")
             self.con.execute(delete_sql, [stock_code, storage_period, date_min, date_max])
 
@@ -4699,22 +7843,15 @@ class UnifiedDataInterface:
 
                         self._logger.debug("Five-fold adjustment 计算完成")
                     except Exception as e:
-                        self._logger.warning("Five-fold adjustment 计算失败: %s", e)
-                        self._logger.debug("复权列将复制原始价格")
-
-                        price_cols = ["open", "high", "low", "close"]
-                        adjustment_types = [
-                            "_front",
-                            "_back",
-                            "_geometric_front",
-                            "_geometric_back",
-                        ]
-
-                        for price_col in price_cols:
-                            if price_col in df_to_save.columns:
-                                for adj_type in adjustment_types:
-                                    adj_col = price_col + adj_type
-                                    df_to_save[adj_col] = df_to_save[price_col]
+                        self._logger.warning(
+                            "Five-fold adjustment 计算失败（复权列写入 NULL，"
+                            "可由 repair_daily_adjustments 自动修复）: %s",
+                            e,
+                        )
+                        _adj_calc_failed = True
+                        # ⚠️ 不复制原始价格到复权列：保持列缺失 → df_ordered 将写 NULL → 可检测并修复。
+                        # 历史写法（df_to_save[adj_col] = df_to_save[price_col]）会导致复权列
+                        # 外观正常但实质为原始价格，无法被 repair_daily_adjustments 检测到。
 
             # 获取表的列顺序
             table_columns = (
@@ -4727,7 +7864,11 @@ class UnifiedDataInterface:
             if "factor" in table_columns and "factor" not in df_to_save.columns:
                 df_to_save["factor"] = 1.0
 
-            key_cols = [c for c in [date_col, "stock_code", "period", "adjust_type"] if c in df_to_save.columns]
+            key_cols = [
+                c
+                for c in [date_col, "stock_code", "period", "adjust_type"]
+                if c in df_to_save.columns
+            ]
             if key_cols:
                 df_to_save = df_to_save.drop_duplicates(subset=key_cols, keep="last")
 
@@ -4741,7 +7882,9 @@ class UnifiedDataInterface:
 
             # 注册并插入新数据
             self.con.register("df_to_save_temp", df_ordered)
-            self.con.execute("INSERT OR REPLACE INTO " + table_name + " SELECT * FROM df_to_save_temp")
+            self.con.execute(
+                "INSERT OR REPLACE INTO " + table_name + " SELECT * FROM df_to_save_temp"
+            )
             self.con.unregister("df_to_save_temp")
 
             # ── P1.5: 原子性写入 ingestion_status（在 COMMIT 之前，同一事务内）──────────
@@ -4751,26 +7894,73 @@ class UnifiedDataInterface:
                     _i_rh, _i_set = self._compute_data_lineage(df_ordered)
                 except Exception:
                     _i_rh, _i_set = None, None
-                _ts_start = self._normalize_date_str(_ingest_start) if _ingest_start else _ingest_start
+                _gate_metadata = self._build_gate_status_metadata(
+                    stock_code=stock_code,
+                    period=storage_period,
+                    start_date=_ingest_start or date_min,
+                    end_date=_ingest_end or date_max,
+                    source=_ingest_source,
+                    status="success",
+                    contract_pass=True,
+                    raw_hash=_i_rh,
+                    source_event_time=_i_set,
+                )
+                _gate_receipt_id = self._record_publish_gate_receipt(
+                    stock_code=stock_code,
+                    period=storage_period,
+                    source=_ingest_source,
+                    status="success",
+                    result_status=str(_gate_metadata["result_status"]),
+                    gate_metadata=_gate_metadata,
+                )
+                _ts_start = (
+                    self._normalize_date_str(_ingest_start) if _ingest_start else _ingest_start
+                )
                 _ts_end = self._normalize_date_str(_ingest_end) if _ingest_end else _ingest_end
                 self.con.execute(
                     """
                     INSERT OR REPLACE INTO data_ingestion_status (
                         stock_code, period, start_date, end_date,
                         source, status, record_count, error_message,
-                        schema_version, ingest_run_id, raw_hash, source_event_time
+                        schema_version, ingest_run_id, raw_hash, source_event_time,
+                        gate_receipt_id, threshold_version, session_profile_version,
+                        timestamp_contract_version, period_registry_version, source_grade,
+                        contract_pass, cross_source_pass, tick_verified, lineage_complete, replayable,
+                        quality_grade, gate_reject_reason
                     ) VALUES (
                         ?, ?,
                         CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP),
                         ?, ?, ?, ?,
-                        ?, ?, ?, ?
+                        ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     [
-                        stock_code, storage_period,
-                        _ts_start, _ts_end,
-                        _ingest_source, "success", len(df_ordered), None,
-                        CURRENT_SCHEMA_VERSION, str(uuid.uuid4()), _i_rh, _i_set,
+                        stock_code,
+                        storage_period,
+                        _ts_start,
+                        _ts_end,
+                        _ingest_source,
+                        "success",
+                        len(df_ordered),
+                        None,
+                        CURRENT_SCHEMA_VERSION,
+                        str(uuid.uuid4()),
+                        _i_rh,
+                        _i_set,
+                        _gate_receipt_id,
+                        _gate_metadata["threshold_version"],
+                        _gate_metadata["session_profile_version"],
+                        _gate_metadata["timestamp_contract_version"],
+                        _gate_metadata["period_registry_version"],
+                        _gate_metadata["source_grade"],
+                        _gate_metadata["contract_pass"],
+                        _gate_metadata["cross_source_pass"],
+                        _gate_metadata["tick_verified"],
+                        _gate_metadata["lineage_complete"],
+                        _gate_metadata["replayable"],
+                        _gate_metadata["quality_grade"],
+                        _gate_metadata["gate_reject_reason"],
                     ],
                 )
 
@@ -4781,43 +7971,61 @@ class UnifiedDataInterface:
 
             # ── P1.3 post-write verify + audit ──────────────────
             verify_ok, actual_rows = self._post_write_verify(
-                table_name, stock_code, storage_period, date_col, date_min, date_max, expected_rows,
+                table_name,
+                stock_code,
+                storage_period,
+                date_col,
+                date_min,
+                date_max,
+                expected_rows,
             )
             if not verify_ok:
                 self._logger.warning(
                     "post-write验证失败: %s %s expected=%s actual=%s",
-                    stock_code, storage_period, expected_rows, actual_rows,
+                    stock_code,
+                    storage_period,
+                    expected_rows,
+                    actual_rows,
                 )
             try:
                 rh, _ = self._compute_data_lineage(df_ordered)
             except Exception:
                 rh = "error"
-            audit_id = self._record_write_audit(
-                table_name=table_name,
-                stock_code=stock_code,
-                period=storage_period,
-                expected_rows=expected_rows,
-                actual_rows=actual_rows,
-                date_min=date_min,
-                date_max=date_max,
-                raw_hash=rh,
-                pre_gate_pass=True,
-                contract_pass=True,
-                post_verify_pass=verify_ok,
-            )
-            if not verify_ok:
-                self._record_quarantine_log(
-                    audit_id=audit_id,
+            # P1-1: audit 异常非阻断包装
+            try:
+                audit_id = self._record_write_audit(
                     table_name=table_name,
                     stock_code=stock_code,
                     period=storage_period,
-                    reason="post_write_verify_failed",
                     expected_rows=expected_rows,
                     actual_rows=actual_rows,
                     date_min=date_min,
                     date_max=date_max,
-                    sample_json=self._build_quarantine_sample_json(df_ordered),
+                    raw_hash=rh,
+                    pre_gate_pass=True,
+                    contract_pass=True,
+                    post_verify_pass=verify_ok,
                 )
+            except Exception as _ae:
+                self._logger.error("audit写入失败（非阻断）: %s", _ae)
+                audit_id = ""
+            if not verify_ok:
+                # P1-1: quarantine 异常非阻断包装
+                try:
+                    self._record_quarantine_log(
+                        audit_id=audit_id,
+                        table_name=table_name,
+                        stock_code=stock_code,
+                        period=storage_period,
+                        reason="post_write_verify_failed",
+                        expected_rows=expected_rows,
+                        actual_rows=actual_rows,
+                        date_min=date_min,
+                        date_max=date_max,
+                        sample_json=self._build_quarantine_sample_json(df_ordered),
+                    )
+                except Exception as _qe:
+                    self._logger.error("quarantine写入失败（非阻断）: %s", _qe)
                 self._emit_data_quality_alert(
                     stock_code=stock_code,
                     period=storage_period,
@@ -4827,6 +8035,34 @@ class UnifiedDataInterface:
                         "table_name": table_name,
                         "expected_rows": expected_rows,
                         "actual_rows": actual_rows,
+                    },
+                )
+            # ── P0-fix: 复权计算失败 → 复权列为 NULL，写 quarantine 供后续 repair 检测 ──
+            if _adj_calc_failed:
+                # P1-1: quarantine 异常非阻断包装
+                try:
+                    self._record_quarantine_log(
+                        audit_id=audit_id,
+                        table_name=table_name,
+                        stock_code=stock_code,
+                        period=storage_period,
+                        reason="adj_calculation_failed_null_written",
+                        expected_rows=expected_rows,
+                        actual_rows=actual_rows,
+                        date_min=date_min,
+                        date_max=date_max,
+                        sample_json="",
+                    )
+                except Exception as _qe:
+                    self._logger.error("quarantine写入失败（非阻断）: %s", _qe)
+                self._emit_data_quality_alert(
+                    stock_code=stock_code,
+                    period=storage_period,
+                    level="warning",
+                    reason="adj_calculation_failed",
+                    details={
+                        "table": table_name,
+                        "note": "复权列写 NULL，等待 repair_daily_adjustments 修复",
                     },
                 )
 
@@ -4880,14 +8116,19 @@ class UnifiedDataInterface:
                 actual_rows=0,
                 date_min="",
                 date_max="",
-                sample_json=self._build_quarantine_sample_json(data if isinstance(data, pd.DataFrame) else None),
+                sample_json=self._build_quarantine_sample_json(
+                    data if isinstance(data, pd.DataFrame) else None
+                ),
             )
             self._emit_data_quality_alert(
                 stock_code=stock_code,
                 period=period,
                 level="error",
                 reason="save_exception",
-                details={"error_message": str(e)[:300], "table_name": table_name if "table_name" in dir() else "unknown"},
+                details={
+                    "error_message": str(e)[:300],
+                    "table_name": table_name if "table_name" in dir() else "unknown",
+                },
             )
             self._logger.error("保存失败: %s", e)
         finally:
@@ -4896,9 +8137,28 @@ class UnifiedDataInterface:
 
     # 已知合法表名的硬编码白名单，防止 f-string SQL 拼接被外部输入利用
     _SAFE_TABLE_NAMES: frozenset[str] = frozenset(
-        {"stock_daily", "stock_1m", "stock_5m", "stock_tick", "stock_transaction",
-         "market_data", "custom_period_bars"}
+        {
+            "stock_daily",
+            "stock_1m",
+            "stock_5m",
+            "stock_tick",
+            "stock_transaction",
+            "market_data",
+            "custom_period_bars",
+        }
     )
+
+    _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    @classmethod
+    def _is_safe_identifier(cls, value: str) -> bool:
+        return bool(cls._IDENTIFIER_RE.fullmatch(str(value or "")))
+
+    @classmethod
+    def _quote_identifier(cls, value: str) -> str:
+        if not cls._is_safe_identifier(value):
+            raise ValueError(f"非法标识符: {value!r}")
+        return f'"{value}"'
 
     def _write_shadow_copy(
         self,
@@ -4911,25 +8171,27 @@ class UnifiedDataInterface:
         if table_name not in self._SAFE_TABLE_NAMES:
             raise ValueError(f"不允许的表名: {table_name!r}（仅接受内部已知表名）")
         shadow_table = f"{table_name}_shadow"
+        if not self._is_safe_identifier(date_col):
+            raise ValueError(f"非法日期列名: {date_col!r}")
+        table_q = self._quote_identifier(table_name)
+        shadow_q = self._quote_identifier(shadow_table)
+        date_col_q = self._quote_identifier(date_col)
         self.con.execute(
-            f"CREATE TABLE IF NOT EXISTS {shadow_table} AS SELECT * FROM {table_name} WHERE 1=0"
+            f"CREATE TABLE IF NOT EXISTS {shadow_q} AS SELECT * FROM {table_q} WHERE 1=0"
         )
         date_min = str(df_to_save[date_col].min())
         date_max = str(df_to_save[date_col].max())
         self.con.execute(
-            "DELETE FROM " + shadow_table +
-            " WHERE stock_code = ? AND period = ?"
-            " AND " + date_col + " >= ? AND " + date_col + " <= ?",
+            "DELETE FROM " + shadow_q + " WHERE stock_code = ? AND period = ?"
+            " AND " + date_col_q + " >= ? AND " + date_col_q + " <= ?",
             [stock_code, storage_period, date_min, date_max],
         )
-        shadow_columns = (
-            self.con.execute(f"DESCRIBE {shadow_table}").fetchdf()["column_name"].tolist()
-        )
+        shadow_columns = self.con.execute(f"DESCRIBE {shadow_q}").fetchdf()["column_name"].tolist()
         df_shadow = pd.DataFrame()
         for col in shadow_columns:
             df_shadow[col] = df_to_save[col] if col in df_to_save.columns else None
         self.con.register("df_shadow_temp", df_shadow)
-        self.con.execute(f"INSERT INTO {shadow_table} SELECT * FROM df_shadow_temp")
+        self.con.execute(f"INSERT INTO {shadow_q} SELECT * FROM df_shadow_temp")
         self.con.unregister("df_shadow_temp")
 
     def _save_ticks_to_duckdb(self, data: pd.DataFrame, stock_code: str) -> None:
@@ -4964,8 +8226,7 @@ class UnifiedDataInterface:
             date_max = str(df_to_save["datetime"].max())
             self.con.execute("BEGIN")
             self.con.execute(
-                "DELETE FROM stock_tick WHERE stock_code = ?"
-                " AND datetime >= ? AND datetime <= ?",
+                "DELETE FROM stock_tick WHERE stock_code = ? AND datetime >= ? AND datetime <= ?",
                 [stock_code, date_min, date_max],
             )
             table_columns = self._get_table_columns("stock_tick")
@@ -5045,7 +8306,9 @@ class UnifiedDataInterface:
                 actual_rows=0,
                 date_min="",
                 date_max="",
-                sample_json=self._build_quarantine_sample_json(data if isinstance(data, pd.DataFrame) else None),
+                sample_json=self._build_quarantine_sample_json(
+                    data if isinstance(data, pd.DataFrame) else None
+                ),
             )
             self._emit_data_quality_alert(
                 stock_code=stock_code,
@@ -5093,7 +8356,9 @@ class UnifiedDataInterface:
             ordered = pd.DataFrame()
             for col in table_columns:
                 ordered[col] = df_to_save[col] if col in df_to_save.columns else None
-            key_cols = [c for c in ["datetime", "stock_code", "price", "volume"] if c in ordered.columns]
+            key_cols = [
+                c for c in ["datetime", "stock_code", "price", "volume"] if c in ordered.columns
+            ]
             if key_cols:
                 ordered = ordered.drop_duplicates(subset=key_cols, keep="last")
             expected_rows = len(ordered)
@@ -5102,7 +8367,13 @@ class UnifiedDataInterface:
             self.con.unregister("df_tx_temp")
             self.con.execute("COMMIT")
             verify_ok, actual_rows = self._post_write_verify(
-                "stock_transaction", stock_code, "tick", "datetime", date_min, date_max, expected_rows
+                "stock_transaction",
+                stock_code,
+                "tick",
+                "datetime",
+                date_min,
+                date_max,
+                expected_rows,
             )
             self._record_write_audit(
                 table_name="stock_transaction",
@@ -5166,7 +8437,9 @@ class UnifiedDataInterface:
                 actual_rows=0,
                 date_min="",
                 date_max="",
-                sample_json=self._build_quarantine_sample_json(data if isinstance(data, pd.DataFrame) else None),
+                sample_json=self._build_quarantine_sample_json(
+                    data if isinstance(data, pd.DataFrame) else None
+                ),
             )
             self._emit_data_quality_alert(
                 stock_code=stock_code,
@@ -5199,14 +8472,14 @@ class UnifiedDataInterface:
             if "close_geometric_front" in data.columns:
                 # 使用等比前复权列
                 for col in ["open", "high", "low", "close"]:
-                    if f"_{col}_geometric_front" in data.columns:
-                        data[col] = data[f"_{col}_geometric_front"]
+                    if f"{col}_geometric_front" in data.columns:
+                        data[col] = data[f"{col}_geometric_front"]
         elif adjust == "geometric_back":
             if "close_geometric_back" in data.columns:
                 # 使用等比后复权列
                 for col in ["open", "high", "low", "close"]:
-                    if f"_{col}_geometric_back" in data.columns:
-                        data[col] = data[f"_{col}_geometric_back"]
+                    if f"{col}_geometric_back" in data.columns:
+                        data[col] = data[f"{col}_geometric_back"]
 
         return data
 
@@ -5246,10 +8519,17 @@ class UnifiedDataInterface:
         self, stock_code: str, start_date: str, end_date: str, aggregate_1m: bool = True
     ) -> bool:
         try:
-            from xtquant import xtdata
-        except Exception:
+
+            def _xt_tick():
+                from xtquant import xtdata
+
+                return self._read_tick_from_qmt(xtdata, stock_code, start_date, end_date)
+
+            df = self._run_xtdata_callable(_xt_tick)
+        except ImportError:
             return False
-        df = self._read_tick_from_qmt(xtdata, stock_code, start_date, end_date)
+        except Exception:
+            df = None
         if df is None or df.empty:
             return False
         self._save_ticks_to_duckdb(df, stock_code)
@@ -5272,10 +8552,17 @@ class UnifiedDataInterface:
         self, stock_code: str, start_date: str, end_date: str, aggregate_1m: bool = True
     ) -> tuple[bool, bool]:
         try:
-            from xtquant import xtdata
-        except Exception:
+
+            def _xt_txn():
+                from xtquant import xtdata
+
+                return self._read_transaction_from_qmt(xtdata, stock_code, start_date, end_date)
+
+            df, used_fallback = self._run_xtdata_callable(_xt_txn)
+        except ImportError:
             return False, False
-        df, used_fallback = self._read_transaction_from_qmt(xtdata, stock_code, start_date, end_date)
+        except Exception:
+            df, used_fallback = None, False
         if df is None or df.empty:
             return False, used_fallback
         self._save_transactions_to_duckdb(df, stock_code)
@@ -5309,6 +8596,7 @@ class UnifiedDataInterface:
 
             class _ConAdapter:
                 """将裸 duckdb 连接适配为 FactorStorage 的 execute/query 接口。"""
+
                 def __init__(self, con: Any) -> None:
                     self._con = con
 
@@ -5338,6 +8626,7 @@ class UnifiedDataInterface:
         """
         try:
             from data_manager.factor_registry import factor_registry
+
             return factor_registry.list_all()
         except Exception:
             self._logger.exception("list_factors 失败")
@@ -5437,8 +8726,8 @@ class UnifiedDataInterface:
         self,
         symbol: str,
         factor_name: str,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ) -> pd.Series:
         """
         从 DuckDB 加载指定因子序列。
@@ -5484,7 +8773,7 @@ class UnifiedDataInterface:
             )
             return -1
 
-    def list_stored_factors(self, symbol: Optional[str] = None) -> pd.DataFrame:
+    def list_stored_factors(self, symbol: str | None = None) -> pd.DataFrame:
         """
         查询 DuckDB 中已存储的因子汇总信息。
 
@@ -5517,7 +8806,7 @@ def get_stock_data(
     end_date: str,
     period: str = "1d",
     adjust: str = "none",
-    duckdb_path: Optional[str] = None,
+    duckdb_path: str | None = None,
 ) -> pd.DataFrame:
     """
     便捷函数：获取股票数据（统一入口）

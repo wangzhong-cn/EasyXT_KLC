@@ -16,6 +16,33 @@ if str(factor_platform_path) not in sys.path:
 # 本地模块 - 始终可用
 from data_manager.duckdb_connection_pool import DuckDBConnectionManager, resolve_duckdb_path
 from data_manager.unified_data_interface import UnifiedDataInterface
+from data_manager.market_storage_topology import (
+    MarketStorageTopology,
+    SQLitePrimaryMarketSource,
+    SQLitePrimaryMarketStore,
+    resolve_market_storage_topology,
+)
+from data_manager.session_profile_registry import (
+    ResolvedSessionProfile,
+    SessionProfileRegistry,
+    SessionProfileVersion,
+)
+from data_manager.period_registry import (
+    PeriodRegistry,
+    ResolvedPeriod,
+    build_period_runtime_contracts,
+)
+from data_manager.timestamp_contract import (
+    TIMESTAMP_CONTRACT_VERSION,
+    NORMALIZED_TIMEZONE,
+    normalize_timestamp_frame,
+    normalize_timestamp_scalar,
+    normalize_timestamp_series,
+)
+from data_manager.canonical_minute import (
+    CANONICAL_MINUTE_VERSION,
+    normalize_canonical_1m,
+)
 from data_manager.factor_registry import (
     FactorRegistry,
     FactorDefinition,
@@ -76,6 +103,23 @@ __all__ = [
     "DuckDBConnectionManager",
     "resolve_duckdb_path",
     "UnifiedDataInterface",
+    "MarketStorageTopology",
+    "SQLitePrimaryMarketSource",
+    "SQLitePrimaryMarketStore",
+    "resolve_market_storage_topology",
+    "ResolvedSessionProfile",
+    "SessionProfileRegistry",
+    "SessionProfileVersion",
+    "PeriodRegistry",
+    "ResolvedPeriod",
+    "build_period_runtime_contracts",
+    "TIMESTAMP_CONTRACT_VERSION",
+    "NORMALIZED_TIMEZONE",
+    "normalize_timestamp_frame",
+    "normalize_timestamp_scalar",
+    "normalize_timestamp_series",
+    "CANONICAL_MINUTE_VERSION",
+    "normalize_canonical_1m",
     "validate_environment",
     # 因子引擎
     "FactorRegistry",

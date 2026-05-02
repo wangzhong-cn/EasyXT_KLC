@@ -402,7 +402,7 @@ class MyWidget(ThreadLifecycleMixin, QWidget):
 
 ## 十、相关文档
 
-- [architecture_roadmap_direction2.md](./architecture_roadmap_direction2.md) — 全架构演进路线图（含硬约束）
+- [14_release_governance_controls.md](./14_release_governance_controls.md) — 发布冻结、L1/L2/L3 分级与回归深度
 - [04_development_standards.md](./04_development_standards.md) — 通用开发规范
 - `core/events.py` — 事件常量定义（含 `THREAD_FORCED_TERMINATE`）
 - `tests/test_trading_flow_integration.py` — `TestKLineWorkspaceExitStability` 类（验收测试参考实现）

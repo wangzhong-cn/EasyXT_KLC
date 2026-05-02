@@ -5,6 +5,8 @@
 智能缺失检测，只下载缺失的数据段
 """
 
+import logging
+import os
 import sys
 from pathlib import Path
 from typing import Callable, Optional
@@ -21,6 +23,15 @@ from data_manager.smart_data_detector import SmartDataDetector
 from data_manager.unified_data_interface import UnifiedDataInterface
 
 
+def _stdout_enabled_by_default() -> bool:
+    return str(os.environ.get("EASYXT_UNIVERSAL_IMPORTER_STDOUT", "0")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 class UniversalDataImporter:
     """
     通用数据导入器
@@ -34,7 +45,7 @@ class UniversalDataImporter:
     6. 断点续传
     """
 
-    def __init__(self, duckdb_path: Optional[str] = None):
+    def __init__(self, duckdb_path: Optional[str] = None, *, verbose: bool | None = None):
         """
         初始化通用导入器
 
@@ -43,15 +54,27 @@ class UniversalDataImporter:
         """
         from data_manager.duckdb_connection_pool import resolve_duckdb_path
 
+        self._logger = logging.getLogger(__name__)
+        self._stdout_enabled = _stdout_enabled_by_default() if verbose is None else bool(verbose)
         self.duckdb_path = resolve_duckdb_path(duckdb_path)
         self.interface = UnifiedDataInterface(duckdb_path=self.duckdb_path)
-        self.board_loader = BoardStocksLoader()
-        self.csv_importer = CSVImporter()
+        self.board_loader = BoardStocksLoader(verbose=self._stdout_enabled)
+        self.csv_importer = CSVImporter(verbose=self._stdout_enabled)
         self.detector = None
 
         # 回调函数
         self.progress_callback: Optional[Callable] = None
         self.status_callback: Optional[Callable] = None
+
+    def _emit(self, message: str, *, level: str = 'info', end: str = '\n'):
+        logger = getattr(self, '_logger', logging.getLogger(__name__))
+        log_method = getattr(logger, level, None)
+        if callable(log_method):
+            log_method('%s', message)
+        else:
+            logger.info('%s', message)
+        if getattr(self, '_stdout_enabled', _stdout_enabled_by_default()):
+            print(message, end=end)
 
     def connect(self):
         """连接数据库"""
@@ -84,19 +107,19 @@ class UniversalDataImporter:
         Returns:
             Dict: 导入结果统计
         """
-        print(f"\n{'='*80}")
-        print(f"板块股票数据导入: {board_name}")
-        print(f"{'='*80}")
+        self._emit(f"\n{'='*80}")
+        self._emit(f"板块股票数据导入: {board_name}")
+        self._emit(f"{'='*80}")
 
         # Step 1: 获取板块股票列表
-        print("\n步骤1: 获取板块股票列表...")
+        self._emit("\n步骤1: 获取板块股票列表...")
         stocks = self.board_loader.get_board_stocks(board_name)
 
         if not stocks:
-            print("[ERROR] 未获取到板块股票")
+            self._emit("[ERROR] 未获取到板块股票", level='warning')
             return {'success': False, 'error': '未获取到板块股票'}
 
-        print(f"[OK] 获取到 {len(stocks)} 只股票")
+        self._emit(f"[OK] 获取到 {len(stocks)} 只股票")
 
         # Step 2: 批量导入数据
         return self._import_stocks_batch(
@@ -128,19 +151,19 @@ class UniversalDataImporter:
         Returns:
             Dict: 导入结果统计
         """
-        print(f"\n{'='*80}")
-        print(f"CSV股票列表导入: {csv_path}")
-        print(f"{'='*80}")
+        self._emit(f"\n{'='*80}")
+        self._emit(f"CSV股票列表导入: {csv_path}")
+        self._emit(f"{'='*80}")
 
         # Step 1: 从CSV加载股票列表
-        print("\n步骤1: 从CSV加载股票列表...")
+        self._emit("\n步骤1: 从CSV加载股票列表...")
         stocks = self.csv_importer.load_stock_list(csv_path)
 
         if not stocks:
-            print("[ERROR] CSV中未找到股票代码")
+            self._emit("[ERROR] CSV中未找到股票代码", level='warning')
             return {'success': False, 'error': 'CSV中未找到股票代码'}
 
-        print(f"[OK] 加载 {len(stocks)} 只股票")
+        self._emit(f"[OK] 加载 {len(stocks)} 只股票")
 
         # Step 2: 批量导入数据
         return self._import_stocks_batch(
@@ -170,9 +193,9 @@ class UniversalDataImporter:
         Returns:
             Dict: 导入结果统计
         """
-        print(f"\n{'='*80}")
-        print(f"自定义股票列表导入: {len(stocks)} 只股票")
-        print(f"{'='*80}")
+        self._emit(f"\n{'='*80}")
+        self._emit(f"自定义股票列表导入: {len(stocks)} 只股票")
+        self._emit(f"{'='*80}")
 
         return self._import_stocks_batch(
             stocks=stocks,
@@ -219,12 +242,16 @@ class UniversalDataImporter:
             batch_num = i // batch_size + 1
             total_batches = (total_stocks + batch_size - 1) // batch_size
 
-            print(f"\n批次 {batch_num}/{total_batches} ({len(batch)} 只股票):")
+            self._emit(f"\n批次 {batch_num}/{total_batches} ({len(batch)} 只股票):")
 
             # 下载这批股票
             for j, stock in enumerate(batch, 1):
                 stock_index = i + j
-                print(f"  [{stock_index}/{total_stocks}] {stock}...", end='')
+                self._emit(
+                    f"  [{stock_index}/{total_stocks}] {stock}...",
+                    level='debug',
+                    end=''
+                )
 
                 try:
                     # 使用统一接口获取数据
@@ -237,7 +264,7 @@ class UniversalDataImporter:
                     )
 
                     if not data.empty:
-                        print(f"[OK] ({len(data)}条)")
+                        self._emit(f"[OK] ({len(data)}条)", level='debug')
                         results['success'] += 1
                         results['details'].append({
                             'stock': stock,
@@ -245,7 +272,7 @@ class UniversalDataImporter:
                             'count': len(data)
                         })
                     else:
-                        print("[SKIP] 无数据")
+                        self._emit("[SKIP] 无数据", level='debug')
                         results['skipped'] += 1
                         results['details'].append({
                             'stock': stock,
@@ -254,7 +281,7 @@ class UniversalDataImporter:
                         })
 
                 except Exception as e:
-                    print(f"[ERROR] {str(e)[:50]}")
+                    self._emit(f"[ERROR] {str(e)[:50]}", level='error')
                     results['failed'] += 1
                     results['details'].append({
                         'stock': stock,
@@ -263,13 +290,13 @@ class UniversalDataImporter:
                     })
 
         # 打印总结
-        print(f"\n{'='*80}")
-        print("导入完成！")
-        print(f"{'='*80}")
-        print(f"总计: {results['total']} 只")
-        print(f"成功: {results['success']} 只")
-        print(f"跳过: {results['skipped']} 只")
-        print(f"失败: {results['failed']} 只")
+        self._emit(f"\n{'='*80}")
+        self._emit("导入完成！")
+        self._emit(f"{'='*80}")
+        self._emit(f"总计: {results['total']} 只")
+        self._emit(f"成功: {results['success']} 只")
+        self._emit(f"跳过: {results['skipped']} 只")
+        self._emit(f"失败: {results['failed']} 只")
 
         return results
 
@@ -292,7 +319,7 @@ class UniversalDataImporter:
         Returns:
             DataFrame: 缺失数据报告
         """
-        print("\n检查数据完整性...")
+        self._emit("\n检查数据完整性...")
 
         if not self.detector:
             self.detector = SmartDataDetector()
@@ -302,19 +329,19 @@ class UniversalDataImporter:
         all_missing = []
         for stock in stocks:
             report = self.detector.detect_missing_data(stock, start_date, end_date)
-            if report['missing_days'] > 0:
+            if report['missing_count'] > 0:
                 all_missing.append({
                     'stock': stock,
-                    'missing_days': report['missing_days'],
-                    'missing_date_ranges': report['missing_date_ranges']
+                    'missing_days': report['missing_count'],
+                    'missing_date_ranges': report['missing_segments']
                 })
 
         if all_missing:
             df = pd.DataFrame(all_missing)
-            print(f"发现 {len(df)} 只股票存在缺失数据")
+            self._emit(f"发现 {len(df)} 只股票存在缺失数据")
             return df
         else:
-            print("所有股票数据完整")
+            self._emit("所有股票数据完整")
             return pd.DataFrame()
 
     def resume_import(self, checkpoint_file: str = 'import_checkpoint.json'):
@@ -325,7 +352,7 @@ class UniversalDataImporter:
             checkpoint_file: 检查点文件路径
         """
         # TODO: 实现断点续传功能
-        print("[INFO] 断点续传功能开发中...")
+        self._emit("[INFO] 断点续传功能开发中...")
 
 
 # 测试代码
@@ -334,7 +361,7 @@ if __name__ == "__main__":
     print("通用数据导入器测试")
     print("="*80)
 
-    importer = UniversalDataImporter()
+    importer = UniversalDataImporter(verbose=True)
     importer.connect()
 
     # 测试1：导入上证50

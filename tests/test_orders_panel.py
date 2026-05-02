@@ -34,8 +34,27 @@ def test_trades_model_columns() -> None:
 def test_orders_panel_refresh_and_emit(qapp) -> None:
     panel = OrdersPanel()
     panel._on_refresh()
+    # 演示数据已移除，_on_refresh 后委托/成交列表为空（等待 QMT 真实数据注入）
+    assert panel._orders_model.rowCount() == 0
+    assert panel._trades_model.rowCount() == 0
+
+    # 通过 update_orders 注入测试数据后，验证双击信号
+    orders = [
+        {
+            "order_id": 1,
+            "time": "09:30:00",
+            "code": "600519.SH",
+            "name": "贵州茅台",
+            "order_type": "买入",
+            "volume": 10,
+            "price": 1700.0,
+            "traded_volume": 10,
+            "status": "已成",
+            "remark": "",
+        }
+    ]
+    panel.update_orders(orders, [])
     assert panel._orders_model.rowCount() > 0
-    assert panel._trades_model.rowCount() > 0
     emitted: list[str] = []
     panel.symbol_clicked.connect(lambda s: emitted.append(s))
     idx = panel._orders_model.index(0, 0)

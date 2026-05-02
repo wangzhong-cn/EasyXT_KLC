@@ -12,18 +12,16 @@ FastAPI 中台服务单元测试。
 
 from __future__ import annotations
 
+import os
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-
-# ---------------------------------------------------------------------------
-# 导入被测模块
-# ---------------------------------------------------------------------------
-
 from core.api_server import app
+from core.state_store.system_read_models import FrontendEventsReadModel
+from core.state_store.system_status import SystemStateSnapshot
 
 client = TestClient(app, raise_server_exceptions=True)
 
@@ -154,6 +152,15 @@ class TestDatasourceHealth:
         mock_iface.get_step6_validation_metrics.return_value = {
             "total": 10, "sampled": 10, "skipped": 0, "hard_failed": 1, "quarantined": 1, "sample_rate": 1.0, "hard_fail_rate": 0.1
         }
+        mock_iface.get_publish_gate_summary.return_value = {
+            "total": 3,
+            "golden": 1,
+            "partial_trust": 2,
+            "degraded": 0,
+            "unknown": 0,
+            "replayable_true": 3,
+            "lineage_complete_true": 3,
+        }
         mock_iface._cb_state = {"open": False, "fail_count": 0}
         with patch("core.api_server._get_datasource_health_interface", return_value=mock_iface):
             resp = client.get("/health/datasource")
@@ -165,6 +172,7 @@ class TestDatasourceHealth:
         assert "dead_letter_ratio" in body["checks"]["quarantine"]
         assert "data_quality_incident" in body["checks"]
         assert "step6_validation" in body["checks"]
+        assert "publish_gate" in body["checks"]
         assert "thresholds" in body["checks"]
         assert "server_time" in body
 
@@ -188,6 +196,7 @@ class TestDatasourceHealth:
         }
         mock_iface.get_data_quality_incident_counts.return_value = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0}
         mock_iface.get_step6_validation_metrics.return_value = {"total": 1, "sampled": 1, "skipped": 0, "hard_failed": 0, "quarantined": 0, "sample_rate": 1.0, "hard_fail_rate": 0.0}
+        mock_iface.get_publish_gate_summary.return_value = {"total": 1, "golden": 0, "partial_trust": 0, "degraded": 1, "unknown": 0}
         mock_iface._cb_state = {"open": False, "fail_count": 0}
         monkeypatch.setenv("EASYXT_QUARANTINE_DEADLETTER_WARN", "3")
         monkeypatch.setenv("EASYXT_QUARANTINE_DEADLETTER_RATIO_WARN", "0.4")
@@ -195,6 +204,300 @@ class TestDatasourceHealth:
             resp = client.get("/health/datasource")
         assert resp.status_code == 200
         assert resp.json()["status"] == "degraded"
+
+
+class TestIngestionGateStatus:
+    def test_returns_gate_status_payload(self, _mock_registry):
+        mock_iface = MagicMock()
+        mock_iface.get_latest_gate_status.return_value = {
+            "stock_code": "000001.SZ",
+            "period": "1m",
+            "quality_grade": "partial_trust",
+            "replayable": True,
+            "lineage_complete": True,
+            "tick_verified": False,
+        }
+        with patch("core.api_server._get_datasource_health_interface", return_value=mock_iface):
+            resp = client.get("/api/v1/data-quality/ingestion-status?symbol=000001.SZ&period=1m")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["stock_code"] == "000001.SZ"
+        assert body["quality_grade"] == "partial_trust"
+        assert body["replayable"] is True
+        assert body["tick_verified"] is False
+        assert "server_time" in body
+
+    def test_returns_404_when_gate_status_missing(self, _mock_registry):
+        mock_iface = MagicMock()
+        mock_iface.get_latest_gate_status.return_value = {}
+        with patch("core.api_server._get_datasource_health_interface", return_value=mock_iface):
+            resp = client.get("/api/v1/data-quality/ingestion-status?symbol=000001.SZ&period=1m")
+        assert resp.status_code == 404
+
+
+class TestReceiptHistory:
+    def test_returns_receipt_history_payload(self, _mock_registry):
+        mock_iface = MagicMock()
+        mock_iface.get_receipt_history.return_value = [
+            {
+                "receipt_id": "r-1",
+                "stock_code": "000001.SZ",
+                "period": "1d",
+                "status": "queued",
+            }
+        ]
+        with patch("core.api_server._get_datasource_health_interface", return_value=mock_iface):
+            resp = client.get("/api/v1/data-quality/receipts?receipt_type=repair&limit=5")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["receipt_type"] == "repair"
+        assert body["returned"] == 1
+        assert body["items"][0]["receipt_id"] == "r-1"
+
+
+class TestReceiptTimeline:
+    def test_returns_receipt_timeline_payload(self, _mock_registry):
+        mock_iface = MagicMock()
+        mock_iface.get_receipt_timeline.return_value = [
+            {
+                "receipt_type": "publish_gate",
+                "receipt_id": "g-1",
+                "stock_code": "000001.SZ",
+                "period": "1m",
+                "gate_reject_reason": "tick_mismatch",
+            }
+        ]
+        with patch("core.api_server._get_datasource_health_interface", return_value=mock_iface):
+            resp = client.get("/api/v1/data-quality/receipt-timeline?symbol=000001.SZ&period=1m&limit=5")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["returned"] == 1
+        assert body["items"][0]["gate_reject_reason"] == "tick_mismatch"
+        assert body["filters"]["symbol"] == "000001.SZ"
+        assert body["filters"]["severity"] == ""
+
+    def test_forwards_timeline_filters(self, _mock_registry):
+        mock_iface = MagicMock()
+        mock_iface.get_receipt_timeline.return_value = []
+        with patch("core.api_server._get_datasource_health_interface", return_value=mock_iface):
+            resp = client.get(
+                "/api/v1/data-quality/receipt-timeline"
+                "?symbol=000001.SZ&period=1m&receipt_type=publish_gate"
+                "&gate_reject_reason=tick_mismatch&severity=warning&lookback_days=14&limit=5"
+            )
+        assert resp.status_code == 200
+        mock_iface.get_receipt_timeline.assert_called_once_with(
+            symbol="000001.SZ",
+            period="1m",
+            lineage_anchor="",
+            receipt_type="publish_gate",
+            gate_reject_reason="tick_mismatch",
+            severity="warning",
+            lookback_days=14,
+            limit=5,
+        )
+
+
+class TestLineageAnchorDetail:
+    def test_returns_lineage_anchor_detail(self, _mock_registry):
+        mock_iface = MagicMock()
+        mock_iface.get_lineage_anchor_detail.return_value = {
+            "lineage_anchor": "anchor-1",
+            "timeline": [{"receipt_id": "g-1"}],
+            "traceability_records": [{"stock_code": "000001.SZ", "period": "1m"}],
+        }
+        with patch("core.api_server._get_datasource_health_interface", return_value=mock_iface):
+            resp = client.get("/api/v1/data-quality/lineage-anchor-detail?lineage_anchor=anchor-1")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["lineage_anchor"] == "anchor-1"
+        assert body["timeline"][0]["receipt_id"] == "g-1"
+        assert body["traceability_records"][0]["stock_code"] == "000001.SZ"
+
+
+class TestGovernanceSlaThresholds:
+    def test_get_returns_server_threshold_overrides(self, _mock_registry):
+        mock_iface = MagicMock()
+        mock_iface.get_sla_alert_threshold_panel_with_overrides.return_value = {"status": "ok"}
+        with (
+            patch("core.api_server._get_datasource_health_interface", return_value=mock_iface),
+            patch("core.api_server._load_governance_threshold_bundle", return_value={"overrides": {"monitor": 7}, "config_version": 3, "updated_by": "ops", "note": "weekly review"}),
+        ):
+            resp = client.get("/api/v1/data-governance/sla-thresholds")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["overrides"]["monitor"] == 7
+        assert body["config_version"] == 3
+        assert body["updated_by"] == "ops"
+        assert body["note"] == "weekly review"
+        mock_iface.get_sla_alert_threshold_panel_with_overrides.assert_called_once_with({"monitor": 7})
+
+    def test_patch_persists_server_threshold_overrides(self, _mock_registry):
+        mock_iface = MagicMock()
+        mock_iface.get_sla_alert_threshold_panel_with_overrides.return_value = {"status": "warning"}
+        with (
+            patch("core.api_server._get_datasource_health_interface", return_value=mock_iface),
+            patch("core.api_server._save_governance_threshold_bundle", return_value={"overrides": {"monitor": 9}, "config_version": 4, "updated_by": "alice", "note": "tighten"}),
+            patch("core.api_server._append_governance_action_audit", return_value={"event_id": "evt-1"}),
+        ):
+            resp = client.patch("/api/v1/data-governance/sla-thresholds", json={"overrides": {"monitor": 9}, "operator": "alice", "note": "tighten"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["overrides"]["monitor"] == 9
+        assert body["config_version"] == 4
+        assert body["updated_by"] == "alice"
+        assert body["note"] == "tighten"
+        assert body["audit_record"]["event_id"] == "evt-1"
+        mock_iface.get_sla_alert_threshold_panel_with_overrides.assert_called_once_with({"monitor": 9})
+
+
+class TestGovernanceActionAudit:
+    def test_get_returns_recent_action_audit(self, _mock_registry):
+        with patch("core.api_server._read_governance_action_audit", return_value=[{"event_id": "evt-1"}]):
+            resp = client.get("/api/v1/data-governance/action-audit?limit=5&stock_code=000001.SZ&period=1m")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["returned"] == 1
+        assert body["records"][0]["event_id"] == "evt-1"
+        assert body["filters"]["stock_code"] == "000001.SZ"
+        assert body["filters"]["period"] == "1m"
+
+    def test_post_appends_action_audit(self, _mock_registry):
+        with patch("core.api_server._append_governance_action_audit", return_value={"event_id": "evt-2"}):
+            resp = client.post(
+                "/api/v1/data-governance/action-audit",
+                json={"action_id": "open_traceability", "action_type": "open_traceability", "payload": {"stock_code": "000001.SZ"}},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["record"]["event_id"] == "evt-2"
+
+
+class TestLateEventReplayTrigger:
+    def test_runs_targeted_late_event_replay(self, _mock_registry):
+        mock_iface = MagicMock()
+        mock_iface.run_late_event_replay.return_value = {"processed": 1, "succeeded": 1, "failed": 0, "dead_letter": 0}
+        with (
+            patch("core.api_server._get_datasource_health_interface", return_value=mock_iface),
+            patch("core.api_server._append_governance_action_audit", return_value={"event_id": "evt-replay"}),
+        ):
+            resp = client.post("/api/v1/data-quality/late-event-replay?symbol=000001.SZ&period=1m&limit=5&max_retries=2")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["result"]["succeeded"] == 1
+        assert body["audit_record"]["event_id"] == "evt-replay"
+        mock_iface.run_late_event_replay.assert_called_once_with(
+            limit=5,
+            max_retries=2,
+            reason_regex="(late|out_of_order|watermark|stale|reorder)",
+            stock_code="000001.SZ",
+            period="1m",
+        )
+
+
+class TestDataGovernanceOverview:
+    def test_returns_receipt_stats_in_overview(self, _mock_registry):
+        controller = MagicMock()
+        controller.get_pipeline_status.return_value = {"overall_healthy": True, "checks": {}}
+        controller.get_routing_metrics.return_value = {"sources": {}, "total_sources": 0, "healthy_sources": 0}
+        controller.get_duckdb_summary.return_value = {"healthy": True}
+        controller.get_all_env_config.return_value = {"overall_valid": True, "summary": {"configured": 1, "total": 1, "missing_required": 0}}
+        controller.get_realtime_pipeline_info.return_value = {"connected": True, "degraded": False}
+        iface = MagicMock()
+        iface.get_receipt_store_summary.return_value = {"publish_gate": 4, "repair": 2, "replay": 1}
+        iface.get_publish_gate_summary.return_value = {"degraded": 1, "golden": 2, "reject_severity_counts": {"critical": 1, "warning": 2}}
+        iface.get_gate_reject_reason_summary.return_value = {"tick_mismatch": 1, "passed": 2}
+        iface.get_gate_reject_severity_summary.return_value = {"critical": 0, "warning": 1, "ok": 2}
+        iface.get_gate_sla_impact_summary.return_value = {"gate_block": 0, "monitor": 1, "within_sla": 2}
+        iface.get_sla_alert_threshold_panel_with_overrides.return_value = {
+            "status": "warning",
+            "thresholds": {"monitor": 5},
+            "current": {"monitor": 1},
+            "breaches": {"monitor": False},
+        }
+        iface.get_receipt_timeline.return_value = [{"receipt_type": "publish_gate", "receipt_id": "g-1"}]
+        iface.get_gate_trend_summary.return_value = [{"trade_day": "2026-04-02", "total": 3}]
+        iface.get_gate_dimension_trend_summary.side_effect = [
+            [{"trade_day": "2026-04-02", "dimension_value": "000001.SZ", "dimension": "symbol"}],
+            [{"trade_day": "2026-04-02", "dimension_value": "1m", "dimension": "period"}],
+        ]
+        with (
+            patch("core.api_server._get_data_governance_controller", return_value=controller),
+            patch("core.api_server._get_datasource_health_interface", return_value=iface),
+            patch("core.api_server._load_governance_threshold_bundle", return_value={"overrides": {"monitor": 6}, "config_version": 5, "updated_by": "ops", "note": "review"}),
+            patch("core.api_server._get_governance_action_rulebook_bundle", return_value={"rules": [{"rule_id": "tick_mismatch_repair"}], "meta": {"path": "config/rulebook.json", "version": "2026.04.02.1"}, "validation": {"valid": True, "errors": [], "rule_count": 1, "required_fields": ["rule_id"]}}),
+            patch("core.api_server._describe_config_file", return_value={"path": "config/mock.json", "exists": True}),
+            patch("core.api_server._read_governance_action_audit", return_value=[{"event_id": "evt-1"}]),
+            patch("core.api_server.datasource_health_check", return_value={"status": "ok"}),
+            patch("core.api_server.sla_health_check", return_value={"status": "ok"}),
+        ):
+            resp = client.get("/api/v1/data-governance/overview?trend_days=14")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["receipts"]["store"]["repair"] == 2
+        assert body["receipts"]["gate_reject_reasons"]["tick_mismatch"] == 1
+        assert body["receipts"]["gate_reject_severity"]["warning"] == 1
+        assert body["receipts"]["gate_sla_impact"]["monitor"] == 1
+        assert body["receipts"]["sla_threshold_panel"]["status"] == "warning"
+        assert body["receipts"]["sla_threshold_overrides"]["monitor"] == 6
+        assert body["receipts"]["sla_threshold_version"] == 5
+        assert body["receipts"]["sla_threshold_updated_by"] == "ops"
+        assert body["receipts"]["sla_threshold_config_meta"]["path"] == "config/mock.json"
+        assert body["receipts"]["action_rulebook"][0]["rule_id"] == "tick_mismatch_repair"
+        assert body["receipts"]["action_rulebook_meta"]["path"] == "config/rulebook.json"
+        assert body["receipts"]["action_rulebook_validation"]["valid"] is True
+        assert body["receipts"]["action_recommendations"][0]["action_id"]
+        assert body["receipts"]["action_audit_recent"][0]["event_id"] == "evt-1"
+        assert body["receipts"]["trend_7d"][0]["trade_day"] == "2026-04-02"
+        assert body["receipts"]["trend_by_symbol_7d"][0]["dimension"] == "symbol"
+        assert body["receipts"]["trend_by_period_7d"][0]["dimension"] == "period"
+        assert body["summary"]["gate_degraded"] == 1
+        assert body["summary"]["gate_reject_total"] == 1
+        assert body["summary"]["gate_warning"] == 1
+        assert body["summary"]["sla_monitor"] == 1
+        assert body["filters"]["trend_days"] == 14
+        iface.get_receipt_timeline.assert_called_once_with(limit=12, lookback_days=14)
+        iface.get_gate_trend_summary.assert_called_once_with(days=14)
+        iface.get_gate_dimension_trend_summary.assert_any_call(days=14, dimension="symbol", limit=5)
+        iface.get_gate_dimension_trend_summary.assert_any_call(days=14, dimension="period", limit=5)
+        iface.get_sla_alert_threshold_panel_with_overrides.assert_called_once_with({"monitor": 6})
+
+
+class TestDataGovernanceSnapshotExport:
+    def test_exports_snapshot_with_overview_and_audit(self, _mock_registry):
+        with patch(
+            "core.api_server._build_governance_snapshot_payload",
+            return_value={
+                "snapshot_name": "snap-1",
+                "generated_at": "2026-04-02T00:00:00Z",
+                "overview": {"summary": {"datasource_status": "ok"}},
+                "action_audit": [{"event_id": "evt-1", "action_type": "trigger_repair"}],
+                "config_sources": {"sla_thresholds": {"path": "config/mock.json", "exists": True}},
+                "server_time": 1,
+            },
+        ):
+            resp = client.get("/api/v1/data-governance/export-snapshot?trend_days=14&audit_limit=5")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["overview"]["summary"]["datasource_status"] == "ok"
+        assert body["action_audit"][0]["event_id"] == "evt-1"
+        assert body["config_sources"]["sla_thresholds"]["path"] == "config/mock.json"
+
+    def test_exports_snapshot_as_csv(self, _mock_registry):
+        with patch(
+            "core.api_server._build_governance_snapshot_payload",
+            return_value={
+                "snapshot_name": "snap-2",
+                "generated_at": "2026-04-02T00:00:00Z",
+                "overview": {"summary": {"datasource_status": "ok"}},
+                "action_audit": [{"event_id": "evt-1", "event_time": "now", "action_type": "trigger_repair", "stock_code": "000001.SZ", "period": "1m", "detail": "ok"}],
+                "config_sources": {},
+                "server_time": 1,
+            },
+        ):
+            resp = client.get("/api/v1/data-governance/export-snapshot?export_format=csv")
+        assert resp.status_code == 200
+        assert "text/csv" in resp.headers["content-type"]
+        assert "summary,datasource_status,ok" in resp.text
 
 
 class TestSlaHealth:
@@ -259,6 +562,93 @@ class TestSlaHealth:
         body = resp.json()
         assert body["status"] == "degraded"
         assert "error" in body
+
+
+class TestSystemStateStatus:
+    def test_returns_system_state_snapshot_payload(self, _mock_registry):
+        snapshot = SystemStateSnapshot(
+            state_root="d:/EasyXT_KLC/runtime/state",
+            catalog_path="d:/EasyXT_KLC/runtime/state/catalog/shard_catalog.db",
+            sqlite_logical_seq=12,
+            active_shard_id="frontend_events:2026-03",
+            active_shard_count=2,
+            duckdb_shadow_version="shadow-0012",
+            sync_status="ready",
+            last_good_version="shadow-0011",
+            shadow_failed_stage="publish_shadow",
+            shadow_error="checksum mismatch",
+            backup_last_success_at="2026-03-31T10:00:00+00:00",
+            shadow_manifest_path="d:/EasyXT_KLC/runtime/state/duckdb_shadow/current/manifest.json",
+            federation_attach_budget=8,
+            federation_executor_ready=True,
+        )
+        with patch("core.state_store.system_status.get_system_state_snapshot", return_value=snapshot):
+            resp = client.get("/api/v1/system/state-status")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["sqlite_logical_seq"] == 12
+        assert body["active_shard_id"] == "frontend_events:2026-03"
+        assert body["duckdb_shadow_version"] == "shadow-0012"
+        assert body["sync_status"] == "ready"
+        assert body["last_good_version"] == "shadow-0011"
+        assert body["shadow_failed_stage"] == "publish_shadow"
+        assert body["shadow_error"] == "checksum mismatch"
+        assert body["federation_attach_budget"] == 8
+        assert body["federation_executor_ready"] is True
+        assert "server_time" in body
+
+    def test_returns_500_when_system_state_snapshot_fails(self, _mock_registry):
+        with patch("core.state_store.system_status.get_system_state_snapshot", side_effect=RuntimeError("boom")):
+            resp = client.get("/api/v1/system/state-status")
+
+        assert resp.status_code == 500
+        assert "系统状态查询失败" in resp.json()["detail"]
+
+
+class TestSystemFrontendEvents:
+    def test_returns_frontend_events_from_federation_read_model(self, _mock_registry):
+        payload = FrontendEventsReadModel(
+            configured=True,
+            family_registered=True,
+            state_root="d:/EasyXT_KLC/runtime/state",
+            source="federation_executor",
+            items=[
+                {
+                    "event_id": "evt-1",
+                    "event_ts": "2026-03-31T10:00:00+00:00",
+                    "event_type": "shell_started",
+                    "payload": {"route": "system"},
+                    "raw_payload_json": '{"route":"system"}',
+                }
+            ],
+            returned=1,
+            latest_logical_seq=12,
+            attached_shards=2,
+        )
+        with patch("core.state_store.system_read_models.read_frontend_events_read_model", return_value=payload):
+            resp = client.get("/api/v1/system/frontend-events?limit=8&event_type=shell_started")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["configured"] is True
+        assert body["family_registered"] is True
+        assert body["returned"] == 1
+        assert body["items"][0]["event_type"] == "shell_started"
+        assert body["latest_logical_seq"] == 12
+        assert body["attached_shards"] == 2
+        assert body["filters"]["limit"] == 8
+        assert body["filters"]["event_type"] == "shell_started"
+
+    def test_returns_500_when_frontend_events_read_model_fails(self, _mock_registry):
+        with patch(
+            "core.state_store.system_read_models.read_frontend_events_read_model",
+            side_effect=RuntimeError("boom"),
+        ):
+            resp = client.get("/api/v1/system/frontend-events")
+
+        assert resp.status_code == 500
+        assert "系统事件查询失败" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -644,3 +1034,22 @@ class TestSubscription:
             resp = client.get("/api/v1/market/subscriptions")
         assert resp.status_code == 200
         assert resp.json()["subscriptions"] == []
+
+
+class TestIngestTickDiagLogging:
+    def test_ingest_tick_from_thread_diag_disabled_by_default(self):
+        from core.api_server import ingest_tick_from_thread
+
+        with patch.dict(os.environ, {}, clear=False):
+            with patch("core.api_server.log.warning") as mock_warning:
+                ingest_tick_from_thread("000001.SZ", {"price": 10.5, "source": "qmt_live"})
+        mock_warning.assert_not_called()
+
+    def test_ingest_tick_from_thread_diag_enabled_via_env(self):
+        from core.api_server import ingest_tick_from_thread
+
+        with patch.dict(os.environ, {"EASYXT_QMT_DIAG": "1"}, clear=False):
+            with patch("core.api_server.log.warning") as mock_warning:
+                ingest_tick_from_thread("000001.SZ", {"price": 10.5, "source": "qmt_live"})
+        mock_warning.assert_called_once()
+        assert "[DIAG] ingest_tick_from_thread" in str(mock_warning.call_args.args[0])

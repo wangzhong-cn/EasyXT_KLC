@@ -211,9 +211,9 @@
       "settings_comment": "旧版 settings 节点映射（建议逐步合并到新的 settings）",
       "account": {
         "account_comment": "旧版账户字段映射",
-        "account_id": "39020958",
+        "account_id": "test1101",
         "account_id_comment": "交易账户ID（旧版映射）",
-        "qmt_path": "D:\\\\国金QMT交易端模拟\\\\userdata_mini",
+        "qmt_path": "D:\\\\申万宏源策略量化交易终端\\\\userdata_mini",
         "qmt_path_comment": "QMT路径（旧版映射）"
       }
     }

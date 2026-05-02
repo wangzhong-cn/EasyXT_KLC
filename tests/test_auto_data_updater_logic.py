@@ -714,24 +714,49 @@ class TestModuleLevelHelpers:
 
     def test_run_cross_source_consistency_check_handles_exception(self):
         from data_manager.auto_data_updater import _run_cross_source_consistency_check
-        with patch('tools.check_cross_source_consistency.run_check',
-                   side_effect=RuntimeError("check failed")):
+        # 让 DuckDB 连接池抛异常，验证外层 try/except 正常兜底
+        with patch('data_manager.duckdb_connection_pool.get_db_manager',
+                   side_effect=RuntimeError("no connection")):
             _run_cross_source_consistency_check()  # Should not raise
 
     def test_run_cross_source_consistency_check_logs_alert_on_bad_data(self):
+        import pandas as pd
         from data_manager.auto_data_updater import _run_cross_source_consistency_check
-        mock_report = {'alert': True, 'bad': 5, 'checked': 20, 'details': [
-            {'code': 'A'}, {'code': 'B'}
-        ]}
-        with patch('tools.check_cross_source_consistency.run_check', return_value=mock_report), \
+        mock_mgr = MagicMock()
+        mock_mgr.execute_read_query.return_value = pd.DataFrame(
+            {'stock_code': [f'{i:06d}.SH' for i in range(20)]}
+        )
+        mock_ctrl = MagicMock()
+        # 所有标的均超偏差阈值 → alert=True → logger.error
+        mock_ctrl.cross_validate_sources.return_value = {
+            'consistent': False, 'max_diff_pct': 5.0, 'error': None,
+            'akshare_rows': 60, 'duckdb_rows': 60, 'compared_rows': 60,
+            'consistency_rate': 0.8,
+        }
+        with patch('data_manager.duckdb_connection_pool.get_db_manager', return_value=mock_mgr), \
+             patch('data_manager.duckdb_connection_pool.resolve_duckdb_path', return_value=':memory:'), \
+             patch('gui_app.data_manager_controller.DataManagerController', return_value=mock_ctrl), \
              patch('data_manager.auto_data_updater.logger') as mock_logger:
             _run_cross_source_consistency_check()
         mock_logger.error.assert_called_once()
 
     def test_run_cross_source_consistency_check_logs_info_on_pass(self):
+        import pandas as pd
         from data_manager.auto_data_updater import _run_cross_source_consistency_check
-        mock_report = {'alert': False, 'bad': 0, 'checked': 20, 'details': []}
-        with patch('tools.check_cross_source_consistency.run_check', return_value=mock_report), \
+        mock_mgr = MagicMock()
+        mock_mgr.execute_read_query.return_value = pd.DataFrame(
+            {'stock_code': [f'{i:06d}.SH' for i in range(20)]}
+        )
+        mock_ctrl = MagicMock()
+        # 所有标的数据一致 → alert=False → logger.info
+        mock_ctrl.cross_validate_sources.return_value = {
+            'consistent': True, 'max_diff_pct': 0.1, 'error': None,
+            'akshare_rows': 60, 'duckdb_rows': 60, 'compared_rows': 60,
+            'consistency_rate': 1.0,
+        }
+        with patch('data_manager.duckdb_connection_pool.get_db_manager', return_value=mock_mgr), \
+             patch('data_manager.duckdb_connection_pool.resolve_duckdb_path', return_value=':memory:'), \
+             patch('gui_app.data_manager_controller.DataManagerController', return_value=mock_ctrl), \
              patch('data_manager.auto_data_updater.logger') as mock_logger:
             _run_cross_source_consistency_check()
         mock_logger.info.assert_called_once()
@@ -844,7 +869,9 @@ class TestGetListingDateExceptionPaths:
         mock_iface = MagicMock()
         mock_iface.con = mock_con
         updater.interface = mock_iface
-        result = updater.get_listing_date('000001.SZ')
+        # 同时屏蔽 XTQuant，确保测试路径隔离到 DuckDB fallback 而不依赖本地连接
+        with patch.dict(sys.modules, {'xtquant': None, 'xtquant.xtdata': None}):
+            result = updater.get_listing_date('000001.SZ')
         assert result == '1990-01-01'
 
 
@@ -972,6 +999,35 @@ class TestBulkDownloadSignalBusFails:
             result = updater.bulk_download(
                 stock_codes=['000001.SZ'], periods=['1d'])
         assert result['total_stocks'] == 1
+
+    def test_bulk_download_progress_event_emitted(self):
+        """BULK_DOWNLOAD_PROGRESS 每下载一只股票广播一次到 signal_bus。"""
+        updater = self._make_updater()
+        updater.interface = MagicMock()
+        mock_sb = MagicMock()
+        mock_signal_bus_mod = MagicMock(signal_bus=mock_sb)
+        mock_events = MagicMock()
+        mock_events.BULK_DOWNLOAD_PROGRESS = "bulk_download_progress"
+        mock_events_mod = MagicMock(Events=mock_events)
+        with patch.object(updater, 'update_all_periods_for_stock', return_value={
+            'stock_code': '000001.SZ', 'success_periods': 1,
+            'total_records': 5, 'periods': {}
+        }), \
+        patch.dict(sys.modules, {
+            'core.signal_bus': mock_signal_bus_mod,
+            'core.events': mock_events_mod,
+        }):
+            updater.bulk_download(stock_codes=['000001.SZ'], periods=['1d'])
+        # 至少有一次 emit 调用以 BULK_DOWNLOAD_PROGRESS 为第一参数
+        progress_calls = [
+            c for c in mock_sb.emit.call_args_list
+            if c.args and c.args[0] == "bulk_download_progress"
+        ]
+        assert len(progress_calls) >= 1
+        call_kw = progress_calls[0].kwargs
+        assert call_kw.get("current") == 1
+        assert call_kw.get("total") == 1
+        assert call_kw.get("stock_code") == "000001.SZ"
 
 
 class TestSaveCheckpointException:

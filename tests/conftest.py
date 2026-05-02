@@ -1,8 +1,79 @@
 import os
 import sys
+from functools import lru_cache
+from pathlib import Path
 
 import pytest
-from PyQt5.QtWidgets import QApplication
+
+from core.xtquant_import import import_xtdata_module, import_xtquant_module
+
+
+_QT_COLLECTION_HINTS = (
+    "from PyQt5",
+    "import PyQt5",
+    "qtbot",
+    "qapp",
+    "pytest.mark.gui",
+    "pytestmark = pytest.mark.gui",
+    "from gui_app.widgets",
+    "import gui_app.widgets",
+    "from gui_app.main_window",
+    "import gui_app.main_window",
+    "from gui_app.trading_interface_simple",
+    "import gui_app.trading_interface_simple",
+    "from gui_app.enhanced",
+    "import gui_app.enhanced",
+    "from gui_app.theme",
+    "import gui_app.theme",
+    "from gui_app.data_manager_controller",
+    "import gui_app.data_manager_controller",
+    "from gui_app.backtest.engine_status_ui",
+    "import gui_app.backtest.engine_status_ui",
+)
+
+
+@lru_cache(maxsize=1)
+def _get_qapplication_type():
+    try:
+        from PyQt5.QtWidgets import QApplication as _QApplication
+    except ImportError:
+        return None
+    return _QApplication
+
+
+PYQT5_AVAILABLE = _get_qapplication_type() is not None
+
+
+def _test_file_requires_qt(path: Path) -> bool:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        try:
+            content = path.read_text(encoding="utf-8-sig")
+        except OSError:
+            return False
+    except OSError:
+        return False
+    return any(hint in content for hint in _QT_COLLECTION_HINTS)
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config):  # noqa: ARG001
+    """Qt 不可用时，在收集阶段提前忽略 Qt 相关测试文件。
+
+    目的：允许 `.venv` 这类仅安装非 GUI 依赖的环境先跑纯 Python / 数据层测试，
+    而不是在导入 `tests/conftest.py` 或 Qt 测试模块时直接因 `PyQt5` 缺失而整场失败。
+    """
+    if PYQT5_AVAILABLE:
+        return None
+
+    path = Path(str(collection_path))
+    if path.name == "conftest.py" or path.suffix != ".py":
+        return None
+    if "tests" not in path.parts:
+        return None
+    if _test_file_requires_qt(path):
+        return True
+    return None
 
 # ── DuckDB checkpoint daemon 线程防崩溃 ───────────────────────────────────────
 # 必须在任何 DuckDBConnectionManager 被实例化之前设置，
@@ -59,17 +130,20 @@ except Exception:
 # package with a plain types.ModuleType stub (which has no __path__ and
 # breaks "import xtquant.xtconstant" in later tests).
 try:
-    import xtquant  # noqa: F401
-    import xtquant.xtdata  # noqa: F401
-    import xtquant.xtconstant  # noqa: F401
-    import xtquant.xttype  # noqa: F401
-    import xtquant.xttrader  # noqa: F401
+    import_xtquant_module("xtquant")
+    import_xtdata_module()
+    import_xtquant_module("xtquant.xtconstant")
+    import_xtquant_module("xtquant.xttype")
+    import_xtquant_module("xtquant.xttrader")
 except Exception:
     pass
 
 
 @pytest.fixture(scope="session")
 def qapp():
+    QApplication = _get_qapplication_type()
+    if QApplication is None:
+        pytest.skip("PyQt5 未安装，跳过依赖 Qt 的测试")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     if app is None:
@@ -175,27 +249,56 @@ def _cleanup_duckdb_checkpoint_threads():
     # ── 步骤 3：停止所有仍在运行的 Qt QThread ────────────────────────────────
     # monkeypatch 的 wait 覆盖可能导致 stuck 线程未被真正等待，此处兜底清理
     # 避免 Python 解释器退出时 GC QThread 对象触发 "Destroyed while thread is running"
+    # 使用并行策略：先全部发 quit/stop，再用共享 deadline 轮询，最后批量 terminate
     try:
         from PyQt5.QtCore import QThread
         import gc
+        import time as _t
         gc.collect()
+        running_threads = []
         for obj in gc.get_objects():
             try:
                 if not isinstance(obj, QThread):
                     continue
                 if not obj.isRunning():
                     continue
+                running_threads.append(obj)
                 print(f"\n[conftest cleanup] Found running QThread: {type(obj).__name__}", flush=True)
                 # _WsMarketQuoteWorker 使用 threading.Event 停止，不响应 quit()
                 if hasattr(obj, "stop") and callable(obj.stop):
-                    obj.stop()
-                else:
+                    try:
+                        obj.stop()
+                    except Exception:
+                        pass
+                try:
+                    obj.requestInterruption()
+                except Exception:
+                    pass
+                try:
                     obj.quit()
-                if not obj.wait(1500):
-                    obj.terminate()
-                    obj.wait(500)
+                except Exception:
+                    pass
             except Exception:
                 pass
+        # 共享 deadline 轮询（最多 3s），所有线程并行等待
+        _dl = _t.monotonic() + 3.0
+        while _t.monotonic() < _dl and any(
+            t.isRunning() for t in running_threads if not t is None
+        ):
+            _t.sleep(0.05)
+        # 对仍在运行的线程批量 terminate
+        for obj in running_threads:
+            try:
+                if obj.isRunning():
+                    obj.terminate()
+            except Exception:
+                pass
+        # 最多再等 1s 确认 terminate 生效
+        _dl2 = _t.monotonic() + 1.0
+        while _t.monotonic() < _dl2 and any(
+            t.isRunning() for t in running_threads if not t is None
+        ):
+            _t.sleep(0.05)
     except Exception:
         pass
 

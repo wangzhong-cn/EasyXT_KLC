@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from data_manager.governance_metadata import build_governance_snapshot
+
 
 @dataclass
 class GroupResult:
@@ -190,6 +192,7 @@ def main() -> int:
         "group": args.group,
         "overall_ok": overall_ok,
         "stability_ok": stability_ok,
+        "governance": build_governance_snapshot(trade_date=datetime.now()),
         "results": [asdict(r) for r in results],
     }
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

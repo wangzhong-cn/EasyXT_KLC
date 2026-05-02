@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt, QSettings
 from PyQt5.QtGui import QColor
 
 
@@ -22,14 +22,19 @@ class WatchlistModel(QAbstractTableModel):
         ("最低", "low"),
         ("成交量", "volume"),
     ]
+    DEFAULT_COL_WIDTHS = [100, 95, 72, 72, 72, 72, 72, 72, 72, 72, 72, 72]
 
-    def __init__(self) -> None:
+    def __init__(self, state_key: str = "main") -> None:
         super().__init__()
         self._rows: list[dict[str, Any]] = []
         self._row_index: dict[str, int] = {}
         self._flash_until: dict[int, float] = {}
         self._flash_direction: dict[int, int] = {}
         self._color_mode = "red_up_green_down"
+        self._state_key = state_key
+        self._settings = QSettings("EasyXT", "Watchlist")
+        self._column_widths: list[int] = list(self.DEFAULT_COL_WIDTHS)
+        self._load_state()
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
@@ -192,3 +197,23 @@ class WatchlistModel(QAbstractTableModel):
         if self._color_mode == "red_down_green_up":
             return QColor("#26a69a" if value > 0 else "#ef5350" if value < 0 else "#cfd8dc")
         return QColor("#ef5350" if value > 0 else "#26a69a" if value < 0 else "#cfd8dc")
+
+    def _load_state(self) -> None:
+        col_widths = self._settings.value(f"col_widths_{self._state_key}")
+        if col_widths:
+            try:
+                self._column_widths = [int(v) for v in col_widths]
+                if len(self._column_widths) < len(self.COLUMNS):
+                    self._column_widths += self.DEFAULT_COL_WIDTHS[len(self._column_widths):]
+            except Exception:
+                self._column_widths = list(self.DEFAULT_COL_WIDTHS)
+
+    def save_state(self) -> None:
+        self._settings.setValue(f"col_widths_{self._state_key}", self._column_widths)
+
+    def update_column_widths(self, widths: list[int]) -> None:
+        self._column_widths = widths
+        self.save_state()
+
+    def get_column_widths(self) -> list[int]:
+        return list(self._column_widths)

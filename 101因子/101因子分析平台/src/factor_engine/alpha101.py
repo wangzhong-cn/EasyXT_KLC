@@ -24,7 +24,7 @@ class Alpha101Factors:
     """
     WorldQuant 101 Alpha因子实现类
     """
-    
+
     def __init__(self, data: pd.DataFrame):
         """
         初始化因子计算器
@@ -44,7 +44,7 @@ class Alpha101Factors:
                 data = data[~data.index.duplicated(keep='first')]  # type: ignore
 
         self.data = data
-        
+
         # 检查数据是否为MultiIndex格式
         if isinstance(data.index, pd.MultiIndex) and 'date' in data.index.names and 'symbol' in data.index.names:
             # MultiIndex格式：(date, symbol)
@@ -56,14 +56,14 @@ class Alpha101Factors:
             self.close = data['close'].unstack(level='symbol') if 'close' in data.columns else data.iloc[:, 3].unstack(level='symbol')  # type: ignore
             self.volume = data['volume'].unstack(level='symbol') if 'volume' in data.columns else data.iloc[:, 4].unstack(level='symbol')  # type: ignore
             print(f"[DEBUG] unstack后 - close形状: {self.close.shape}, close前3个值:\n{self.close.iloc[:3, :3]}")
-            
+
             # 如果没有vwap字段，则计算
             if 'vwap' in data.columns:
                 self.vwap = data['vwap'].unstack(level='symbol')  # type: ignore
             else:
                 # 简化计算vwap为OHLC的平均值
                 self.vwap = (self.open + self.high + self.low + self.close) / 4  # type: ignore
-                
+
             # 如果没有returns字段，则计算
             if 'returns' in data.columns:
                 self.returns = data['returns'].unstack(level='symbol')  # type: ignore
@@ -81,21 +81,21 @@ class Alpha101Factors:
             self.low = data['low'] if 'low' in data.columns else data.iloc[:, 2]  # type: ignore
             self.close = data['close'] if 'close' in data.columns else data.iloc[:, 3]  # type: ignore
             self.volume = data['volume'] if 'volume' in data.columns else data.iloc[:, 4]  # type: ignore
-            
+
             # 如果没有vwap字段，则计算
             if 'vwap' in data.columns:
                 self.vwap = data['vwap']  # type: ignore
             else:
                 # 简化计算vwap为OHLC的平均值
                 self.vwap = (self.open + self.high + self.low + self.close) / 4  # type: ignore
-                
+
             # 如果没有returns字段，则计算
             if 'returns' in data.columns:
                 self.returns = data['returns']  # type: ignore
             else:
                 # 按股票分组计算收益率
                 self.returns = data.groupby(level=1)['close'].pct_change()  # type: ignore
-        
+
         # 确保所有数据都是数值型，处理NaN
         for attr_name in ['open', 'high', 'low', 'close', 'volume', 'vwap', 'returns']:
             if hasattr(self, attr_name):
@@ -104,7 +104,7 @@ class Alpha101Factors:
                     setattr(self, attr_name, attr_value.fillna(0))
                 elif isinstance(attr_value, pd.Series):
                     setattr(self, attr_name, attr_value.fillna(0))
-                    
+
         # 验证数据完整性，确保列名是完整的股票代码而不是单个字符
         for attr_name in ['open', 'high', 'low', 'close', 'volume', 'vwap', 'returns']:
             if hasattr(self, attr_name):
@@ -115,7 +115,7 @@ class Alpha101Factors:
                     # 如果列名包含单个字符，这可能是问题所在
                     if any(len(str(col)) == 1 for col in columns if pd.notna(col)):
                         print(f"警告: {attr_name} 的列名包含单个字符: {columns}")
-    
+
     def alpha001(self) -> pd.DataFrame:
         """(rank(Ts_ArgMax(SignedPower(((returns < 0) ? stddev(returns, 20) : close), 2.), 5)) -0.5)"""
         print(f"[DEBUG] alpha001 - close形状: {self.close.shape}, close前3个值:\n{self.close.iloc[:3, :3]}")
@@ -133,36 +133,36 @@ class Alpha101Factors:
         print(f"[DEBUG] alpha001 - 结果统计: min={result.min().min():.4f}, max={result.max().max():.4f}, mean={result.mean().mean():.4f}")
 
         return result
-    
+
     def alpha002(self) -> pd.DataFrame:
         """(-1 * correlation(rank(delta(log(volume), 2)), rank(((close - open) / open)), 6))"""
         from numpy import log
         df = -1 * correlation(
-            rank(delta(log(self.volume), 2)), 
-            rank(((self.close - self.open) / self.open)), 
+            rank(delta(log(self.volume), 2)),
+            rank(((self.close - self.open) / self.open)),
             6
         )
         return df.replace([-np.inf, np.inf], 0).fillna(value=0)
-    
+
     def alpha003(self) -> pd.DataFrame:
         """(-1 * correlation(rank(open), rank(volume), 10))"""
         df = -1 * correlation(rank(self.open), rank(self.volume), 10)
         return df.replace([-np.inf, np.inf], 0).fillna(value=0)
-    
+
     def alpha004(self) -> pd.DataFrame:
         """(-1 * Ts_Rank(rank(low), 9))"""
         return -1 * ts_rank(rank(self.low), 9)
-    
+
     def alpha005(self) -> pd.DataFrame:
         """(rank((open - (sum(vwap, 10) / 10))) * (-1 * abs(rank((close - vwap)))))"""
-        return (rank((self.open - (ts_sum(self.vwap, 10) / 10))) * 
+        return (rank((self.open - (ts_sum(self.vwap, 10) / 10))) *
                 (-1 * np.abs(rank((self.close - self.vwap)))))
-    
+
     def alpha006(self) -> pd.DataFrame:
         """(-1 * correlation(open, volume, 10))"""
         df = -1 * correlation(self.open, self.volume, 10)
         return df.replace([-np.inf, np.inf], 0).fillna(value=0)
-    
+
     def alpha007(self) -> pd.DataFrame:
         """((adv20 < volume) ? ((-1 * ts_rank(abs(delta(close, 7)), 60)) * sign(delta(close, 7))) : (-1* 1))"""
         from numpy import sign
@@ -170,14 +170,14 @@ class Alpha101Factors:
         alpha = -1 * ts_rank(np.abs(delta(self.close, 7)), 60) * sign(delta(self.close, 7))
         alpha[adv20 >= self.volume] = -1
         return alpha
-    
+
     def alpha008(self) -> pd.DataFrame:
         """(-1 * rank(((sum(open, 5) * sum(returns, 5)) - delay((sum(open, 5) * sum(returns, 5)),10))))"""
         sum_open_5 = ts_sum(self.open, 5)
         sum_returns_5 = ts_sum(self.returns, 5)
         combined = sum_open_5 * sum_returns_5
         return -1 * rank(((combined - delay(combined, 10))))
-    
+
     def alpha009(self) -> pd.DataFrame:
         """((0 < ts_min(delta(close, 1), 5)) ? delta(close, 1) : ((ts_max(delta(close, 1), 5) < 0) ?delta(close, 1) : (-1 * delta(close, 1))))"""
         delta_close = delta(self.close, 1)
@@ -186,7 +186,7 @@ class Alpha101Factors:
         alpha = -1 * delta_close
         alpha[cond_1 | cond_2] = delta_close
         return alpha
-    
+
     def alpha010(self) -> pd.DataFrame:
         """rank(((0 < ts_min(delta(close, 1), 4)) ? delta(close, 1) : ((ts_max(delta(close, 1), 4) < 0)? delta(close, 1) : (-1 * delta(close, 1)))))"""
         delta_close = delta(self.close, 1)
@@ -195,12 +195,12 @@ class Alpha101Factors:
         alpha = -1 * delta_close
         alpha[cond_1 | cond_2] = delta_close
         return rank(alpha)
-    
+
     def alpha011(self) -> pd.DataFrame:
         """((rank(ts_max((vwap - close), 3)) + rank(ts_min((vwap - close), 3))) *rank(delta(volume, 3)))"""
-        return ((rank(ts_max((self.vwap - self.close), 3)) + rank(ts_min((self.vwap - self.close), 3))) * 
+        return ((rank(ts_max((self.vwap - self.close), 3)) + rank(ts_min((self.vwap - self.close), 3))) *
                 rank(delta(self.volume, 3)))
-    
+
     def alpha012(self) -> pd.DataFrame:
         """(sign(delta(volume, 1)) * (-1 * delta(close, 1)))"""
         from numpy import sign
@@ -209,56 +209,56 @@ class Alpha101Factors:
     def alpha013(self) -> pd.DataFrame:
         """(-1 * rank(covariance(rank(close), rank(volume), 5)))"""
         return -1 * rank(covariance(rank(self.close), rank(self.volume), 5))
-    
+
     def alpha014(self) -> pd.DataFrame:
         """((-1 * rank(delta(returns, 3))) * correlation(open, volume, 10))"""
         df = correlation(self.open, self.volume, 10)
         df = df.replace([-np.inf, np.inf], 0).fillna(value=0)
         return -1 * rank(delta(self.returns, 3)) * df
-    
+
     def alpha015(self) -> pd.DataFrame:
         """(-1 * sum(rank(correlation(rank(high), rank(volume), 3)), 3))"""
         df = correlation(rank(self.high), rank(self.volume), 3)
         df = df.replace([-np.inf, np.inf], 0).fillna(value=0)
         return -1 * ts_sum(rank(df), 3)
-    
+
     def alpha016(self) -> pd.DataFrame:
         """(-1 * rank(covariance(rank(high), rank(volume), 5)))"""
         return -1 * rank(covariance(rank(self.high), rank(self.volume), 5))
-    
+
     def alpha017(self) -> pd.DataFrame:
         """(((-1 * rank(ts_rank(close, 10))) * rank(delta(delta(close, 1), 1))) *rank(ts_rank((volume / adv20), 5)))"""
         adv20 = sma(self.volume, 20)
         return -1 * (rank(ts_rank(self.close, 10)) *
                      rank(delta(delta(self.close, 1), 1)) *
                      rank(ts_rank((self.volume / adv20), 5)))
-        
+
     def alpha018(self) -> pd.DataFrame:
         """(-1 * rank(((stddev(abs((close - open)), 5) + (close - open)) + correlation(close, open,10))))"""
         df = correlation(self.close, self.open, 10)
         df = df.replace([-np.inf, np.inf], 0).fillna(value=0)
         return -1 * (rank((stddev(np.abs((self.close - self.open)), 5) + (self.close - self.open)) +
                           df))
-    
+
     def alpha019(self) -> pd.DataFrame:
         """((-1 * sign(((close - delay(close, 7)) + delta(close, 7)))) * (1 + rank((1 + sum(returns,250)))))"""
         from numpy import sign
         return ((-1 * sign((self.close - delay(self.close, 7)) + delta(self.close, 7))) *
                 (1 + rank(1 + ts_sum(self.returns, 250))))
-    
+
     def alpha020(self) -> pd.DataFrame:
         """(((-1 * rank((open - delay(high, 1)))) * rank((open - delay(close, 1)))) * rank((open -delay(low, 1))))"""
         return -1 * (rank(self.open - delay(self.high, 1)) *
                      rank(self.open - delay(self.close, 1)) *
                      rank(self.open - delay(self.low, 1)))
-    
+
     def alpha021(self) -> pd.DataFrame:
         """((((sum(close, 8) / 8) + stddev(close, 8)) < (sum(close, 2) / 2)) ? (-1 * 1) : (((sum(close,2) / 2) < ((sum(close, 8) / 8) - stddev(close, 8))) ? 1 : (((1 < (volume / adv20)) || ((volume /adv20) == 1)) ? 1 : (-1 * 1))))"""
         ma8_close = sma(self.close, 8)
         std8_close = stddev(self.close, 8)
         ma2_close = sma(self.close, 2)
         adv20 = sma(self.volume, 20)
-        
+
         cond_1 = (ma8_close + std8_close) < ma2_close
         cond_2 = ma2_close < (ma8_close - std8_close)
         cond_3 = (adv20 / self.volume) <= 1
@@ -267,7 +267,7 @@ class Alpha101Factors:
         result[cond_1] = -1
         result[~cond_1 & ~cond_2 & ~cond_3] = -1
         return result
-    
+
     def alpha022(self) -> pd.DataFrame:
         """(-1 * (delta(correlation(high, volume, 5), 5) * rank(stddev(close, 20))))"""
         df = correlation(self.high, self.volume, 5)
@@ -281,36 +281,36 @@ class Alpha101Factors:
         alpha = pd.DataFrame(np.zeros_like(self.close), index=self.close.index, columns=self.close.columns)
         alpha[cond] = -1 * delta(self.high, 2)
         return alpha
-    
+
     def alpha024(self) -> pd.DataFrame:
         """((((delta((sum(close, 100) / 100), 100) / delay(close, 100)) < 0.05) ||((delta((sum(close, 100) / 100), 100) / delay(close, 100)) == 0.05)) ? (-1 * (close - ts_min(close,100))) : (-1 * delta(close, 3)))"""
         sma100_close = sma(self.close, 100)
         delta_sma100 = delta(sma100_close, 100)
         delay_close_100 = delay(self.close, 100)
-        
+
         ratio = delta_sma100 / delay_close_100
         cond = ratio <= 0.05
         alpha = -1 * delta(self.close, 3)
         alpha[cond] = -1 * (self.close - ts_min(self.close, 100))
         return alpha
-    
+
     def alpha025(self) -> pd.DataFrame:
         """rank(((((-1 * returns) * adv20) * vwap) * (high - close)))"""
         adv20 = sma(self.volume, 20)
         return rank(((((-1 * self.returns) * adv20) * self.vwap) * (self.high - self.close)))
-    
+
     def alpha026(self) -> pd.DataFrame:
         """(-1 * ts_max(correlation(ts_rank(volume, 5), ts_rank(high, 5), 5), 3))"""
         df = correlation(ts_rank(self.volume, 5), ts_rank(self.high, 5), 5)
         df = df.replace([-np.inf, np.inf], 0).fillna(value=0)
         return -1 * ts_max(df, 3)
-    
+
     def alpha027(self) -> pd.DataFrame:
         """((0.5 < rank((sum(correlation(rank(volume), rank(vwap), 6), 2) / 2.0))) ? (-1 * 1) : 1)"""
         from numpy import sign
         alpha = rank((sma(correlation(rank(self.volume), rank(self.vwap), 6), 2) / 2.0))
         return sign((alpha - 0.5) * (-2)).fillna(1)
-    
+
     def alpha028(self) -> pd.DataFrame:
         """scale(((correlation(adv20, low, 5) + ((high + low) / 2)) - close))"""
         adv20 = sma(self.volume, 20)
@@ -829,13 +829,13 @@ class Alpha101Factors:
     def calculate_all_factors(self) -> Dict[str, pd.DataFrame]:
         """
         计算所有已实现的因子
-        
+
         Returns:
             Dict[str, pd.DataFrame]: 因子名称到因子值的映射
         """
         factors = {}
         factor_methods = [method for method in dir(self) if method.startswith('alpha') and method[5:].isdigit()]
-        
+
         for method_name in factor_methods:
             try:
                 method = getattr(self, method_name)
@@ -844,16 +844,16 @@ class Alpha101Factors:
                 print(f"成功计算因子: {method_name}")
             except Exception as e:
                 print(f"计算因子 {method_name} 时出错: {e}")
-        
+
         return factors
 
     def calculate_single_factor(self, factor_name: str) -> pd.DataFrame:
         """
         计算单个因子
-        
+
         Args:
             factor_name: 因子名称，如 'alpha001'
-            
+
         Returns:
             pd.DataFrame: 因子值
         """
@@ -895,47 +895,7 @@ class Alpha101Factors:
 
 # 测试代码
 if __name__ == '__main__':
-    # 创建测试数据
-    import pandas as pd
-    import numpy as np
-    
-    # 创建测试数据 - 使用多级索引
-    dates = pd.date_range('2023-01-01', periods=30, freq='D')
-    symbols = ['000001.SZ', '000002.SZ', '600000.SH']
-    
-    # 创建组合索引
-    index = pd.MultiIndex.from_product([dates, symbols], names=['date', 'symbol'])
-    
-    # 生成测试数据
-    np.random.seed(42)  # 为了结果可重现
-    data_dict = {
-        'open': np.random.uniform(90, 110, len(index)),
-        'high': np.random.uniform(100, 120, len(index)),
-        'low': np.random.uniform(80, 100, len(index)),
-        'close': np.random.uniform(90, 110, len(index)),
-        'volume': np.random.randint(1000000, 10000000, len(index))
-    }
-    
-    test_data = pd.DataFrame(data_dict, index=index)
-    
-    # 确保数据按日期排序
-    test_data = test_data.sort_index()
-    
-    print(f"测试数据形状: {test_data.shape}")
-    print(f"测试数据列: {list(test_data.columns)}")
-    
-    # 测试因子计算
-    factor_calculator = Alpha101Factors(test_data)
-    
-    # 计算单个因子测试
-    try:
-        alpha001_values = factor_calculator.alpha001()
-        print(f"alpha001 计算完成，结果形状: {alpha001_values.shape}")
-        print("alpha001 前几行结果:")
-        print(alpha001_values.head())
-    except Exception as e:
-        print(f"计算alpha001时出错: {e}")
-    
-    # 计算所有已实现的因子
-    all_factors = factor_calculator.calculate_all_factors()
-    print(f"\n总共计算了 {len(all_factors)} 个因子")
+    import sys
+    print("alpha101.py 需要提供真实市场数据运行。")
+    print("请通过 EasyXT 数据接口加载 OHLCV 数据后调用 Alpha101Factors。")
+    sys.exit(0)

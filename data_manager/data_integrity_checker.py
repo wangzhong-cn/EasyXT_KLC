@@ -9,6 +9,7 @@
 """
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -21,6 +22,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 from smart_data_detector import SmartDataDetector, TradingCalendar
 
 log = logging.getLogger(__name__)
+
+
+def _stdout_enabled_by_default() -> bool:
+    return str(os.environ.get("EASYXT_DATA_INTEGRITY_STDOUT", "0")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 class DataQualityReport:
@@ -67,7 +77,7 @@ class DataIntegrityChecker:
     4. 生成完整性报告
     """
 
-    def __init__(self, duckdb_path: Optional[str] = None):
+    def __init__(self, duckdb_path: Optional[str] = None, *, verbose: bool | None = None):
         """
         初始化检查器
 
@@ -76,10 +86,22 @@ class DataIntegrityChecker:
         """
         from data_manager.duckdb_connection_pool import resolve_duckdb_path
 
+        self._logger = logging.getLogger(__name__)
+        self._stdout_enabled = _stdout_enabled_by_default() if verbose is None else bool(verbose)
         self.duckdb_path = resolve_duckdb_path(duckdb_path)
         self.con = None
         self.detector = SmartDataDetector(self.duckdb_path)
         self.calendar = TradingCalendar()
+
+    def _emit(self, message: str, *, level: str = 'info') -> None:
+        logger = getattr(self, '_logger', log)
+        log_method = getattr(logger, level, None)
+        if callable(log_method):
+            log_method('%s', message)
+        else:
+            logger.info('%s', message)
+        if getattr(self, '_stdout_enabled', _stdout_enabled_by_default()):
+            print(message)
 
     def connect(self):
         """连接数据库"""
@@ -350,7 +372,7 @@ class DataIntegrityChecker:
 
         total = len(stock_codes)
         for i, stock_code in enumerate(stock_codes, 1):
-            print(f"\n检查进度: {i}/{total} - {stock_code}")
+            self._emit(f"\n检查进度: {i}/{total} - {stock_code}")
             report = self.check_integrity(stock_code, start_date, end_date)
             reports[stock_code] = report
 
@@ -417,43 +439,50 @@ class DataIntegrityChecker:
         self.detector.close()
 
 
-def test_integrity_checker():
+def test_integrity_checker(verbose: bool = True):
     """测试数据完整性检查功能"""
-    print("=" * 60)
-    print("数据完整性检查测试")
-    print("=" * 60)
-    print()
+    logger = logging.getLogger(__name__)
+
+    def _emit(message: str = "") -> None:
+        logger.info("%s", message)
+        if verbose:
+            print(message)
+
+    _emit("=" * 60)
+    _emit("数据完整性检查测试")
+    _emit("=" * 60)
+    _emit()
 
     # 创建检查器
-    checker = DataIntegrityChecker()
+    checker = DataIntegrityChecker(verbose=verbose)
 
     if not checker.connect():
-        print("[ERROR] 无法连接数据库")
+        _emit("[ERROR] 无法连接数据库")
         return
 
     # 测试单个股票
-    print("[1] 检查 511380.SH 完整性...")
+    _emit("[1] 检查 511380.SH 完整性...")
     report = checker.check_integrity('511380.SH', '2024-01-01', '2025-01-31')
 
-    print(f"\n检查结果: {report['status']}")
-    print(f"缺失交易日: {report['missing_trading_days']}")
-    print(f"完整度: {report['completeness_ratio']*100:.2f}%")
-    print(f"错误: {report['quality_report']['errors']}")
-    print(f"警告: {report['quality_report']['warnings']}")
+    _emit(f"\n检查结果: {report['status']}")
+    _emit(f"缺失交易日: {report['missing_trading_days']}")
+    _emit(f"完整度: {report['completeness_ratio']*100:.2f}%")
+    _emit(f"错误: {report['quality_report']['errors']}")
+    _emit(f"警告: {report['quality_report']['warnings']}")
 
     # 测试批量检查
-    print()
-    print("[2] 批量检查...")
+    _emit()
+    _emit("[2] 批量检查...")
     stock_codes = ['511380.SH', '511880.SH', '511010.SH']
     reports = checker.batch_check_integrity(stock_codes, '2024-01-01', '2025-01-31')
 
     # 生成报告
     report_text = checker.generate_integrity_report(reports)
-    print()
-    print(report_text)
+    _emit()
+    _emit(report_text)
 
     checker.close()
-    print("[OK] 测试完成")
+    _emit("[OK] 测试完成")
 
 
 if __name__ == "__main__":

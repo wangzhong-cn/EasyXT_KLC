@@ -70,6 +70,8 @@ def test_stability_evidence_board_includes_period_validation_summary():
         period_validation_summary={"report_exists": True, "rows": 12, "failed_rows": 2, "last_failed_period": "25m"},
     )
     assert payload["period_validation"]["failed_rows"] == 2
+    assert payload["governance"]["session_profile_id"] == "CN_A"
+    assert payload["governance"]["threshold_registry_version"] == "2026.04.01"
     md = evidence.render_md(payload)
     assert "period_validation_failed_rows" in md
 

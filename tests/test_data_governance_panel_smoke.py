@@ -109,7 +109,7 @@ class TestDataGovernancePanelSmoke:
         )
         panel = DataGovernancePanel(controller=ctrl)
         try:
-            assert panel._tabs.count() == 12
+            assert panel._tabs.count() == 13
         finally:
             panel.close()
 
@@ -517,6 +517,23 @@ class TestNewTabCallbacks:
         tab = _ReconciliationTab(controller=self._make_ctrl())
         tab._on_error("连接超时")
         assert "连接超时" in tab._status.text()
+
+    def test_reconciliation_on_batch_done_updates_labels(self, qapp):
+        from gui_app.widgets.data_governance_panel import _ReconciliationTab
+        tab = _ReconciliationTab(controller=self._make_ctrl())
+        tab.on_batch_done(total=30, passed=28, failed=2,
+                          bad_codes=["000001.SZ(1.50%)", "600519.SH(err)"])
+        assert tab._lbl_batch_total.text() == "30"
+        assert tab._lbl_batch_passed.text() == "28"
+        assert "2" in tab._lbl_batch_failed.text()
+        assert "000001.SZ" in tab._lbl_batch_bad.text()
+
+    def test_reconciliation_on_batch_done_no_failures(self, qapp):
+        from gui_app.widgets.data_governance_panel import _ReconciliationTab
+        tab = _ReconciliationTab(controller=self._make_ctrl())
+        tab.on_batch_done(total=20, passed=20, failed=0, bad_codes=[])
+        assert tab._lbl_batch_total.text() == "20"
+        assert tab._lbl_batch_bad.text() == "无"
 
     def test_calendar_on_result_populates_tables(self, qapp):
         from gui_app.widgets.data_governance_panel import _TradingCalendarTab
@@ -1241,10 +1258,10 @@ class TestDataGovernancePanelEventRouting:
         with patch.object(DataGovernancePanel, "_make_query_tab", return_value=QWidget()):
             return DataGovernancePanel()
 
-    def test_panel_has_twelve_tabs(self, qapp):
+    def test_panel_has_thirteen_tabs(self, qapp):
         from gui_app.widgets.data_governance_panel import DataGovernancePanel
         panel = self._make_panel(qapp)
-        assert panel._tabs.count() == 12
+        assert panel._tabs.count() == 13
 
     def test_panel_stores_integrity_repair_realtime_refs(self, qapp):
         from gui_app.widgets.data_governance_panel import (

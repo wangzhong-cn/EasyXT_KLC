@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "default_profile": "CN_A",
+  "profiles": [
+    {
+      "profile_id": "CN_A",
+      "profile_version": "2026.04.01",
+      "effective_from": "1990-12-19",
+      "effective_to": null,
+      "timezone": "Asia/Shanghai",
+      "auction_policy": "merged_open_auction",
+      "market_scope": ["SH", "SZ"],
+      "instrument_types": ["equity", "etf", "index"],
+      "sessions": [["09:30", "11:30"], ["13:00", "15:00"]]
+    },
+    {
+      "profile_id": "CN_A_AUCTION",
+      "profile_version": "2026.04.01",
+      "effective_from": "1990-12-19",
+      "effective_to": null,
+      "timezone": "Asia/Shanghai",
+      "auction_policy": "explicit_auction_session",
+      "market_scope": ["SH", "SZ"],
+      "instrument_types": ["equity", "etf", "index"],
+      "sessions": [["09:15", "09:25"], ["09:30", "11:30"], ["13:00", "15:00"]]
+    },
+    {
+      "profile_id": "FUTURES_COMMODITY",
+      "profile_version": "2026.04.01",
+      "effective_from": "2024-01-01",
+      "effective_to": null,
+      "timezone": "Asia/Shanghai",
+      "auction_policy": "no_open_auction",
+      "market_scope": ["DCE", "SHF", "CZC", "CFFEX", "INE", "GFEX"],
+      "instrument_types": ["future"],
+      "sessions": [["21:00", "23:00"], ["09:00", "10:15"], ["10:30", "11:30"], ["13:30", "15:00"]]
+    }
+  ]
+}

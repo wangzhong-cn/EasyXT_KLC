@@ -7,9 +7,7 @@ PositionsPanel   — QWidget，内含「持仓」/「结算」两个子 Tab
 
 from __future__ import annotations
 
-import copy
 import datetime
-import random
 from typing import Any
 
 from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
@@ -56,66 +54,13 @@ _SETTLE_COLUMNS: list[tuple[str, str]] = [
 _PNL_KEYS = {"pnl", "pnl_pct", "today_pnl"}
 _PRICE3_KEYS = {"cost_price", "current_price", "close_price"}
 
-# ── Demo 持仓数据 ─────────────────────────────────────────────────────────────
-
-_DEMO_POSITIONS: list[dict[str, Any]] = [
-    {
-        "code": "600000.SH", "name": "浦发银行",
-        "volume": 1000, "can_use_volume": 1000,
-        "cost_price": 8.52, "current_price": 9.10, "market_value": 9100.0,
-        "pnl": 580.0, "pnl_pct": 6.81, "today_pnl": 30.0, "account_id": "demo",
-    },
-    {
-        "code": "000001.SZ", "name": "平安银行",
-        "volume": 2000, "can_use_volume": 2000,
-        "cost_price": 11.30, "current_price": 10.85, "market_value": 21700.0,
-        "pnl": -900.0, "pnl_pct": -3.98, "today_pnl": -90.0, "account_id": "demo",
-    },
-    {
-        "code": "601318.SH", "name": "中国平安",
-        "volume": 500, "can_use_volume": 500,
-        "cost_price": 42.10, "current_price": 45.20, "market_value": 22600.0,
-        "pnl": 1550.0, "pnl_pct": 7.36, "today_pnl": 150.0, "account_id": "demo",
-    },
-    {
-        "code": "300750.SZ", "name": "宁德时代",
-        "volume": 100, "can_use_volume": 100,
-        "cost_price": 195.80, "current_price": 178.40, "market_value": 17840.0,
-        "pnl": -1740.0, "pnl_pct": -8.89, "today_pnl": -420.0, "account_id": "demo",
-    },
-    {
-        "code": "000858.SZ", "name": "五粮液",
-        "volume": 200, "can_use_volume": 200,
-        "cost_price": 152.30, "current_price": 165.70, "market_value": 33140.0,
-        "pnl": 2680.0, "pnl_pct": 8.80, "today_pnl": 360.0, "account_id": "demo",
-    },
-]
+# ── 持仓演示数据已移除 — 所有数据必须来自 QMT 真实账户 ──────────────────────
 
 
 def _make_settlement_rows(date_str: str) -> list[dict[str, Any]]:
-    """为给定日期生成结算快照（以日期为种子，结果稳定可重复）。"""
-    epoch = (datetime.date.fromisoformat(date_str) - datetime.date(2000, 1, 1)).days
-    rng = random.Random(epoch)
-    rows: list[dict[str, Any]] = []
-    for p in _DEMO_POSITIONS:
-        close = round(float(p["current_price"]) * (1.0 + rng.uniform(-0.03, 0.03)), 3)
-        vol = int(p["volume"])
-        cost = float(p["cost_price"])
-        mv = round(close * vol, 2)
-        pnl = round(mv - cost * vol, 2)
-        pnl_pct = round((close / cost - 1) * 100, 2) if cost else 0.0
-        rows.append({
-            "date": date_str,
-            "code": p["code"],
-            "name": p["name"],
-            "volume": vol,
-            "cost_price": cost,
-            "close_price": close,
-            "market_value": mv,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-        })
-    return rows
+    """结算数据需要通过 QMT 真实交易接口获取，当前返回空列表。"""
+    # TODO: 接入 easy_xt.get_api().trade.get_settlement(date_str)
+    return []
 
 
 # ── 通用 TableModel 基类 ──────────────────────────────────────────────────────
@@ -211,7 +156,7 @@ class PositionsPanel(QWidget):
     - 「持仓」Tab：11 列，账户 Combo + 刷新按钮 + 底部汇总
     - 「结算」Tab：9 列，日期 Combo（最近 7 个工作日）
     - 双击持仓行发出 ``symbol_clicked`` 信号（供外部跳转 K 线图）
-    - 数据为内置 Demo；TODO: 接入 easy_xt.get_api().trade.get_positions()
+    - 严禁内置 Demo 数据；等待 QMT 真实持仓/结算数据注入
     """
 
     symbol_clicked = pyqtSignal(str)
@@ -248,7 +193,7 @@ class PositionsPanel(QWidget):
         hl.addWidget(QLabel("账户:"))
         self._account_combo = QComboBox()
         self._account_combo.setMinimumWidth(150)
-        self._account_combo.addItem("演示账户", "demo")
+        self._account_combo.addItem("待连接账户", "pending")
         hl.addWidget(self._account_combo)
         hl.addStretch()
 
@@ -343,12 +288,9 @@ class PositionsPanel(QWidget):
 
     def _on_refresh(self) -> None:
         # TODO: easy_xt.get_api().trade.get_positions(account_id) 真实账户
-        rows = copy.deepcopy(_DEMO_POSITIONS)
-        self._pos_model.load(rows)
-        self._update_footer(rows)
-        self._status_label.setText(
-            f"更新 {datetime.datetime.now().strftime('%H:%M:%S')}"
-        )
+        self._pos_model.load([])
+        self._update_footer([])
+        self._status_label.setText("等待 QMT 持仓数据")
 
     def _on_date_changed(self, date_str: str) -> None:
         self._settle_model.load(_make_settlement_rows(date_str))
@@ -374,7 +316,7 @@ class PositionsPanel(QWidget):
 
     def update_positions(self, positions: list[dict[str, Any]],
                          account_id: str = "") -> None:
-        """从外部注入实时持仓数据（替换 Demo）。"""
+        """从外部注入实时持仓数据。"""
         self._pos_model.load(positions)
         self._update_footer(positions)
         self._status_label.setText(

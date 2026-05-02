@@ -54,8 +54,20 @@ class OrderbookPanel(QFrame):
         self.grid.addWidget(bar, row, 3)
         self.rows[(side, level)] = {"price": price, "volume": volume, "bar": bar}
 
-    def set_status(self, text: str) -> None:
+    # source: "live" | "db" | "none" | None（不改颜色）
+    _STATUS_COLORS = {
+        "live": "#27ae60",   # 绿色：实时
+        "db":   "#e67e22",   # 橙色：历史快照
+        "none": "#c0392b",   # 红色：无数据
+    }
+
+    def set_status(self, text: str, source: str = "") -> None:
         self.status_label.setText(text or "五档盘口")
+        color = self._STATUS_COLORS.get(source or "")
+        if color:
+            self.status_label.setStyleSheet(f"color: {color}; font-size: 11px;")
+        else:
+            self.status_label.setStyleSheet("font-size: 11px;")
 
     def update_orderbook(self, quote: dict[str, Any]) -> None:
         if not quote:

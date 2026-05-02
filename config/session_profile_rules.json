@@ -1,32 +1,69 @@
 {
+  "schema_version": "1.0",
   "default_profile": "CN_A",
   "rules": [
     {
+      "rule_id": "futures_dce",
       "pattern": "*.DCE",
+      "exchange": "DCE",
+      "instrument_type": "future",
+      "priority": 100,
       "profile": "FUTURES_COMMODITY"
     },
     {
+      "rule_id": "futures_shf",
       "pattern": "*.SHF",
+      "exchange": "SHF",
+      "instrument_type": "future",
+      "priority": 100,
       "profile": "FUTURES_COMMODITY"
     },
     {
+      "rule_id": "futures_czc",
       "pattern": "*.CZC",
+      "exchange": "CZC",
+      "instrument_type": "future",
+      "priority": 100,
       "profile": "FUTURES_COMMODITY"
     },
     {
+      "rule_id": "futures_cffex",
       "pattern": "*.CFFEX",
+      "exchange": "CFFEX",
+      "instrument_type": "future",
+      "priority": 100,
       "profile": "FUTURES_COMMODITY"
     },
     {
+      "rule_id": "futures_ine",
       "pattern": "*.INE",
+      "exchange": "INE",
+      "instrument_type": "future",
+      "priority": 100,
       "profile": "FUTURES_COMMODITY"
     },
     {
+      "rule_id": "futures_gfex",
+      "pattern": "*.GFEX",
+      "exchange": "GFEX",
+      "instrument_type": "future",
+      "priority": 100,
+      "profile": "FUTURES_COMMODITY"
+    },
+    {
+      "rule_id": "cn_a_sh",
       "pattern": "*.SH",
+      "exchange": "SH",
+      "instrument_type": ["equity", "etf", "index"],
+      "priority": 10,
       "profile": "CN_A"
     },
     {
+      "rule_id": "cn_a_sz",
       "pattern": "*.SZ",
+      "exchange": "SZ",
+      "instrument_type": ["equity", "etf", "index"],
+      "priority": 10,
       "profile": "CN_A"
     }
   ]

@@ -4,6 +4,7 @@ tests/test_risk_analyzer.py
 RiskAnalyzer 纯数学逻辑单元测试 — 不需要 QApplication
 """
 import math
+import warnings
 import pytest
 import numpy as np
 
@@ -328,6 +329,13 @@ class TestCalculateSortinoRatio:
         returns = [-0.01, 0.01, -0.01, 0.01] * 5
         result = ra._calculate_sortino_ratio(returns)
         assert isinstance(result, float)
+
+    def test_single_negative_return_does_not_emit_runtime_warning(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = self.ra._calculate_sortino_ratio([0.10, -0.20, 0.05])
+        assert isinstance(result, float)
+        assert not any(issubclass(w.category, RuntimeWarning) for w in caught)
 
 
 # ---------------------------------------------------------------------------

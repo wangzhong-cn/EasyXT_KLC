@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import random
 from typing import Any
 
 from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
@@ -268,24 +267,8 @@ class IntradayPanel(QWidget):
         )
 
     def _build_intraday_skeleton(self, symbol: str) -> list[dict[str, Any]]:
-        seed = sum(ord(ch) for ch in symbol)
-        rng = random.Random(seed)
-        base = round(10 + (seed % 300) / 10, 3)
-        rows: list[dict[str, Any]] = []
-        t0 = dt.datetime.combine(dt.date.today(), dt.time(9, 30))
-        for i in range(30):
-            cur = t0 + dt.timedelta(minutes=i)
-            p = round(base * (1 + rng.uniform(-0.005, 0.005)), 3)
-            cp = round((p / base - 1) * 100, 2)
-            rows.append(
-                {
-                    "time": cur.strftime("%H:%M"),
-                    "price": p,
-                    "change_pct": cp,
-                    "volume": int(rng.uniform(1000, 9000)),
-                }
-            )
-        return rows
+        """返回空列表，等待真实行情数据推送。不再生成任何模拟数据。"""
+        return []
 
     def closeEvent(self, a0: Any) -> None:
         try:

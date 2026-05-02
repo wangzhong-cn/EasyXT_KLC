@@ -396,31 +396,4 @@ class ParquetStorage:
 
 
 if __name__ == '__main__':
-    # 测试代码
-    storage = ParquetStorage("../data/raw", compression='snappy')
-
-    # 创建测试数据
-    dates = pd.date_range('2023-01-01', periods=100, freq='D')
-    test_df = pd.DataFrame({
-        'open': np.random.rand(100) * 100,
-        'high': np.random.rand(100) * 100,
-        'low': np.random.rand(100) * 100,
-        'close': np.random.rand(100) * 100,
-        'volume': np.random.randint(1000000, 10000000, 100)
-    }, index=dates)
-
-    # 测试保存
-    success, size = storage.save_data(test_df, '000001.SZ', 'daily')
-    print(f"保存成功: {success}, 文件大小: {size:.2f}MB")
-
-    # 测试加载
-    loaded_df = storage.load_data('000001.SZ', 'daily')
-    print(f"加载数据形状: {loaded_df.shape}")
-
-    # 测试文件信息
-    file_info = storage.get_file_info('000001.SZ', 'daily')
-    print(f"文件信息: {file_info}")
-
-    # 测试存储统计
-    stats = storage.get_storage_stats()
-    print(f"存储统计: {stats}")
+    print("parquet_storage.py 需要提供真实市场数据运行，请通过 EasyXT 数据接口加载数据后调用。")

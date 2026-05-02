@@ -49,6 +49,9 @@ class RealtimePipelineManager:
         self._late_event_dropped: int = 0
         self._ooo_sequence_dropped: int = 0
         self._max_lateness_ms: int = 0
+        # HTAP: bar 完结回调——由调用方注入，接收一个完整 bar dict
+        # 签名: (bar: dict[str, Any]) -> None
+        self.on_bar_close: Any = None
         self._watermark_audit_file = os.environ.get(
             "EASYXT_RT_WATERMARK_AUDIT_FILE", "artifacts/realtime_watermark_events.jsonl"
         )
@@ -239,21 +242,60 @@ class RealtimePipelineManager:
             self._window_dropped.popleft()
 
     @staticmethod
+    def _is_intraday_period(period: str) -> bool:
+        """判断是否为日内分钟周期（含所有 Nm 格式）。"""
+        p = str(period or "").strip().lower()
+        if p == "tick":
+            return True
+        if p.endswith("m") and p[:-1].isdigit():
+            return True
+        return False
+
+    @staticmethod
     def _compute_bar_time(ts: pd.Timestamp, period: str) -> str:
-        """Fix 58: 统一计算所有周期的 bar_time，支持 1m/5m/15m/30m/60m/1d/1w/1M
-        始终返回字符串，确保与 last_data['time'] 的字符串值对比时类型一致。"""
-        if period in ("1d", "1w", "1M"):
+        """统一计算所有周期的 bar_time（右边界），与 QMT 历史K线时间戳一致。
+
+        A股 K线时间戳采用右边界惯例：1m 首根 time=09:31，5m 首根 time=09:35。
+        使用会话对齐右边界：sess_start + (offset_bars+1)*n, capped at sess_end。
+        始终返回字符串，确保与 last_data['time'] 的字符串值对比时类型一致。
+        """
+        p = str(period or "").strip()
+        # ── 日线+ 固定周期 ──
+        if p in ("1d",):
             return ts.strftime("%Y-%m-%d")
-        if period == "1m":
-            return ts.floor("min").strftime("%Y-%m-%d %H:%M:%S")
-        if period == "5m":
-            return ts.floor("5min").strftime("%Y-%m-%d %H:%M:%S")
-        if period == "15m":
-            return ts.floor("15min").strftime("%Y-%m-%d %H:%M:%S")
-        if period == "30m":
-            return ts.floor("30min").strftime("%Y-%m-%d %H:%M:%S")
-        if period == "60m":
-            return ts.floor("60min").strftime("%Y-%m-%d %H:%M:%S")
+        if p in ("1w",):
+            return (ts - pd.Timedelta(days=ts.weekday())).strftime("%Y-%m-%d")
+        if p in ("1M", "2M", "3M", "5M", "6M", "1Q"):
+            return ts.replace(day=1).strftime("%Y-%m-%d")
+        if p in ("1Y", "2Y", "3Y", "5Y", "10Y"):
+            return ts.replace(month=1, day=1).strftime("%Y-%m-%d")
+        # ── 任意分钟周期：Nm —— 返回会话对齐右边界 ──
+        pl = p.lower()
+        if pl.endswith("m") and pl[:-1].isdigit():
+            n = int(pl[:-1])
+            d = ts.strftime("%Y-%m-%d")
+            am_start      = pd.Timestamp(f"{d} 09:30:00")
+            pm_start      = pd.Timestamp(f"{d} 13:00:00")
+            pm_end        = pd.Timestamp(f"{d} 15:00:00")
+            AM_MINUTES    = 120   # 09:30-11:30
+            TOTAL_MINUTES = 240   # 全日总交易分钟数
+            # 全日连续交易分钟偏移（跨午间不截断）
+            if ts >= pm_start:
+                elapsed = AM_MINUTES + max(0, int((ts - pm_start).total_seconds()) // 60)
+            else:
+                elapsed = max(0, int((ts - am_start).total_seconds()) // 60)
+            bar_num   = elapsed // n
+            right_min = min((bar_num + 1) * n, TOTAL_MINUTES)
+            if right_min <= AM_MINUTES:
+                right = am_start + pd.Timedelta(minutes=right_min)
+            else:
+                right = pm_start + pd.Timedelta(minutes=right_min - AM_MINUTES)
+            right = min(right, pm_end)
+            return right.strftime("%Y-%m-%d %H:%M:%S")
+        # ── 多日合成周期：Nd（仅精确到日） ──
+        if pl.endswith("d") and pl[:-1].isdigit():
+            return ts.strftime("%Y-%m-%d")
+        # fallback
         return ts.strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
@@ -322,7 +364,7 @@ class RealtimePipelineManager:
         if price <= 0:
             return None
         quote_ts = self._resolve_quote_timestamp(quote)
-        if period in ("1m", "5m", "15m", "30m", "60m") and not self._is_intraday_market_time(quote_ts):
+        if self._is_intraday_period(period) and not self._is_intraday_market_time(quote_ts):
             return None
         bar_time: Any = self._compute_bar_time(quote_ts, period)
         open_price = float(quote.get("open") or price)
@@ -407,7 +449,7 @@ class RealtimePipelineManager:
             return None
 
         quote_ts = self._resolve_quote_timestamp(quote)
-        if self._period in ("1m", "5m", "15m", "30m", "60m") and not self._is_intraday_market_time(quote_ts):
+        if self._is_intraday_period(self._period) and not self._is_intraday_market_time(quote_ts):
             return None
         bar_time: Any = self._compute_bar_time(quote_ts, self._period)
 
@@ -440,6 +482,12 @@ class RealtimePipelineManager:
             for col, value in updated.items():
                 self._last_data.at[self._last_data.index[-1], col] = value
         else:
+            # bar 切换：前一根 bar 已完结，触发 HTAP 写回回调
+            if self.on_bar_close is not None:
+                try:
+                    self.on_bar_close(dict(last_row))
+                except Exception:
+                    pass
             is_daily = self._period in ("1d", "1w", "1M")
             if is_daily:
                 open_price = float(quote.get("open") or price)

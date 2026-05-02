@@ -5,7 +5,7 @@ import json
 import pandas as pd
 import pytest
 
-from data_manager.period_bar_builder import PeriodBarBuilder
+from data_manager.period_bar_builder import PERIOD_BAR_BUILDER_VERSION, PeriodBarBuilder
 
 
 def _make_intraday_df() -> pd.DataFrame:
@@ -45,6 +45,50 @@ def test_intraday_metadata_columns_and_session_profile():
     assert (out["alignment"] == "left").all()
     assert (out["anchor"] == "daily_close").all()
     assert (out["session_profile"] == "CN_A_AUCTION").all()
+    assert (out["session_profile_id"] == "CN_A_AUCTION").all()
+    assert (out["session_profile_version"] == "legacy").all()
+    assert (out["auction_policy"] == "unknown").all()
+    assert (out["period_code"] == "10m").all()
+    assert (out["period_family"] == "intraday").all()
+    assert (out["period_registry_version"] == "legacy").all()
+    assert (out["threshold_version"] == "legacy").all()
+    assert (out["bar_builder_version"] == PERIOD_BAR_BUILDER_VERSION).all()
+
+
+def test_intraday_metadata_versions_can_be_overridden():
+    df_1m = _make_intraday_df()
+    df_1d = pd.DataFrame(
+        {
+            "time": [pd.Timestamp("2024-01-02")],
+            "open": [10.0],
+            "high": [13.0],
+            "low": [9.5],
+            "close": [12.5],
+            "volume": [float(df_1m["volume"].sum())],
+        }
+    )
+    builder = PeriodBarBuilder(
+        session_profile="CN_A_AUCTION",
+        session_profile_version="2026.04.01",
+        auction_policy="explicit_auction_session",
+        period_registry_version="2026.04.01",
+        default_threshold_version="2026.03.31",
+    )
+    out = builder.build_intraday_bars(
+        df_1m,
+        period_minutes=10,
+        daily_ref=df_1d,
+        period_code="1W",
+        period_family="intraday",
+        threshold_version="2026.04.02",
+    )
+    assert not out.empty
+    assert (out["session_profile_version"] == "2026.04.01").all()
+    assert (out["auction_policy"] == "explicit_auction_session").all()
+    assert (out["period_code"] == "1W").all()
+    assert (out["period_registry_version"] == "2026.04.01").all()
+    assert (out["threshold_version"] == "2026.04.02").all()
+    assert (out["bar_builder_version"] == PERIOD_BAR_BUILDER_VERSION).all()
 
 
 def test_anchor_none_does_not_force_daily_close():
@@ -88,8 +132,12 @@ def test_cross_validate_emits_jsonl_report(tmp_path):
     assert lines
     payload = json.loads(lines[-1])
     assert payload["period"] == "10m"
+    assert payload["period_code"] == "10m"
+    assert payload["period_family"] == "intraday"
     assert payload["alignment"] == "left"
     assert payload["anchor"] == "daily_close"
+    assert payload["session_profile_version"] == "legacy"
+    assert payload["bar_builder_version"] == PERIOD_BAR_BUILDER_VERSION
 
 
 def test_cross_validate_error_report_details_schema_stable(tmp_path):
@@ -253,6 +301,8 @@ def test_build_natural_calendar_session_profile():
     result = builder.build_natural_calendar_bars(df_1d, freq="ME")
     assert not result.empty
     assert (result["session_profile"] == "CN_A_AUCTION").all()
+    assert (result["period_code"] == "1M").all()
+    assert (result["period_family"] == "natural_calendar").all()
 
 
 # ---------------------------------------------------------------------------

@@ -383,3 +383,31 @@ class TestGetDownloadPlan:
         plan = detector.get_download_plan([], '2024-03-04', '2024-03-08')
         assert plan['total_stocks'] == 0
         assert plan['download_tasks'] == []
+
+
+class TestReportPrinting:
+    def test_print_missing_report_still_prints_when_detector_default_silent(self, capsys):
+        detector = _make_detector()
+        detector._stdout_enabled = False
+        detector._logger = MagicMock()
+        report = {
+            'stock_code': '000001.SZ',
+            'check_range': ('2024-03-04', '2024-03-08'),
+            'expected_trading_days': 5,
+            'existing_data': {
+                'first_date': None,
+                'last_date': None,
+                'count': 0,
+                'dates': [],
+            },
+            'missing_trading_days': [],
+            'missing_segments': [],
+            'missing_count': 0,
+            'completeness_ratio': 1.0,
+        }
+
+        detector.print_missing_report(report)
+
+        output = capsys.readouterr().out
+        assert '数据缺失报告' in output
+        assert '000001.SZ' in output

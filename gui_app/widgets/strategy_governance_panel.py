@@ -57,12 +57,55 @@ _MATPLOTLIB_OK = False
 try:
     import matplotlib
     matplotlib.use("Agg")
+    from matplotlib import font_manager
     import matplotlib.pyplot as plt
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.figure import Figure
     _MATPLOTLIB_OK = True
 except Exception:
     pass
+
+_MPL_CJK_FONT_CANDIDATES = [
+    "Microsoft YaHei",
+    "SimHei",
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "WenQuanYi Zen Hei",
+    "Arial Unicode MS",
+    "DejaVu Sans",
+]
+
+
+def _matplotlib_font_candidates(preferred: Optional[str] = None) -> list[str]:
+    preferred_name = str(preferred or "").strip()
+    fonts: list[str] = []
+    if preferred_name in _MPL_CJK_FONT_CANDIDATES:
+        fonts.append(preferred_name)
+    fonts.extend(_MPL_CJK_FONT_CANDIDATES)
+    if preferred_name and preferred_name not in fonts:
+        fonts.append(preferred_name)
+    return list(dict.fromkeys(fonts))
+
+
+def _configure_matplotlib_fonts(preferred: Optional[str] = None) -> str:
+    font_candidates = _matplotlib_font_candidates(preferred)
+    primary_font = "DejaVu Sans"
+    if _MATPLOTLIB_OK:
+        for font_name in font_candidates:
+            try:
+                font_manager.findfont(font_name, fallback_to_default=False)
+                primary_font = font_name
+                break
+            except Exception:
+                continue
+        ordered_fonts = [primary_font] + [f for f in font_candidates if f != primary_font]
+        plt.rcParams["font.family"] = ["sans-serif"]
+        plt.rcParams["font.sans-serif"] = ordered_fonts
+        plt.rcParams["axes.unicode_minus"] = False
+    return primary_font
+
+
+_MPL_FONT_FAMILY = _configure_matplotlib_fonts() if _MATPLOTLIB_OK else "DejaVu Sans"
 
 
 # ─── 异步回测线程 ──────────────────────────────────────────────────────────
@@ -197,9 +240,9 @@ class _EquityChart(QWidget):
             running_max = np.maximum.accumulate(net)
             self._ax.fill_between(ts, net, running_max, where=[r > n for r, n in zip(running_max, net)],
                                    color="#64b5f6", alpha=0.25, label="回撤区间")
-            self._ax.set_title(title, fontsize=11, fontweight="bold")
-            self._ax.set_xlabel("日期", fontsize=9)
-            self._ax.set_ylabel("净值", fontsize=9)
+            self._ax.set_title(title, fontsize=11, fontweight="bold", fontfamily=_MPL_FONT_FAMILY)
+            self._ax.set_xlabel("日期", fontsize=9, fontfamily=_MPL_FONT_FAMILY)
+            self._ax.set_ylabel("净值", fontsize=9, fontfamily=_MPL_FONT_FAMILY)
             self._ax.grid(True, alpha=0.3)
             locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
             self._ax.xaxis.set_major_locator(locator)

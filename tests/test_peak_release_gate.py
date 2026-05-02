@@ -14,6 +14,8 @@ def test_peak_release_gate_pass():
     assert out["level"] == "pass"
     assert out["release_env"] == "prod"
     assert out["gap_to_fail_days"] == 0
+    assert out["governance"]["session_profile_id"] == "CN_A"
+    assert out["governance"]["period_registry_version"] == "2026.04.01"
 
 
 def test_peak_release_gate_warn():

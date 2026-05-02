@@ -11,11 +11,11 @@ from scipy.stats import rankdata
 def ts_sum(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     时间序列求和
-    
+
     Args:
         df: 输入数据
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 时间序列求和结果
     """
@@ -25,11 +25,11 @@ def ts_sum(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
 def sma(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     简单移动平均
-    
+
     Args:
         df: 输入数据
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 简单移动平均结果
     """
@@ -39,11 +39,11 @@ def sma(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
 def stddev(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     标准差
-    
+
     Args:
         df: 输入数据
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 标准差结果
     """
@@ -53,12 +53,12 @@ def stddev(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
 def correlation(x: pd.DataFrame, y: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     相关系数
-    
+
     Args:
         x: 第一个序列
         y: 第二个序列
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 相关系数结果
     """
@@ -68,12 +68,12 @@ def correlation(x: pd.DataFrame, y: pd.DataFrame, window: int = 10) -> pd.DataFr
 def covariance(x: pd.DataFrame, y: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     协方差
-    
+
     Args:
         x: 第一个序列
         y: 第二个序列
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 协方差结果
     """
@@ -83,10 +83,10 @@ def covariance(x: pd.DataFrame, y: pd.DataFrame, window: int = 10) -> pd.DataFra
 def rolling_rank(na: np.ndarray) -> float:
     """
     滚动排名辅助函数
-    
+
     Args:
         na: 数组
-        
+
     Returns:
         float: 最后一个值的排名
     """
@@ -96,11 +96,11 @@ def rolling_rank(na: np.ndarray) -> float:
 def ts_rank(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     时间序列排名
-    
+
     Args:
         df: 输入数据
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 时间序列排名结果
     """
@@ -110,11 +110,11 @@ def ts_rank(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
 def ts_min(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     时间序列最小值
-    
+
     Args:
         df: 输入数据
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 时间序列最小值结果
     """
@@ -124,11 +124,11 @@ def ts_min(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
 def ts_max(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     时间序列最大值
-    
+
     Args:
         df: 输入数据
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 时间序列最大值结果
     """
@@ -138,11 +138,11 @@ def ts_max(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
 def delta(df: pd.DataFrame, period: int = 1) -> pd.DataFrame:
     """
     差分
-    
+
     Args:
         df: 输入数据
         period: 差分阶数
-        
+
     Returns:
         pd.DataFrame: 差分结果
     """
@@ -152,11 +152,11 @@ def delta(df: pd.DataFrame, period: int = 1) -> pd.DataFrame:
 def delay(df: pd.DataFrame, period: int = 1) -> pd.DataFrame:
     """
     延迟（滞后）
-    
+
     Args:
         df: 输入数据
         period: 滞后期数
-        
+
     Returns:
         pd.DataFrame: 滞后结果
     """
@@ -166,10 +166,10 @@ def delay(df: pd.DataFrame, period: int = 1) -> pd.DataFrame:
 def rank(df: pd.DataFrame) -> pd.DataFrame:
     """
     横截面排名（按行排名）
-    
+
     Args:
         df: 输入数据，通常索引为[date, symbol]，列为不同股票在同一天的值
-        
+
     Returns:
         pd.DataFrame: 排名结果（百分比形式）
     """
@@ -185,11 +185,11 @@ def rank(df: pd.DataFrame) -> pd.DataFrame:
 def scale(df: pd.DataFrame, k: float = 1) -> pd.DataFrame:
     """
     缩放（使绝对值之和等于k）
-    
+
     Args:
         df: 输入数据
         k: 缩放因子
-        
+
     Returns:
         pd.DataFrame: 缩放后的结果
     """
@@ -199,11 +199,11 @@ def scale(df: pd.DataFrame, k: float = 1) -> pd.DataFrame:
 def ts_argmax(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     时间序列最大值位置
-    
+
     Args:
         df: 输入数据
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 最大值位置结果
     """
@@ -213,11 +213,11 @@ def ts_argmax(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
 def ts_argmin(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     时间序列最小值位置
-    
+
     Args:
         df: 输入数据
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 最小值位置结果
     """
@@ -227,33 +227,33 @@ def ts_argmin(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
 def decay_linear(df: pd.DataFrame, period: int = 10) -> pd.DataFrame:
     """
     线性衰减加权移动平均
-    
+
     Args:
         df: 输入数据
         period: 衰减周期
-        
+
     Returns:
         pd.DataFrame: 线性衰减结果
     """
     weights = np.arange(1, period + 1)
     weights = weights / weights.sum()
-    
+
     def linear_decay(x):
         if len(x) < period:
             return np.nan
         return np.sum(weights * x[-period:])
-    
+
     return df.rolling(window=period).apply(linear_decay, raw=True)
 
 
 def signedpower(df: pd.DataFrame, power: float) -> pd.DataFrame:
     """
     符号幂函数
-    
+
     Args:
         df: 输入数据
         power: 幂次
-        
+
     Returns:
         pd.DataFrame: 符号幂结果
     """
@@ -263,11 +263,11 @@ def signedpower(df: pd.DataFrame, power: float) -> pd.DataFrame:
 def product(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
     """
     时间序列乘积
-    
+
     Args:
         df: 输入数据
         window: 时间窗口
-        
+
     Returns:
         pd.DataFrame: 乘积结果
     """
@@ -277,10 +277,10 @@ def product(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
 def returns(df: pd.DataFrame) -> pd.DataFrame:
     """
     计算收益率
-    
+
     Args:
         df: 价格数据
-        
+
     Returns:
         pd.DataFrame: 收益率数据
     """
@@ -548,42 +548,4 @@ def ts_prod(df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
 
 # 测试代码
 if __name__ == '__main__':
-    # 创建测试数据
-    dates = pd.date_range('2023-01-01', periods=20, freq='D')
-    symbols = ['A', 'B', 'C']
-    
-    # 创建多级索引的测试数据
-    index = pd.MultiIndex.from_product([dates, symbols], names=['date', 'symbol'])
-    test_data = pd.DataFrame(
-        np.random.randn(60, 1), 
-        index=index, 
-        columns=['value']
-    ).unstack(level=-1)  # 转换为每行为一个日期，每列为一只股票
-    
-    print("测试数据形状:", test_data.shape)
-    print("测试数据:")
-    print(test_data.head())
-    
-    # 测试各种操作符
-    print("\n=== 测试操作符 ===")
-    
-    # 测试ts_sum
-    result_ts_sum = ts_sum(test_data, 5)
-    print(f"ts_sum结果形状: {result_ts_sum.shape}")
-    
-    # 测试sma
-    result_sma = sma(test_data, 5)
-    print(f"sma结果形状: {result_sma.shape}")
-    
-    # 测试stddev
-    result_stddev = stddev(test_data, 5)
-    print(f"stddev结果形状: {result_stddev.shape}")
-    
-    # 测试rank - 使用原数据测试
-    original_values = test_data.fillna(0)  # 填充NaN值以便测试
-    result_rank = rank(original_values)
-    print(f"rank结果形状: {result_rank.shape}")
-    print("rank结果示例:")
-    print(result_rank.head())
-    
-    print("\n所有操作符测试完成!")
+    print("operators.py 需要提供真实市场数据运行，请通过 EasyXT 数据接口加载数据后调用。")

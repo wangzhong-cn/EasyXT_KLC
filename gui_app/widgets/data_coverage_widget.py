@@ -15,6 +15,7 @@ data_coverage_widget.py — 数据覆盖率矩阵组件
     DataCoverageWidget.refresh()   — 从数据库重新加载矩阵
     DataCoverageWidget.set_filter  — 按股票代码前缀/关键词过滤行
 """
+
 from __future__ import annotations
 
 import logging
@@ -44,20 +45,39 @@ from core.signal_bus import signal_bus
 
 log = logging.getLogger(__name__)
 
-_PERIODS = ["1d", "1m", "5m", "tick"]
-_COL_HEADERS = ["股票代码", "日K(1d)", "分钟(1m)", "5分钟(5m)", "Tick"]
+# 基础周期：直接存储于 DuckDB 独立表中的周期
+_PERIODS_BASE = ["1d", "1m", "5m", "tick"]
+# 自定义派生周期：由 _precompute_custom_period_bars 从基础数据派生；
+# 日内派生（15m/30m/60m）：get_data_coverage 通过 _INTRADAY_SOURCE_MAP 映射到 stock_5m，
+# 显示的是「源数据覆盖范围」即预计算可操作的数据边界。
+# 多日派生（5d/10d）：get_data_coverage 直接查询 custom_period_bars 表实际预计算结果。
+_PERIODS_DERIVED = ["15m", "30m", "60m", "5d", "10d"]
+_PERIODS = _PERIODS_BASE + _PERIODS_DERIVED
+_COL_HEADERS = [
+    "股票代码",
+    "日K(1d)",
+    "分钟(1m)",
+    "5分钟(5m)",
+    "Tick",
+    "15分钟(源:5m)",
+    "30分钟(源:5m)",
+    "60分钟(源:5m)",
+    "5日K(源:1d)",
+    "10日K(源:1d)",
+]
 
-_COLOR_HAS_DATA = QColor(200, 240, 200)   # 浅绿
-_COLOR_NO_DATA = QColor(255, 220, 220)    # 浅红
+_COLOR_HAS_DATA = QColor(200, 240, 200)  # 浅绿
+_COLOR_NO_DATA = QColor(255, 220, 220)  # 浅红
 _COLOR_HEADER = QColor(240, 240, 240)
 
 
 # ─── 后台加载线程 ──────────────────────────────────────────────────────────────
 
+
 class _CoverageLoadThread(QThread):
     """在后台线程中调用 get_data_coverage()，避免阻塞 UI。"""
 
-    finished = pyqtSignal(object)   # pd.DataFrame or None
+    finished = pyqtSignal(object)  # pd.DataFrame or None
     error = pyqtSignal(str)
 
     def __init__(self, interface, stock_codes=None, parent=None):
@@ -79,7 +99,7 @@ class _CoverageLoadThread(QThread):
 class _BulkDownloadThread(QThread):
     """后台执行 bulk_download，定期回调进度。"""
 
-    progress = pyqtSignal(int, int, str)    # current, total, status_text
+    progress = pyqtSignal(int, int, str)  # current, total, status_text
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
@@ -108,6 +128,7 @@ class _BulkDownloadThread(QThread):
 
 
 # ─── 主组件 ───────────────────────────────────────────────────────────────────
+
 
 class DataCoverageWidget(QWidget):
     """数据覆盖率矩阵可视化组件。
@@ -244,6 +265,7 @@ class DataCoverageWidget(QWidget):
         try:
             from data_manager.unified_data_interface import UnifiedDataInterface
             from data_manager.duckdb_connection_pool import resolve_duckdb_path
+
             self._iface = UnifiedDataInterface(
                 duckdb_path=resolve_duckdb_path(None), silent_init=True
             )
@@ -259,6 +281,7 @@ class DataCoverageWidget(QWidget):
             return self._updater
         try:
             from data_manager.auto_data_updater import AutoDataUpdater
+
             self._updater = AutoDataUpdater()
             self._updater.initialize_interface()
         except Exception as exc:
@@ -268,7 +291,7 @@ class DataCoverageWidget(QWidget):
 
     def _on_coverage_loaded(self, df) -> None:
         self._refresh_btn.setEnabled(True)
-        if df is None or (hasattr(df, 'empty') and df.empty):
+        if df is None or (hasattr(df, "empty") and df.empty):
             self._status_label.setText("无数据（DuckDB 为空或未连接）")
             self._table.setRowCount(0)
             return
@@ -276,9 +299,7 @@ class DataCoverageWidget(QWidget):
         self._populate_table(df)
         total_stocks = len(df)
         self._status_label.setText(f"共 {total_stocks} 只标的")
-        self._summary_label.setText(
-            f"标的数: {total_stocks}  |  周期: {', '.join(_PERIODS)}"
-        )
+        self._summary_label.setText(f"标的数: {total_stocks}  |  周期: {', '.join(_PERIODS)}")
 
     def _on_load_error(self, msg: str) -> None:
         self._refresh_btn.setEnabled(True)
@@ -383,7 +404,8 @@ class DataCoverageWidget(QWidget):
             QMessageBox.information(self, "提示", "没有满足条件的标的。")
             return
         reply = QMessageBox.question(
-            self, "确认批量补数",
+            self,
+            "确认批量补数",
             f"将对 {len(visible_codes)} 只标的执行全周期（1d/1m/5m）数据下载，\n"
             "此操作可能耗时较长，是否继续？",
             QMessageBox.Yes | QMessageBox.No,
@@ -420,9 +442,9 @@ class DataCoverageWidget(QWidget):
         self._download_all_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._progress_bar.setVisible(False)
-        ok = result.get('success_stocks', 0)
-        fail = result.get('failed_stocks', 0)
-        rec = result.get('total_records', 0)
+        ok = result.get("success_stocks", 0)
+        fail = result.get("failed_stocks", 0)
+        rec = result.get("total_records", 0)
         self._status_label.setText(f"完成: 成功={ok} 失败={fail} 总记录={rec}")
         # 完成后自动刷新覆盖矩阵
         self.refresh()

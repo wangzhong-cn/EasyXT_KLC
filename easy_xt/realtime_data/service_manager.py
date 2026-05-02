@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-_SH = ZoneInfo('Asia/Shanghai')
+_SH = ZoneInfo("Asia/Shanghai")
 from typing import Optional
 
 from .config.settings import RealtimeDataConfig
@@ -29,15 +29,15 @@ from .websocket_server import WebSocketServer
 # Windows 默认 stdout/stderr 编码为 GBK，中文日志经 QProcess 按 UTF-8 解码会乱码。
 # 强制 StreamHandler 使用 UTF-8 编码（不再用 open(fileno()) 高风险 FD 重绑）。
 _stream_handler = logging.StreamHandler(
-    io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 )
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler('logs/service_manager.log', encoding='utf-8'),
+        logging.FileHandler("logs/service_manager.log", encoding="utf-8"),
         _stream_handler,
-    ]
+    ],
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,13 @@ def _run_websocket_server(ws_host: str, ws_port: int):
     server.config.update_config("websocket.host", ws_host)
     server.config.update_config("websocket.port", ws_port)
     asyncio.run(server.start())
+
+
+def _run_core_api_server(host: str, port: int):
+    """启动核心API服务器 (FastAPI + WebSocket)"""
+    import uvicorn
+
+    uvicorn.run("core.api_server:app", host=host, port=port, reload=False)
 
 
 def _acquire_single_instance_lock():
@@ -112,6 +119,7 @@ def _release_single_instance_lock(lock_file):
     except Exception:
         pass
 
+
 class EasyXTServiceManager:
     """EasyXT服务管理器"""
 
@@ -119,9 +127,12 @@ class EasyXTServiceManager:
         self.config = RealtimeDataConfig()
         self.http_process: Optional[mp.Process] = None
         self.websocket_process: Optional[mp.Process] = None
+        self.core_api_process: Optional[mp.Process] = None
         # --- 增强项A: 启动实例标识 (session_id / boot_id) ---
         # 每次进程启动产生唯一 ID，便于多次重启的链路追踪
-        self.session_id: str = datetime.now(tz=_SH).strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+        self.session_id: str = (
+            datetime.now(tz=_SH).strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+        )
         # --- 增强项B: 失败原因分级计数 ---
         # key: 失败原因分类 (gbk_crash / bind_conflict / unexpected_exit)
         self._fail_counter: dict[str, int] = {
@@ -194,9 +205,7 @@ class EasyXTServiceManager:
             logger.info(f"启动WebSocket服务器进程 (端口: {ws_port})")
 
             self.websocket_process = mp.Process(
-                target=_run_websocket_server,
-                args=(ws_host, ws_port),
-                name="EasyXT-WebSocket"
+                target=_run_websocket_server, args=(ws_host, ws_port), name="EasyXT-WebSocket"
             )
             self.websocket_process.daemon = True
             self.websocket_process.start()
@@ -204,6 +213,32 @@ class EasyXTServiceManager:
 
         except Exception as e:
             logger.error(f"启动WebSocket服务器失败: {e}")
+            raise
+
+    def start_core_api_server_process(self):
+        """启动核心API服务器进程 (FastAPI + WebSocket)"""
+        try:
+            core_host = os.environ.get("EASYXT_API_HOST", "127.0.0.1")
+            core_port = int(os.environ.get("EASYXT_API_PORT", "8765"))
+
+            if not _is_port_available(core_port, core_host):
+                logger.error(
+                    f"端口 {core_port} 已被占用，跳过核心API服务器启动。"
+                    f"请检查是否有残留进程占用该端口。"
+                )
+                return
+
+            logger.info(f"启动核心API服务器进程 (端口: {core_port})")
+
+            self.core_api_process = mp.Process(
+                target=_run_core_api_server, args=(core_host, core_port), name="EasyXT-CoreAPI"
+            )
+            self.core_api_process.daemon = True
+            self.core_api_process.start()
+            logger.info(f"核心API服务器进程已启动 (PID: {self.core_api_process.pid})")
+
+        except Exception as e:
+            logger.error(f"启动核心API服务器失败: {e}")
             raise
 
     def start_services(self):
@@ -220,6 +255,10 @@ class EasyXTServiceManager:
                 self.start_websocket_server_process()
                 time.sleep(2)  # 等待WebSocket服务器启动
 
+            # 启动核心API服务器 (提供 /ws/market/{symbol} WebSocket路由)
+            self.start_core_api_server_process()
+            time.sleep(2)  # 等待核心API服务器启动
+
             self.running = True
             logger.info(f"[SESSION:{self.session_id}] 所有服务启动成功")
             api_config = self.config.config.get("api", {})
@@ -231,6 +270,9 @@ class EasyXTServiceManager:
                 ws_host = websocket_config.get("host", "localhost")
                 ws_port = websocket_config.get("port", 8765)
                 logger.info(f"WebSocket: ws://{ws_host}:{ws_port}")
+            core_host = os.environ.get("EASYXT_API_HOST", "127.0.0.1")
+            core_port = int(os.environ.get("EASYXT_API_PORT", "8765"))
+            logger.info(f"Core API: http://{core_host}:{core_port} (WebSocket: /ws/market/)")
 
         except Exception as e:
             logger.error(f"服务启动失败: {e}")
@@ -259,6 +301,15 @@ class EasyXTServiceManager:
             if self.websocket_process.is_alive():
                 logger.warning("强制终止WebSocket服务器进程")
                 self.websocket_process.kill()
+
+        # 停止核心API服务器
+        if self.core_api_process and self.core_api_process.is_alive():
+            logger.info("停止核心API服务器进程")
+            self.core_api_process.terminate()
+            self.core_api_process.join(timeout=10)
+            if self.core_api_process.is_alive():
+                logger.warning("强制终止核心API服务器进程")
+                self.core_api_process.kill()
 
         logger.info("所有服务已停止")
 
@@ -366,6 +417,7 @@ class EasyXTServiceManager:
 
     def run(self):
         """运行服务管理器"""
+
         # 注册信号处理器
         def signal_handler(signum, frame):
             logger.info(f"收到信号 {signum}，正在关闭服务...")
@@ -389,9 +441,10 @@ class EasyXTServiceManager:
         finally:
             self.stop_services()
 
+
 def main():
     """主函数"""
-    os.makedirs('logs', exist_ok=True)
+    os.makedirs("logs", exist_ok=True)
     global _instance_lock_file
     _instance_lock_file = _acquire_single_instance_lock()
     if _instance_lock_file is None:
@@ -404,6 +457,7 @@ def main():
         manager.run()
     finally:
         _release_single_instance_lock(_instance_lock_file)
+
 
 if __name__ == "__main__":
     main()

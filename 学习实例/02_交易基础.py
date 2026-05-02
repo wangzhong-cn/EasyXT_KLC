@@ -1,4 +1,4 @@
-"""
+﻿"""
 EasyXT学习实例 02 - 交易基础
 学习目标：掌握基础的交易功能，包括下单、撤单、查询等
 注意：本示例包含实际交易代码，请在模拟环境中运行！
@@ -27,8 +27,8 @@ except:
     mock_mode = False
 
 # 配置信息（请根据实际情况修改）
-USERDATA_PATH = r'D:\国金QMT交易端模拟\userdata_mini' #修改为实际的路径
-ACCOUNT_ID = "39020958"  # 修改为实际账号
+USERDATA_PATH = r'D:\申万宏源策略量化交易终端\userdata_mini' #修改为实际的路径
+ACCOUNT_ID = "test1101"  # 修改为实际账号
 TEST_CODE = "000001.SZ"  # 测试用股票代码
 
 def lesson_01_trade_setup():
@@ -441,8 +441,8 @@ except:
     mock_mode = False
 
 # 配置信息（请根据实际情况修改）
-USERDATA_PATH = r'D:\国金QMT交易端模拟\userdata_mini' #修改为实际的路径
-ACCOUNT_ID = "39020958"  # 修改为实际账号
+USERDATA_PATH = r'D:\申万宏源策略量化交易终端\userdata_mini' #修改为实际的路径
+ACCOUNT_ID = "test1101"  # 修改为实际账号
 TEST_CODE = "000001.SZ"  # 测试用股票代码
 
 def lesson_01_trade_setup():
@@ -847,8 +847,8 @@ except:
     mock_mode = False
 
 # 配置信息（请根据实际情况修改）
-USERDATA_PATH = r'D:\国金QMT交易端模拟\userdata_mini' #修改为实际的路径
-ACCOUNT_ID = "39020958"  # 修改为实际账号
+USERDATA_PATH = r'D:\申万宏源策略量化交易终端\userdata_mini' #修改为实际的路径
+ACCOUNT_ID = "test1101"  # 修改为实际账号
 TEST_CODE = "000001.SZ"  # 测试用股票代码
 
 def lesson_01_trade_setup():

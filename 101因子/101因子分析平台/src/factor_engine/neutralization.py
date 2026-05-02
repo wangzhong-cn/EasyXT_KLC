@@ -258,50 +258,5 @@ class FactorNeutralizer:
         return market_data
 
 
-def test_neutralization():
-    """测试中性化功能"""
-    # 创建测试数据
-    dates = pd.date_range('2023-01-01', periods=10, freq='D')
-    symbols = ['000001.SZ', '000002.SZ', '600000.SH', '600036.SH', '600519.SH']
-
-    # 创建MultiIndex
-    index = pd.MultiIndex.from_product([dates, symbols], names=['date', 'symbol'])
-
-    # 创建因子值（模拟有行业和市值偏差）
-    np.random.seed(42)
-    factor_values = []
-
-    for date in dates:
-        for symbol in symbols:
-            # 模拟：银行股因子值偏高
-            base_value = np.random.randn()
-            if symbol in ['600000.SH', '600036.SH', '601398.SH']:
-                base_value += 1.0
-            factor_values.append(base_value)
-
-    factor_data = pd.Series(factor_values, index=index, name='factor')
-
-    # 创建市值数据
-    market_cap = pd.Series(np.random.uniform(100, 1000, len(index)), index=index)
-
-    print("原始因子统计:")
-    print(factor_data.groupby(level=1).mean())
-
-    # 行业中性化
-    neutralized_ind = FactorNeutralizer.neutralize_by_industry(factor_data)
-    print("\n行业中性后因子统计:")
-    print(neutralized_ind.groupby(level=1).mean())
-
-    # 市值中性化
-    neutralized_mc = FactorNeutralizer.neutralize_by_market_cap(factor_data, market_cap)
-    print("\n市值中性后因子统计:")
-    print(neutralized_mc.groupby(level=1).mean())
-
-    # 双重中性化
-    neutralized_both = FactorNeutralizer.neutralize_both(factor_data, market_cap)
-    print("\n双重中性后因子统计:")
-    print(neutralized_both.groupby(level=1).mean())
-
-
 if __name__ == '__main__':
-    test_neutralization()
+    print("neutralization.py 需要提供真实市场数据运行，请通过 EasyXT 数据接口加载数据后调用。")

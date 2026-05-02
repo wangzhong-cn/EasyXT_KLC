@@ -25,6 +25,7 @@ def _make_udi(**kwargs) -> Any:
         duckdb_path=":memory:",
         eager_init=False,
         silent_init=True,
+        xtdata_call_mode="direct",
     )
     defaults.update(kwargs)
     return UnifiedDataInterface(**defaults)
@@ -437,6 +438,7 @@ class TestGetStockData:
     def test_step6_cache_stale_hard_violation_triggers_quarantine(self):
         ohlcv = self._make_ohlcv()
         udi = self._make_udi_with_mock_duckdb(ohlcv)
+        udi._step6_validate_sample_rate = 1.0  # 确保本测试总是触发验证
         fake_result = MagicMock()
         fake_result.pass_gate = False
         fake_result.violations = [MagicMock(severity="hard", detail="close<=0")]
@@ -691,6 +693,11 @@ class TestGetStockData:
         assert isinstance(result, pd.DataFrame)
         assert not result.empty
         assert len(result) == 1
+        assert result["period_code"].iloc[0] == "1M"
+        assert result["period_family"].iloc[0] == "natural_calendar"
+        assert result["alignment"].iloc[0] == "calendar_right"
+        assert result["anchor"].iloc[0] == "period_end"
+        assert "threshold_version" in result.columns
 
     def test_dat_cache_path_auto_save_and_success_status(self, monkeypatch):
         monkeypatch.setenv("EASYXT_STEP6_VALIDATE_SAMPLE_RATE", "0")
@@ -775,6 +782,9 @@ class TestReadFromDuckDB:
 
     def test_missing_table_returns_empty(self):
         udi, mock_con = self._make_udi_with_con()
+        # 清除类级 _known_tables 缓存，避免跨测试污染
+        from data_manager.unified_data_interface import UnifiedDataInterface
+        UnifiedDataInterface._known_tables.clear()
         # information_schema.tables returns 0 → table not found
         mock_con.execute.return_value.fetchone.return_value = (0,)
         result = udi._read_from_duckdb(
@@ -974,7 +984,10 @@ class TestReadFromQmtEndDateFix:
 
     def _make_udi(self):
         from data_manager.unified_data_interface import UnifiedDataInterface
-        return UnifiedDataInterface(duckdb_path=":memory:", eager_init=False, silent_init=True)
+        return UnifiedDataInterface(
+            duckdb_path=":memory:", eager_init=False, silent_init=True,
+            xtdata_call_mode="direct",
+        )
 
     def _run_qmt(self, period: str, end_date: str):
         """调用 _read_from_qmt，通过 sys.modules 注入 mock xtdata，返回捕获的参数"""
@@ -982,33 +995,29 @@ class TestReadFromQmtEndDateFix:
         recorded: dict = {}
 
         fake_df = pd.DataFrame({
-            "time": [1741680000000, 1741680300000],
             "open": [10.0, 10.1],
             "high": [10.2, 10.3],
             "low": [9.9, 10.0],
             "close": [10.1, 10.2],
-            "volume": [1000.0, 1200.0],
-            "amount": [10100.0, 12240.0],
-        })
+            "volume": [1000, 1200],
+        }, index=pd.to_datetime(["2026-03-10", "2026-03-11"]))
+        fake_df.index.name = "date"
 
         mock_xtdata = MagicMock()
         mock_xtdata.download_history_data.side_effect = lambda sc, period, start_time, end_time: (
             recorded.__setitem__("dl_end", end_time)
         )
-        mock_xtdata.get_market_data_ex.side_effect = lambda **kw: (
-            recorded.__setitem__("gd_end", kw.get("end_time", "")) or {"000988.SZ": fake_df}
-        )
-        mock_xtdata.get_market_data_ex.return_value = {"000988.SZ": fake_df}
 
         fake_xtquant = types.ModuleType("xtquant")
         fake_xtquant.xtdata = mock_xtdata  # type: ignore[attr-defined]
 
         with patch.dict("sys.modules", {"xtquant": fake_xtquant, "xtquant.xtdata": mock_xtdata}):
-            udi = self._make_udi()
-            try:
-                udi._read_from_qmt("000988.SZ", "2026-03-10", end_date, period)
-            except Exception:
-                pass
+            with patch("data_manager.dat_binary_reader.read_dat", return_value=fake_df):
+                udi = self._make_udi()
+                try:
+                    udi._read_from_qmt("000988.SZ", "2026-03-10", end_date, period)
+                except Exception:
+                    pass
 
         return recorded
 
@@ -1056,36 +1065,33 @@ class TestReadFromQmtEndDateFix:
         recorded = {}
         fake_df = pd.DataFrame(
             {
-                "time": [1741680000000],
                 "open": [10.0],
                 "high": [10.2],
                 "low": [9.9],
                 "close": [10.1],
-                "volume": [1000.0],
-                "amount": [10100.0],
-            }
+                "volume": [1000],
+            },
+            index=pd.to_datetime(["2026-03-24"]),
         )
+        fake_df.index.name = "date"
         mock_xtdata = MagicMock()
-        mock_xtdata.download_history_data.return_value = None
-
-        def _gmde(**kw):
-            recorded["start"] = kw.get("start_time")
-            recorded["end"] = kw.get("end_time")
-            return {"000988.SZ": fake_df}
-
-        mock_xtdata.get_market_data_ex.side_effect = _gmde
+        mock_xtdata.download_history_data.side_effect = lambda sc, period, start_time, end_time: (
+            recorded.__setitem__("dl_start", start_time),
+            recorded.__setitem__("dl_end", end_time),
+        )
         fake_xtquant = types.ModuleType("xtquant")
         fake_xtquant.xtdata = mock_xtdata  # type: ignore[attr-defined]
         with patch.dict(os.environ, {"EASYXT_ENABLE_QMT_ONLINE": "1"}):
             with patch.dict("sys.modules", {"xtquant": fake_xtquant, "xtquant.xtdata": mock_xtdata}):
-                udi = self._make_udi()
-                _ = udi._read_from_qmt("000988.SZ", "2099-01-01", "2099-01-02", "1d")
+                with patch("data_manager.dat_binary_reader.read_dat", return_value=fake_df):
+                    udi = self._make_udi()
+                    _ = udi._read_from_qmt("000988.SZ", "2099-01-01", "2099-01-02", "1d")
 
         today = pd.Timestamp.today().normalize()
         expected_end = today.strftime("%Y%m%d")
         expected_start = (today - pd.Timedelta(days=365)).strftime("%Y%m%d")
-        assert recorded.get("end") == expected_end
-        assert recorded.get("start") == expected_start
+        assert recorded.get("dl_end") == expected_end
+        assert recorded.get("dl_start") == expected_start
 
     def test_read_from_qmt_import_fail_returns_none(self):
         import builtins
@@ -1121,43 +1127,50 @@ class TestReadFromQmtEdgeCases:
         assert result is None
 
     def test_qmt_dict_without_target_symbol_returns_none(self):
+        """download 成功但 DAT 直读返回空 → None。
+
+        该用例只验证 `_read_from_qmt_locked()` 内部的 DAT 空返回分支，
+        避免受 `_read_from_qmt()` 外层调度包装的跨测试状态污染影响。
+        """
         import types
 
         udi = _make_udi()
-        fake_df = pd.DataFrame({"time": [1741680000000], "open": [10.0], "high": [10.2], "low": [9.9], "close": [10.1]})
         mock_xtdata = MagicMock()
         mock_xtdata.download_history_data.return_value = None
-        mock_xtdata.get_market_data_ex.return_value = {"OTHER.SZ": fake_df}
         fake_xtquant = types.ModuleType("xtquant")
         fake_xtquant.xtdata = mock_xtdata  # type: ignore[attr-defined]
         with patch.dict("sys.modules", {"xtquant": fake_xtquant, "xtquant.xtdata": mock_xtdata}):
-            result = udi._read_from_qmt("000001.SZ", "2024-01-01", "2024-01-31", "1d")
+            with patch("data_manager.dat_binary_reader.read_dat", return_value=pd.DataFrame()):
+                result = udi._read_from_qmt_locked("000001.SZ", "2024-01-01", "2024-01-31", "1d")
         assert result is None
 
     def test_qmt_missing_volume_amount_filled_with_zero(self):
+        """DAT 直读返回无 amount 列时，自动补 amount=0"""
         import types
 
         udi = _make_udi()
+        # DAT 直读返回 index=datetime, columns=[open,high,low,close,volume]（无 amount）
         fake_df = pd.DataFrame(
             {
-                "time": [1741680000000, 1741766400000],
                 "open": [10.0, 10.1],
                 "high": [10.2, 10.3],
                 "low": [9.9, 10.0],
                 "close": [10.1, 10.2],
-            }
+                "volume": [1000, 1200],
+            },
+            index=pd.to_datetime(["2024-03-11", "2024-03-12"]),
         )
+        fake_df.index.name = "date"
         mock_xtdata = MagicMock()
         mock_xtdata.download_history_data.return_value = None
-        mock_xtdata.get_market_data_ex.return_value = {"000001.SZ": fake_df}
         fake_xtquant = types.ModuleType("xtquant")
         fake_xtquant.xtdata = mock_xtdata  # type: ignore[attr-defined]
         with patch.dict(os.environ, {"EASYXT_ENABLE_QMT_ONLINE": "1"}):
             with patch.dict("sys.modules", {"xtquant": fake_xtquant, "xtquant.xtdata": mock_xtdata}):
-                result = udi._read_from_qmt("000001.SZ", "2024-01-01", "2024-01-31", "1d")
+                with patch("data_manager.dat_binary_reader.read_dat", return_value=fake_df):
+                    result = udi._read_from_qmt("000001.SZ", "2024-01-01", "2024-01-31", "1d")
         assert isinstance(result, pd.DataFrame)
         assert "volume" in result.columns and "amount" in result.columns
-        assert (result["volume"] == 0).all()
         assert (result["amount"] == 0).all()
 
 

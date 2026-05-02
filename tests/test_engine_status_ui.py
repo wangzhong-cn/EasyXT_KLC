@@ -36,16 +36,16 @@ class TestFormatEngineStatusUi:
         )
         assert result["text"].startswith("测试引擎")
 
-    # ------ path 2: mock 模式 ------
+    # ------ path 2: mock / unavailable 展示为不可用 ------
 
-    def test_mock_mode_text_contains_mock(self):
+    def test_mock_mode_text_contains_unavailable(self):
         result = format_engine_status_ui({"mode": "mock"})
-        assert "模拟模式" in result["text"]
-        assert "⚠️" in result["text"]
+        assert "不可用" in result["text"]
+        assert "❌" in result["text"]
 
-    def test_mock_mode_color_orange(self):
+    def test_mock_mode_color_red(self):
         result = format_engine_status_ui({"mode": "mock"})
-        assert result["color"].startswith("#ef")
+        assert result["color"] == "#d32f2f"
 
     def test_mock_mode_with_error_type_in_text(self):
         result = format_engine_status_ui({"mode": "mock", "error_type": "ImportError"})
@@ -60,6 +60,7 @@ class TestFormatEngineStatusUi:
             {"mode": "mock", "error_message": "找不到backtrader"}
         )
         assert "找不到backtrader" in result["tooltip"]
+        assert "已禁止模拟引擎降级" in result["tooltip"]
 
     def test_mock_mode_hint_in_tooltip(self):
         result = format_engine_status_ui(
@@ -208,15 +209,16 @@ class TestFormatEngineStatusLog:
         )
         assert "MY_ENGINE" in result
 
-    # ------ path 2: mock 模式 ------
+    # ------ path 2: mock / unavailable 日志 ------
 
-    def test_mock_log_level_warn(self):
+    def test_mock_log_level_error(self):
         result = format_engine_status_log({"mode": "mock"})
-        assert "WARN" in result
+        assert "ERROR" in result
 
     def test_mock_mode_in_log(self):
         result = format_engine_status_log({"mode": "mock"})
         assert "mock" in result
+        assert "已禁止模拟引擎降级" in result
 
     def test_mock_with_error_type_in_log(self):
         result = format_engine_status_log(

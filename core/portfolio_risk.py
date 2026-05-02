@@ -354,6 +354,54 @@ class PortfolioRiskAnalyzer:
         return abs(min(avg_tail, 0.0))
 
     # ------------------------------------------------------------------
+    # 优化权重风控校验
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def check_optimal_weights(
+        weights: Dict[str, float],
+        max_single_weight: float = 0.3,
+        max_hhi: float = 0.25,
+    ) -> "OptimalWeightRiskCheck":
+        """
+        对优化器输出的权重进行风控校验。
+
+        Args:
+            weights:           各资产权重字典，合计应为 1.0。
+            max_single_weight: 单资产最大权重限制（默认 30%）。
+            max_hhi:           权重 HHI 上限（默认 0.25，即均匀分散）。
+
+        Returns:
+            OptimalWeightRiskCheck 实例。
+        """
+        if not weights:
+            return OptimalWeightRiskCheck(feasible=False, warnings=["权重字典为空"])
+
+        total = sum(weights.values())
+        w_norm = {k: v / total for k, v in weights.items()} if total > 0 else weights
+
+        max_w = max(w_norm.values())
+        hhi = sum(v ** 2 for v in w_norm.values())
+
+        warns: List[str] = []
+        single_breach = max_w > max_single_weight + 1e-9
+        hhi_breach = hhi > max_hhi + 1e-9
+
+        if single_breach:
+            warns.append(f"单仓占比超限 {max_w:.2f} > {max_single_weight:.2f}")
+        if hhi_breach:
+            warns.append(f"HHI 超限 {hhi:.2f} > {max_hhi:.2f}")
+
+        return OptimalWeightRiskCheck(
+            feasible=not (single_breach or hhi_breach),
+            max_single_weight=max_w,
+            weight_hhi=hhi,
+            max_single_breach=single_breach,
+            hhi_breach=hhi_breach,
+            warnings=warns,
+        )
+
+    # ------------------------------------------------------------------
     # 便捷工厂
     # ------------------------------------------------------------------
 
@@ -378,3 +426,31 @@ class PortfolioRiskAnalyzer:
             for sym, (nav, rets) in positions.items()
         }
         return cls().portfolio_var95(expanded, total_nav)
+
+
+# ---------------------------------------------------------------------------
+# 优化权重风控校验
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OptimalWeightRiskCheck:
+    """check_optimal_weights 的校验结果。"""
+
+    feasible: bool = True
+    """校验整体是否通过（True=无超限，False=至少一项超限）"""
+
+    max_single_weight: float = 0.0
+    """当前最大单仓权重"""
+
+    weight_hhi: float = 0.0
+    """权重 HHI 指数（集中度）"""
+
+    max_single_breach: bool = False
+    """是否存在单仓权重超限"""
+
+    hhi_breach: bool = False
+    """是否 HHI 超限"""
+
+    warnings: List[str] = field(default_factory=list)  # type: ignore[assignment]
+    """警告信息列表"""

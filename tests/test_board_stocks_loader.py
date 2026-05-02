@@ -28,6 +28,17 @@ class TestBoardStocksLoaderConstruction:
         assert loader.available is True
         assert loader.xtdata is not None
 
+    def test_constructor_silent_by_default_when_xtdata_present(self, capsys):
+        mock_xtdata = MagicMock()
+        with patch.dict('sys.modules', {
+            'xtquant': MagicMock(xtdata=mock_xtdata),
+            'xtquant.xtdata': mock_xtdata,
+        }):
+            from data_manager.board_stocks_loader import BoardStocksLoader
+            _ = BoardStocksLoader()
+        captured = capsys.readouterr()
+        assert captured.out == ''
+
     def test_constructor_sets_available_false_when_xtdata_missing(self):
         with patch.dict('sys.modules', {'xtquant': None, 'xtquant.xtdata': None}):
             # Temporarily make import fail
@@ -73,6 +84,17 @@ class TestGetBoardStocksUnavailable:
 
     def test_unknown_board_returns_empty_unavailable(self, loader):
         assert loader.get_board_stocks('unknown_board') == []
+
+    def test_unavailable_path_silent_by_default(self, capsys):
+        from data_manager.board_stocks_loader import BoardStocksLoader
+        loader = BoardStocksLoader.__new__(BoardStocksLoader)
+        loader.available = False
+        loader.xtdata = None
+        loader._stdout_enabled = False
+        loader._logger = MagicMock()
+        assert loader.get_board_stocks('hs300') == []
+        captured = capsys.readouterr()
+        assert captured.out == ''
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +168,20 @@ class TestGetBoardStocksMocked:
         loader.xtdata.get_stock_list_in_sector.return_value = None
         result = loader.get_board_stocks('cyb')
         assert isinstance(result, list)
+
+    def test_verbose_flag_restores_stdout_for_manual_usage(self, capsys):
+        mock_xtdata = MagicMock()
+        with patch.dict('sys.modules', {
+            'xtquant': MagicMock(xtdata=mock_xtdata),
+            'xtquant.xtdata': mock_xtdata,
+        }):
+            from data_manager.board_stocks_loader import BoardStocksLoader
+            loader = BoardStocksLoader(verbose=True)
+        loader.xtdata = mock_xtdata
+        loader.available = True
+        loader.get_board_stocks('invalid_board')
+        captured = capsys.readouterr()
+        assert '[ERROR] 未知板块' in captured.out
 
 
 # ---------------------------------------------------------------------------

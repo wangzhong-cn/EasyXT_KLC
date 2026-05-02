@@ -37,6 +37,25 @@ AccountType = Literal['STOCK', 'CREDIT', 'OPTION']
 # 市场类型
 MarketType = Literal['SH', 'SZ', 'BJ']
 
+# ==================== 资产类型抽象 ====================
+
+
+class AssetType(Enum):
+    """支持交易品种类型。"""
+    STOCK = "stock"
+    FUTURE = "future"
+    OPTION = "option"
+    CONVERTIBLE = "convertible"
+
+
+class FutureOffset(Enum):
+    """期货开平标志。"""
+    OPEN = "open"  # 开仓
+    CLOSE = "close"  # 平仓
+    CLOSE_TODAY = "close_today"  # 平今
+    CLOSE_HISTORY = "close_history"  # 平昨
+
+
 # ==================== 数据结构定义 ====================
 
 class PriceFields(TypedDict, total=False):
@@ -245,6 +264,32 @@ class ApiResponse:
     message: str
     data: Any = None
     error_code: Optional[str] = None
+
+
+@dataclass
+class UnifiedOrderSpec:
+    """
+    统一订单规格——兼容股票/期货/期权的最小抽象。
+
+    Args:
+        code:       标的代码（股票如 "000001.SZ"，期货如 "rb2501.SF"）
+        asset_type: 资产类型（默认 STOCK）
+        direction:  "buy" | "sell"
+        volume:     委托数量（股票=股数，期货=手数）
+        price:      委托价格（0=市价）
+        price_type: "market" | "limit"（仅期货有意义，股票映射到 xt 市价/限价）
+        offset:     FutureOffset（仅期货，股票/可转债自动忽略）
+        hedge_type: 投机/套保标志（仅期货，xtquant 支持 FUTURE_HEDGE/FUTURE_SPECULATION）
+    """
+    code: str
+    direction: str
+    volume: int
+    price: float = 0.0
+    price_type: str = "market"
+    asset_type: AssetType = AssetType.STOCK
+    offset: FutureOffset = FutureOffset.OPEN
+    hedge_type: str = ""
+
 
 @dataclass
 class OrderResponse(ApiResponse):

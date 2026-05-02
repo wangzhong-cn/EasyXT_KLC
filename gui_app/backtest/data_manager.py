@@ -8,6 +8,7 @@ import importlib
 import importlib.util
 import os
 import sys
+import threading
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -43,6 +44,7 @@ class DataManager:
         preferred_source: Optional[DataSource] = None,
         use_local_cache: bool = True,
         defer_checks: bool = False,
+        verbose: Optional[bool] = None,
     ):
         """
         初始化数据管理器
@@ -53,6 +55,7 @@ class DataManager:
         """
         self.preferred_source = preferred_source
         self.use_local_cache = use_local_cache
+        self.verbose = self._resolve_verbose_flag(verbose)
         self.last_source: Optional[str] = None
         self.last_data_info: dict[str, Any] = {}
 
@@ -64,9 +67,9 @@ class DataManager:
         self._duckdb_enabled = False  # 标记DuckDB是否可用
         if importlib.util.find_spec("duckdb") is not None:
             self._duckdb_enabled = True
-            print("[OK] DuckDB数据库已启用 (只读模式)")
+            self._emit("[OK] DuckDB数据库已启用 (只读模式)")
         else:
-            print("[INFO] DuckDB未安装，跳过DuckDB数据源")
+            self._emit("[INFO] DuckDB未安装，跳过DuckDB数据源")
 
         self.local_data_manager = None
         if self.use_local_cache:
@@ -94,7 +97,7 @@ class DataManager:
                 if LocalDataManagerWithAdjustment is not None:
                     self.local_data_manager = LocalDataManagerWithAdjustment()
             except Exception as e:
-                print(f"[INFO] 本地缓存初始化失败: {str(e)[:120]}")
+                self._emit(f"[INFO] 本地缓存初始化失败: {str(e)[:120]}")
             finally:
                 # 清理 101因子 版本，恢复项目根 data_manager
                 for k in list(sys.modules.keys()):
@@ -115,6 +118,21 @@ class DataManager:
 
         # 显示初始化状态
         self._print_initialization_status()
+
+    @staticmethod
+    def _resolve_verbose_flag(verbose: Optional[bool]) -> bool:
+        if verbose is not None:
+            return bool(verbose)
+        return str(os.environ.get("EASYXT_DATA_MANAGER_VERBOSE", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _emit(self, message: str) -> None:
+        if getattr(self, "verbose", False):
+            print(message)
 
     def _build_initial_status(self) -> dict[DataSource, dict[str, Any]]:
         status = {}
@@ -270,6 +288,19 @@ class DataManager:
 
     def _check_qstock_status(self) -> dict[str, Any]:
         """检查QStock状态"""
+        if threading.current_thread() is not threading.main_thread():
+            if importlib.util.find_spec("qstock") is None:
+                return {
+                    'available': False,
+                    'connected': False,
+                    'message': 'qstock模块未安装'
+                }
+            return {
+                'available': True,
+                'connected': False,
+                'message': 'QStock后台线程跳过活体验证'
+            }
+
         try:
             qs = importlib.import_module("qstock")
 
@@ -327,6 +358,12 @@ class DataManager:
                 'message': 'qstock模块未安装'
             }
         except Exception as e:
+            if "signal only works in main thread" in str(e):
+                return {
+                    'available': True,
+                    'connected': False,
+                    'message': 'QStock需在主线程检测，已跳过活体验证'
+                }
             return {
                 'available': False,
                 'connected': False,
@@ -399,8 +436,8 @@ class DataManager:
 
     def _print_initialization_status(self):
         """打印初始化状态"""
-        print("[DATA] 多数据源管理器初始化完成")
-        print("=" * 50)
+        self._emit("[DATA] 多数据源管理器初始化完成")
+        self._emit("=" * 50)
 
         for source in DataSource:
             status = self.source_status[source]
@@ -419,20 +456,20 @@ class DataManager:
                     icon = "[ERROR]"
                     color_status = "不可用"
 
-            print(f"   {icon} {source.value.upper():<8}: {color_status} - {status['message']}")
+            self._emit(f"   {icon} {source.value.upper():<8}: {color_status} - {status['message']}")
 
-        print("=" * 50)
+        self._emit("=" * 50)
 
         # 显示当前可用的数据源
         available_sources = [s.value.upper() for s in self.source_priority
                            if self.source_status[s]['available'] and self.source_status[s]['connected']]
 
         if available_sources:
-            print(f"[TARGET] 可用数据源: {' → '.join(available_sources)}")
+            self._emit(f"[TARGET] 可用数据源: {' → '.join(available_sources)}")
         else:
-            print("[INFO] 仅模拟数据可用")
+            self._emit("[INFO] 仅模拟数据可用")
 
-        print("=" * 50)
+        self._emit("=" * 50)
 
     def get_connection_status(self) -> dict[str, Any]:
         """获取连接状态信息"""
@@ -445,14 +482,21 @@ class DataManager:
                 break
 
         if not active_source:
-            active_source = DataSource.MOCK
+            return {
+                'active_source': 'none',
+                'source_status': {s.value: status for s, status in self.source_status.items()},
+                'qmt_connected': self.source_status[DataSource.QMT]['connected'],
+                'xt_available': self.source_status[DataSource.QMT]['available'],
+                'data_source': 'none',
+                'status_message': self._get_status_message(None)
+            }
 
         return {
             'active_source': active_source.value,
             'source_status': {s.value: status for s, status in self.source_status.items()},
             'qmt_connected': self.source_status[DataSource.QMT]['connected'],
             'xt_available': self.source_status[DataSource.QMT]['available'],
-            'data_source': 'real' if active_source != DataSource.MOCK else 'mock',
+            'data_source': 'real',
             'status_message': self._get_status_message(active_source)
         }
 
@@ -469,7 +513,7 @@ class DataManager:
         elif active_source == DataSource.AKSHARE:
             return "[OK] 已连接到AKShare，使用真实市场数据"
         else:
-            return "[INFO] 使用模拟数据"
+            return "[ERROR] 当前没有任何真实数据源可用"
 
     def set_preferred_source(self, source: DataSource):
         """设置首选数据源"""
@@ -479,7 +523,7 @@ class DataManager:
 
     def refresh_source_status(self):
         """刷新所有数据源状态"""
-        print("[RELOAD] 刷新数据源状态...")
+        self._emit("[RELOAD] 刷新数据源状态...")
         self.source_status = self._check_all_sources()
         self._print_initialization_status()
 
@@ -522,8 +566,8 @@ class DataManager:
         # 如果强制指定数据源
         if force_source:
             print(f"[TARGET] 强制使用数据源: {force_source.value.upper()}")
-            if period != '1d' and force_source in {DataSource.DUCKDB, DataSource.LOCAL}:
-                print(f"[WARNING] {force_source.value.upper()} 仅支持日线，当前周期 {period}")
+            if period != '1d' and force_source == DataSource.LOCAL:
+                print(f"[WARNING] LOCAL 本地缓存仅支持日线，当前周期 {period}")
                 self.last_source = force_source.value
                 self.last_data_info['source'] = force_source.value
                 return pd.DataFrame()
@@ -537,7 +581,7 @@ class DataManager:
             if (self.source_status[source]['available'] and
                 self.source_status[source]['connected']):
 
-                if period != '1d' and source in {DataSource.DUCKDB, DataSource.LOCAL}:
+                if period != '1d' and source == DataSource.LOCAL:
                     continue
 
                 print(f"[LINK] 尝试数据源: {source.value.upper()}")
@@ -561,12 +605,12 @@ class DataManager:
                     print(f"[WARNING] {source.value.upper()} 获取数据失败: {e}，尝试下一个数据源")
                     continue
 
-        # 如果所有数据源都失败，使用模拟数据
-        print("[INFO] 所有数据源失败，使用模拟数据")
-        data = self._get_data_from_source(DataSource.MOCK, stock_code, start_date, end_date, period, adjust)
-        self.last_source = DataSource.MOCK.value
-        self.last_data_info['source'] = DataSource.MOCK.value
-        return data
+        # 如果所有数据源都失败，抛出异常（严禁 mock 降级 — 铁律0）
+        raise RuntimeError(
+            f"所有数据源不可用，无法获取 {stock_code} 数据。"
+            f"请检查 QMT/AKShare/QStock 连接状态，或确保 DuckDB 缓存有数据。"
+            f"可用数据源状态: {self.source_status}"
+        )
 
     def _save_to_local_cache(self, stock_code: str, data: pd.DataFrame, period: str):
         """保存数据到本地缓存"""
@@ -603,7 +647,7 @@ class DataManager:
                             start_date: str, end_date: str, period: str, adjust: str = 'none') -> pd.DataFrame:
         """从指定数据源获取数据（支持复权）"""
         if source == DataSource.DUCKDB:
-            return self._get_duckdb_data(stock_code, start_date, end_date, adjust)
+            return self._get_duckdb_data(stock_code, start_date, end_date, period, adjust)
         elif source == DataSource.LOCAL:
             return self._get_local_data(stock_code, start_date, end_date, period, adjust)
         elif source == DataSource.QMT:
@@ -612,11 +656,13 @@ class DataManager:
             return self._get_qstock_data(stock_code, start_date, end_date, period)
         elif source == DataSource.AKSHARE:
             return self._get_akshare_data(stock_code, start_date, end_date, period)
-        else:  # DataSource.MOCK
-            return self._generate_mock_data(stock_code, start_date, end_date)
+        else:
+            # 任何未列出的数据源都抛出异常（严格禁止 mock — 铁律0）
+            raise RuntimeError(f"不支持的数据源: {source}，模拟数据生成已被禁用")
 
-    def _get_duckdb_data(self, stock_code: str, start_date: str, end_date: str, adjust: str = 'none') -> pd.DataFrame:
-        """从DuckDB数据库获取数据（高性能）"""
+    def _get_duckdb_data(self, stock_code: str, start_date: str, end_date: str,
+                         period: str = '1d', adjust: str = 'none') -> pd.DataFrame:
+        """从DuckDB数据库获取数据（支持日线/分钟线/自定义周期）"""
         try:
             if not self._duckdb_enabled:
                 return pd.DataFrame()
@@ -625,15 +671,44 @@ class DataManager:
 
             # 通过连接管理器获取只读连接，自动处理 WAL 自愈与重试
             with get_db_manager(self.duckdb_path).get_read_connection() as con:
-                # 构建SQL查询
-                query = f"""
-                    SELECT date, open, high, low, close, volume, amount
-                    FROM stock_daily
-                    WHERE stock_code = '{stock_code}'
-                      AND date >= '{start_date}'
-                      AND date <= '{end_date}'
-                    ORDER BY date
-                """
+                if period == '1d':
+                    query = f"""
+                        SELECT date, open, high, low, close, volume, amount
+                        FROM stock_daily
+                        WHERE stock_code = '{stock_code}'
+                          AND date >= '{start_date}'
+                          AND date <= '{end_date}'
+                        ORDER BY date
+                    """
+                elif period == '1m':
+                    query = f"""
+                        SELECT time AS date, open, high, low, close, volume, amount
+                        FROM stock_1m
+                        WHERE stock_code = '{stock_code}'
+                          AND time >= '{start_date}'
+                          AND time <= '{end_date}'
+                        ORDER BY time
+                    """
+                elif period == '5m':
+                    query = f"""
+                        SELECT time AS date, open, high, low, close, volume, amount
+                        FROM stock_5m
+                        WHERE stock_code = '{stock_code}'
+                          AND time >= '{start_date}'
+                          AND time <= '{end_date}'
+                        ORDER BY time
+                    """
+                else:
+                    # 自定义聚合周期（15m/30m/60m/5d/10d/25d等）从 custom_period_bars 读取
+                    query = f"""
+                        SELECT bar_time AS date, open, high, low, close, volume, amount
+                        FROM custom_period_bars
+                        WHERE stock_code = '{stock_code}'
+                          AND period = '{period}'
+                          AND bar_time >= '{start_date}'
+                          AND bar_time <= '{end_date}'
+                        ORDER BY bar_time
+                    """
 
                 # 执行查询
                 df = con.execute(query).df()
@@ -650,11 +725,11 @@ class DataManager:
                 df = self._standardize_columns(df)
                 df = self._clean_data(df)
 
-                print(f"[OK] DuckDB获取 {len(df)} 条数据")
+                print(f"[OK] DuckDB({period})获取 {len(df)} 条数据")
                 return df
 
         except Exception as e:
-            print(f"[ERROR] DuckDB查询失败: {e}")
+            print(f"[ERROR] DuckDB查询失败(period={period}): {e}")
             return pd.DataFrame()
 
     def _get_local_data(self, stock_code: str, start_date: str, end_date: str, period: str = '1d', adjust: str = 'none') -> pd.DataFrame:
@@ -984,7 +1059,7 @@ class DataManager:
 
         # 4. 删除异常波动的数据（日涨跌幅超过20%）
         if 'close' in df.columns and len(df) > 1:
-            returns = df['close'].pct_change()
+            returns = df['close'].pct_change(fill_method=None)
             normal_mask = (returns.abs() <= 0.2) | returns.isna()
             df = cast(pd.DataFrame, df.loc[normal_mask])
 
@@ -1077,7 +1152,7 @@ class DataManager:
             report_issues.append('存在缺失值')
 
         if 'close' in df.columns:
-            returns = df['close'].pct_change().dropna()
+            returns = df['close'].pct_change(fill_method=None).dropna()
             if (returns.abs() > 0.2).any():
                 report_issues.append('存在异常波动（单日涨跌幅>20%）')
 
@@ -1117,12 +1192,16 @@ class DataManager:
         # 只对存在的列进行重采样
         available_agg = {k: v for k, v in agg_dict.items() if k in df.columns}
 
-        resampled = df.resample(freq).agg(cast(Any, available_agg))
+        normalized_freq = freq
+        if isinstance(freq, str) and freq.endswith('H'):
+            normalized_freq = f"{freq[:-1]}h" if len(freq) > 1 else 'h'
+
+        resampled = df.resample(normalized_freq).agg(cast(Any, available_agg))
 
         # 删除空值行
         resampled = resampled.dropna()
 
-        print(f"[DATA] 数据重采样完成: {len(df)} -> {len(resampled)} 条记录 (频率: {freq})")
+        print(f"[DATA] 数据重采样完成: {len(df)} -> {len(resampled)} 条记录 (频率: {normalized_freq})")
 
         return resampled
 

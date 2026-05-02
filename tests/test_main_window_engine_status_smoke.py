@@ -1,11 +1,11 @@
 import os
 import sys
 import gc
+from unittest.mock import MagicMock
 
 import pytest
 from PyQt5.QtCore import QThread
 from PyQt5.QtTest import QTest
-from unittest.mock import MagicMock
 
 pytestmark = pytest.mark.gui
 
@@ -108,3 +108,44 @@ def test_close_event_stops_running_child_threads(qapp, monkeypatch):
         _drain_qthreads()
         window.close()
         _drain_qthreads()
+
+
+def test_realtime_pipeline_log_is_not_mirrored_to_stdout_by_default(capsys, monkeypatch):
+    monkeypatch.setenv("EASYXT_REALTIME_PIPELINE_STDOUT", "0")
+    win = MainWindow.__new__(MainWindow)
+    win._logger = MagicMock()
+    win._realtime_pipeline_status = {
+        "connected": False,
+        "reason": "no_quote_data",
+        "quote_ts": None,
+        "symbol": "000001.SZ",
+        "degraded": False,
+    }
+    win._last_realtime_probe_log = None
+
+    win._log_realtime_pipeline_status()
+
+    assert win._last_realtime_probe_log is not None
+    assert "[REALTIME_PIPELINE]" in win._last_realtime_probe_log
+    assert capsys.readouterr().out == ""
+
+
+def test_service_output_logs_without_stdout_mirroring_by_default(capsys, monkeypatch):
+    monkeypatch.setenv("EASYXT_SERVICE_OUTPUT_STDOUT", "0")
+    win = MainWindow.__new__(MainWindow)
+    win._logger = MagicMock()
+    win._service_log_last_ts = 0.0
+    win._service_log_suppressed = 0
+    win._service_log_suppressed_total = 0
+    win._service_lock_conflict = False
+    win._service_external_manager = False
+    win._service_circuit_broken = False
+    win._service_restart_scheduled = False
+    win.service_process = MagicMock()
+    win.service_process.readAllStandardOutput.return_value = b"hello from service\n"
+    win.update_service_status = MagicMock()
+
+    win.on_service_output()
+
+    assert capsys.readouterr().out == ""
+    assert win._logger.debug.called

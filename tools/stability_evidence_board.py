@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from data_manager.governance_metadata import build_governance_snapshot
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HISTORY_PATH = PROJECT_ROOT / "artifacts" / "p0_trend_history.json"
 OUT_MD = PROJECT_ROOT / "artifacts" / "stability_evidence_30d.md"
@@ -101,6 +103,7 @@ def build_payload(
     period_validation_summary: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     pv = period_validation_summary or {"report_exists": False, "rows": 0, "failed_rows": 0, "last_failed_period": ""}
+    governance = build_governance_snapshot(trade_date=datetime.now(tz=timezone.utc))
     tail = rows[-window_days:] if window_days > 0 else rows
     if not tail:
         return {
@@ -114,6 +117,7 @@ def build_payload(
             "peak_ready": False,
             "peak_ready_rule": "consecutive_compliant_days>=14 and compliance_ratio_pct>=95",
             "period_validation": pv,
+            "governance": governance,
             "daily": [],
         }
     compliant = [
@@ -142,6 +146,7 @@ def build_payload(
         "peak_ready": peak_ready,
         "peak_ready_rule": "consecutive_compliant_days>=14 and compliance_ratio_pct>=95",
         "period_validation": pv,
+        "governance": governance,
         "daily": [
             {
                 "date": str(r.get("ts", ""))[:10],

@@ -8,6 +8,7 @@ StrategyGovernancePanel + StrategyController 无头 smoke 测试。
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -273,6 +274,16 @@ class TestStrategyGovernancePanelSmoke:
         dates = ["2023-01-01", "2023-06-01", "2023-12-31"]
         values = [1_000_000, 1_100_000, 1_250_000]
         chart.plot(dates, values, title="资金曲线")  # 应不崩溃
+
+    def test_equity_chart_plot_with_data_has_no_glyph_warning(self, qapp):
+        from gui_app.widgets.strategy_governance_panel import _EquityChart
+        chart = _EquityChart()
+        dates = ["2023-01-01", "2023-06-01", "2023-12-31"]
+        values = [1_000_000, 1_100_000, 1_250_000]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            chart.plot(dates, values, title="资金曲线")
+        assert not any("Glyph" in str(w.message) for w in caught)
 
     def test_backtest_result_tab_load_result(self, qapp):
         """load_result 应完整渲染而不崩溃。"""

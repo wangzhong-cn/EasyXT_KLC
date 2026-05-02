@@ -7,20 +7,21 @@ DuckDB 连接管理器
 import atexit
 import logging
 import os
+import re
 import shutil
 import threading
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import duckdb
 
 log = logging.getLogger(__name__)
 
 
-def resolve_duckdb_path(duckdb_path: Optional[str] = None) -> str:
+def resolve_duckdb_path(duckdb_path: str | None = None) -> str:
     # 显式传入路径优先级最高，允许目标文件尚未创建。
     if duckdb_path:
         return duckdb_path
@@ -29,7 +30,7 @@ def resolve_duckdb_path(duckdb_path: Optional[str] = None) -> str:
     env_path = os.environ.get("EASYXT_DUCKDB_PATH")
     if env_path:
         candidates.append(env_path)
-    config_obj: Optional[Any] = None
+    config_obj: Any | None = None
     try:
         from easy_xt.config import config as config_obj
     except Exception:
@@ -44,11 +45,6 @@ def resolve_duckdb_path(duckdb_path: Optional[str] = None) -> str:
             candidates.append(os.path.join(userdata_path, "datadir", "duckdb", "stock_data.ddb"))
     project_root = Path(__file__).resolve().parents[1]
     candidates.append(str(project_root / "data" / "stock_data.ddb"))
-    # 兜底：仍保留常见外部路径便于迁移期兼容
-    _legacy_fallback = os.environ.get(
-        "EASYXT_DUCKDB_LEGACY_PATH", r"D:/StockData/stock_data.ddb"
-    )
-    candidates.append(_legacy_fallback)
     existing_candidates: list[str] = []
     for candidate in candidates:
         if not candidate or not os.path.exists(candidate):
@@ -84,11 +80,12 @@ class DuckDBConnectionManager:
     """
 
     _instances: dict[str, "DuckDBConnectionManager"] = {}
+    _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     _instances_lock = threading.Lock()
     _wal_repair_lock = threading.Lock()
     _instance_key: str
 
-    def __new__(cls, duckdb_path: Optional[str] = None):
+    def __new__(cls, duckdb_path: str | None = None):
         resolved_path = resolve_duckdb_path(duckdb_path)
         key = os.path.normcase(os.path.abspath(resolved_path))
         with cls._instances_lock:
@@ -100,7 +97,7 @@ class DuckDBConnectionManager:
                 cls._instances[key] = instance
         return instance
 
-    def __init__(self, duckdb_path: Optional[str] = None):
+    def __init__(self, duckdb_path: str | None = None):
         if self._initialized:
             return
 
@@ -115,8 +112,10 @@ class DuckDBConnectionManager:
         )
         self._connection_count = 0
         self._wal_repaired_once = False
+        # Fix 9c: 跟踪所有活跃 DuckDB 连接，_on_process_exit 时关闭孤立连接（来自 terminate() 线程）
+        self._tracked_connections: set = set()
         self._lock_metrics: dict = {"attempts": 0, "failures": 0, "wait_times_ms": []}
-        self._checkpoint_thread: Optional[threading.Thread] = None
+        self._checkpoint_thread: threading.Thread | None = None
         self._checkpoint_stop = threading.Event()
         self._checkpoint_interval_s = max(
             30.0, float(os.environ.get("EASYXT_CHECKPOINT_INTERVAL_S", "300"))
@@ -162,15 +161,13 @@ class DuckDBConnectionManager:
         with self._wal_repair_lock:
             if self._wal_repaired_once or not os.path.exists(wal_path) or self._connection_count > 0:
                 return False
-            backup_path = f"{wal_path}.bak.{int(time.time())}"
             try:
-                shutil.copy2(wal_path, backup_path)
                 os.remove(wal_path)
                 self._wal_repaired_once = True
-                log.warning("检测到WAL回放异常，已备份并清理: %s", backup_path)
+                log.warning("检测到WAL文件，已在启动时清理: %s", wal_path)
                 return True
             except Exception as _wal_err:
-                log.warning("WAL修复失败: %s", _wal_err)
+                log.warning("WAL清理失败: %s", _wal_err)
                 return False
 
     def repair_wal_if_needed(self) -> bool:
@@ -198,6 +195,7 @@ class DuckDBConnectionManager:
             try:
                 con = duckdb.connect(self.duckdb_path, read_only=False)
                 self._connection_count += 1
+                self._tracked_connections.add(con)  # Fix 9c
                 yield con
                 break
             except Exception as e:
@@ -221,6 +219,7 @@ class DuckDBConnectionManager:
                 raise
             finally:
                 if con:
+                    self._tracked_connections.discard(con)  # Fix 9c
                     try:
                         con.close()
                     except Exception:
@@ -246,6 +245,7 @@ class DuckDBConnectionManager:
                 try:
                     con = duckdb.connect(self.duckdb_path, read_only=False)
                     self._connection_count += 1
+                    self._tracked_connections.add(con)  # Fix 9c
                     con.execute("BEGIN TRANSACTION")
                     try:
                         yield con
@@ -273,6 +273,7 @@ class DuckDBConnectionManager:
                     raise
                 finally:
                     if con:
+                        self._tracked_connections.discard(con)  # Fix 9c
                         try:
                             con.close()
                         except Exception:
@@ -282,7 +283,7 @@ class DuckDBConnectionManager:
 
     @contextmanager
     def _acquire_cross_process_write_lock(self):
-        fd: Optional[int] = None
+        fd: int | None = None
         start = time.monotonic()
         while True:
             try:
@@ -297,9 +298,11 @@ class DuckDBConnectionManager:
                 if age > self._write_lock_stale_s:
                     try:
                         os.remove(self._write_file_lock_path)
-                        continue
+                        continue  # remove 成功 → 立即重试
+                    except FileNotFoundError:
+                        continue  # 竞态：另一进程已先清理，直接重试
                     except Exception:
-                        pass
+                        pass  # remove 失败 → 穿透到超时检查
                 if (time.monotonic() - start) >= self._write_lock_timeout_s:
                     self._lock_metrics["failures"] += 1
                     raise TimeoutError(
@@ -321,7 +324,7 @@ class DuckDBConnectionManager:
             except Exception:
                 pass
 
-    def execute_read_query(self, query: str, params: Optional[tuple] = None):
+    def execute_read_query(self, query: str, params: tuple | None = None):
         """
         执行只读查询（快捷方法）
 
@@ -339,7 +342,7 @@ class DuckDBConnectionManager:
                 df = con.execute(query).df()
             return df
 
-    def execute_write_query(self, query: str, params: Optional[tuple] = None):
+    def execute_write_query(self, query: str, params: tuple | None = None):
         """
         执行写操作（快捷方法）
 
@@ -360,28 +363,39 @@ class DuckDBConnectionManager:
     def insert_dataframe(self, table_name: str, df: Any) -> int:
         if df is None or df.empty:
             return 0
+        if not self._is_safe_identifier(table_name):
+            raise ValueError(f"非法表名: {table_name!r}")
 
         with self.get_write_connection() as con:
-            columns = [row[1] for row in con.execute(f"PRAGMA table_info('{table_name}')").fetchall()]
+            columns = [row[1] for row in con.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
             df_to_insert = df.copy()
 
             if columns:
                 for col in columns:
+                    if not self._is_safe_identifier(str(col)):
+                        raise ValueError(f"非法列名: {col!r}")
+                for col in columns:
                     if col not in df_to_insert.columns:
                         df_to_insert[col] = None
                 df_to_insert = df_to_insert[columns]
-                columns_sql = ", ".join(columns)
+                quoted_table = f'"{table_name}"'
+                columns_sql = ", ".join(f'"{col}"' for col in columns)
                 con.register("temp_insert_df", df_to_insert)
                 con.execute(
-                    "INSERT INTO " + table_name + " (" + columns_sql + ") "
+                    "INSERT INTO " + quoted_table + " (" + columns_sql + ") "  # noqa: S608  # nosec B608
                     "SELECT " + columns_sql + " FROM temp_insert_df"
                 )
             else:
+                quoted_table = f'"{table_name}"'
                 con.register("temp_insert_df", df_to_insert)
-                con.execute("INSERT INTO " + table_name + " SELECT * FROM temp_insert_df")
+                con.execute("INSERT INTO " + quoted_table + " SELECT * FROM temp_insert_df")  # noqa: S608  # nosec B608
 
             con.unregister("temp_insert_df")
             return len(df_to_insert)
+
+    @classmethod
+    def _is_safe_identifier(cls, value: str) -> bool:
+        return bool(cls._IDENTIFIER_RE.fullmatch(str(value or "")))
 
     @property
     def connection_count(self):
@@ -496,8 +510,56 @@ class DuckDBConnectionManager:
         except Exception:
             pass
         try:
-            if getattr(self, '_checkpoint_on_process_exit', True) and threading.main_thread().is_alive():
-                self._safe_checkpoint("process_exit")
+            if not getattr(self, '_checkpoint_on_process_exit', True):
+                return
+            # Fix 7b: 重置标志，允许 WAL 自愈（线程被 terminate() 强杀时需此机制）
+            self._wal_repaired_once = False
+            # Fix 9c: _tracked_connections 记录了所有活跃连接（context manager 进入时 add，
+            # 退出时 discard）。terminate()'d 线程的连接不会被 discard，故仍在集合中。
+            # 注意：不在 atexit 中直接 close() 这些连接，因为跨线程调用 DuckDB C 扩展
+            # 可能导致崩溃（C 级别异常，无法被 except Exception 捕获）。
+            # 改为在 CHECKPOINT 之后尝试删除 WAL 文件（Fix 9b）。
+            # Fix 9: 绕过所有守卫（_checkpoint_skip_when_busy / _write_lock / _connection_count）
+            # 直接对文件做最终 CHECKPOINT+close，确保进程退出后 WAL 被清理。
+            # 原因：closeEvent 强杀线程后 _write_lock 可能仍被持有，_connection_count > 0，
+            # 导致 _safe_checkpoint() 静默跳过，WAL 残留。直接 duckdb.connect 不受这些守卫影响。
+            db_path = getattr(self, 'duckdb_path', ':memory:')
+            wal_path = f"{db_path}.wal"
+            if db_path != ':memory:' and os.path.exists(db_path):
+                allow_wal_cleanup = True
+                try:
+                    _exit_con = duckdb.connect(db_path, read_only=False)
+                    try:
+                        _exit_con.execute("CHECKPOINT")
+                    finally:
+                        _exit_con.close()
+                    log.debug("进程退出 direct-checkpoint 完成: %s", db_path)
+                except Exception as e:
+                    if self._is_lock_error(e):
+                        allow_wal_cleanup = False
+                        log.debug("进程退出 direct-checkpoint 跳过：数据库仍被占用: %s", e)
+                    else:
+                        log.warning("进程退出 direct-checkpoint 失败 (fallback to safe_checkpoint): %s", e)
+                        # 连接失败时（如另一进程仍锁文件）回退到原路径
+                        try:
+                            self._safe_checkpoint("process_exit_fallback")
+                        except Exception:
+                            pass
+                # Fix 9b: 无论 checkpoint 是否成功，主动删除 WAL 文件，防止下次启动时
+                # "failure while replaying wal file"。
+                # 原因：terminate() 强杀的线程留有孤立 DuckDB 连接（未提交事务），
+                # checkpoint 无法清理这些残留，WAL 下次启动时回放失败。
+                # checkpoint 已将已提交数据写入主文件；WAL 中的孤立事务残留无法恢复，
+                # 等价于启动自愈（_repair_wal_if_needed）的提前版本，避免启动时报齐错误。
+                if allow_wal_cleanup and os.path.exists(wal_path):
+                    try:
+                        os.remove(wal_path)
+                        log.debug("进程退出时清理 WAL 文件: %s", wal_path)
+                    except Exception as _wal_err:
+                        if self._is_lock_error(_wal_err):
+                            log.debug("进程退出时跳过 WAL 清理：文件仍被占用: %s", _wal_err)
+                        else:
+                            log.warning("进程退出时清理 WAL 失败: %s", _wal_err)
         except Exception as e:
             log.warning("进程退出checkpoint失败: %s", e)
 
@@ -507,7 +569,7 @@ _db_managers: dict[str, DuckDBConnectionManager] = {}
 _db_managers_lock = threading.Lock()
 
 
-def get_db_manager(duckdb_path: Optional[str] = None) -> DuckDBConnectionManager:
+def get_db_manager(duckdb_path: str | None = None) -> DuckDBConnectionManager:
     """获取数据库管理器（按数据库路径单例）"""
     resolved_path = resolve_duckdb_path(duckdb_path)
     key = os.path.normcase(os.path.abspath(resolved_path))
@@ -520,13 +582,13 @@ def get_db_manager(duckdb_path: Optional[str] = None) -> DuckDBConnectionManager
 
 
 # 便捷函数
-def query_dataframe(query: str, params: Optional[tuple] = None) -> Any:
+def query_dataframe(query: str, params: tuple | None = None) -> Any:
     """快捷查询函数（只读）"""
     manager = get_db_manager()
     return manager.execute_read_query(query, params)
 
 
-def execute_update(query: str, params: Optional[tuple] = None):
+def execute_update(query: str, params: tuple | None = None):
     """快捷更新函数（写操作）"""
     manager = get_db_manager()
     return manager.execute_write_query(query, params)

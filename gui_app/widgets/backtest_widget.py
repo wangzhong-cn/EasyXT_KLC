@@ -71,17 +71,58 @@ try:
     # 注意：FigureCanvasQTAgg 实际上需要 Agg 后端
     matplotlib.use("Agg")
     import matplotlib.dates as mdates
+    from matplotlib import font_manager
     import matplotlib.pyplot as plt
     backend_qt5agg = importlib.import_module("matplotlib.backends.backend_qt5agg")
     FigureCanvas = getattr(backend_qt5agg, "FigureCanvasQTAgg")
     from matplotlib.figure import Figure
-
-    plt.rcParams["font.sans-serif"] = ["SimHei"]  # 支持中文
-    plt.rcParams["axes.unicode_minus"] = False
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
     print("[WARNING] matplotlib未安装，净值曲线将显示为占位符")
+
+_MPL_CJK_FONT_CANDIDATES = [
+    "Microsoft YaHei",
+    "SimHei",
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "WenQuanYi Zen Hei",
+    "Arial Unicode MS",
+    "DejaVu Sans",
+]
+
+
+def _matplotlib_font_candidates(preferred: Optional[str] = None) -> list[str]:
+    preferred_name = str(preferred or "").strip()
+    fonts: list[str] = []
+    if preferred_name in _MPL_CJK_FONT_CANDIDATES:
+        fonts.append(preferred_name)
+    fonts.extend(_MPL_CJK_FONT_CANDIDATES)
+    if preferred_name and preferred_name not in fonts:
+        fonts.append(preferred_name)
+    return list(dict.fromkeys(fonts))
+
+
+def _configure_matplotlib_fonts(preferred: Optional[str] = None) -> str:
+    font_candidates = _matplotlib_font_candidates(preferred)
+    primary_font = "DejaVu Sans"
+    if MATPLOTLIB_AVAILABLE:
+        for font_name in font_candidates:
+            try:
+                font_manager.findfont(font_name, fallback_to_default=False)
+                primary_font = font_name
+                break
+            except Exception:
+                continue
+        ordered_fonts = [primary_font] + [f for f in font_candidates if f != primary_font]
+        plt.rcParams["font.family"] = ["sans-serif"]
+        plt.rcParams["font.sans-serif"] = ordered_fonts
+        plt.rcParams["axes.unicode_minus"] = False
+    return primary_font
+
+
+if MATPLOTLIB_AVAILABLE:
+    _configure_matplotlib_fonts()
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 AdvancedBacktestEngineType: Optional[type[Any]] = None
@@ -1126,7 +1167,7 @@ class PortfolioChart(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._font_family = QFont().family()
+        self._font_family = _configure_matplotlib_fonts(QFont().family())
         self._font_size = max(9, QFont().pointSize())
         palette_color = self.palette().window().color()
         self._bg_color = palette_color.name()
@@ -1157,7 +1198,7 @@ class PortfolioChart(QWidget):
         layout = QVBoxLayout(self)
 
         if MATPLOTLIB_AVAILABLE:
-            plt.rcParams["font.sans-serif"] = [self._font_family]
+            _configure_matplotlib_fonts(self._font_family)
             plt.rcParams["axes.unicode_minus"] = False
             plt.rcParams["font.size"] = self._font_size
             # 创建matplotlib图表
@@ -2128,11 +2169,12 @@ class BacktestWidget(QWidget):
         self.data_source_combo = QComboBox()
         self.data_source_combo.addItems(
             [
-                "自动选择 (QMT→QStock→AKShare→模拟)",
+                "自动选择 (DuckDB→本地缓存→QMT→QStock→AKShare)",
                 "强制QMT",
                 "强制QStock",
                 "强制AKShare",
-                "强制模拟数据",
+                "强制DuckDB",
+                "强制本地缓存",
             ]
         )
         self.data_source_combo.currentTextChanged.connect(self.on_data_source_changed)
@@ -4470,14 +4512,16 @@ class BacktestWidget(QWidget):
         dm = cast(Any, self.data_manager)
 
         # 根据选择设置数据源
-        if "强制QMT" in text:
+        if "强制DuckDB" in text:
+            dm.set_preferred_source(data_source.DUCKDB)
+        elif "强制本地缓存" in text:
+            dm.set_preferred_source(data_source.LOCAL)
+        elif "强制QMT" in text:
             dm.set_preferred_source(data_source.QMT)
         elif "强制QStock" in text:
             dm.set_preferred_source(data_source.QSTOCK)
         elif "强制AKShare" in text:
             dm.set_preferred_source(data_source.AKSHARE)
-        elif "强制模拟数据" in text:
-            dm.set_preferred_source(data_source.MOCK)
         else:  # 自动选择
             dm.set_preferred_source(None)
 
@@ -4692,6 +4736,16 @@ class BacktestWidget(QWidget):
         """开始回测"""
         try:
             self.update_backtest_engine_status()
+            engine_status = getattr(self, "_backtest_engine_status", {})
+            if isinstance(engine_status, dict) and not bool(engine_status.get("available", False)):
+                hint = engine_status.get("hint") or engine_status.get("error_message") or "当前没有可用的真实回测引擎，已禁止模拟/降级回测。"
+                QMessageBox.critical(
+                    self,
+                    "错误",
+                    f"回测引擎不可用，已禁止模拟/降级回测。\n\n{hint}",
+                )
+                return
+
             # 检查引擎是否可用
             if AdvancedBacktestEngine is None:
                 QMessageBox.critical(self, "错误", "回测引擎不可用，请检查模块安装")
@@ -5756,7 +5810,7 @@ class BacktestWidget(QWidget):
                 self.data_source_label.setStyleSheet("color: #666666; font-weight: bold;")
                 return
             status = self.data_manager.get_connection_status()
-            active_source = status.get("active_source", "mock")
+            active_source = status.get("active_source", "none")
 
             # 根据活跃数据源设置显示
             if active_source == "qmt":
@@ -5774,9 +5828,9 @@ class BacktestWidget(QWidget):
             elif active_source == "akshare":
                 self.data_source_label.setText("✅ AKShare已连接 (真实数据)")
                 self.data_source_label.setStyleSheet("color: green; font-weight: bold;")
-            elif active_source == "mock":
-                self.data_source_label.setText("🎲 使用模拟数据")
-                self.data_source_label.setStyleSheet("color: orange; font-weight: bold;")
+            elif active_source == "none":
+                self.data_source_label.setText("❌ 无真实数据源")
+                self.data_source_label.setStyleSheet("color: #d32f2f; font-weight: bold;")
             else:
                 # 未知数据源
                 self.data_source_label.setText(f"❓ 数据源: {active_source}")

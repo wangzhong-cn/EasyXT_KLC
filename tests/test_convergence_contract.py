@@ -211,6 +211,62 @@ class TestIntradayConvergence:
         assert (result["high"] >= result["close"]).all()
         assert (result["volume"] >= 0).all()
 
+    @pytest.mark.parametrize("period_min", [5, 15, 30])
+    def test_convergence_skipped_when_gap_exceeds_hard_limit(self, period_min: int):
+        """复牌首日保护：1m close 与 1D close 价差超过 10% 时，不强制收敛，保留 1m 原始 close。
+
+        场景：1D close = 10.00，1m 末棒 close = 11.20（+12%，超过 10% 硬限制）
+        期望：最后 bar close == 11.20（1m 原始值），而非 10.00（1D 值）
+        """
+        from data_manager.period_bar_builder import PeriodBarBuilder, _CONVERGENCE_HARD_LIMIT
+
+        INTRADAY_CLOSE = 11.20   # 1m 末棒收盘价（复牌涨停场景）
+        DAILY_CLOSE    = 10.00   # 1D 收盘价（停牌前最后收盘）
+        gap = abs(INTRADAY_CLOSE - DAILY_CLOSE) / DAILY_CLOSE
+        assert gap > _CONVERGENCE_HARD_LIMIT, "测试前置条件：价差必须超过硬限制"
+
+        df_1m = _make_1m_bars(trade_date="2024-01-02", close=INTRADAY_CLOSE)
+        df_1d = _make_1d_df(start="2024-01-02", n=1, close=DAILY_CLOSE)
+
+        result = PeriodBarBuilder().build_intraday_bars(
+            data_1m=df_1m, period_minutes=period_min, daily_ref=df_1d
+        )
+        assert result is not None and not result.empty, f"{period_min}m: 无输出"
+
+        last_close = float(result.iloc[-1]["close"])
+        assert abs(last_close - INTRADAY_CLOSE) < 1e-6, (
+            f"{period_min}m 复牌首日不应覆盖：last_close={last_close:.4f}，"
+            f"期望保留1m原始值={INTRADAY_CLOSE}，1D close={DAILY_CLOSE}"
+        )
+
+    @pytest.mark.parametrize("period_min", [5, 15, 30])
+    def test_convergence_applied_when_gap_within_hard_limit(self, period_min: int):
+        """正常误差场景：价差在 10% 以内时，收敛修正正常应用，close 对齐 1D。
+
+        场景：1D close = 10.50，1m 末棒 close = 10.45（-0.5%，在硬限制内）
+        期望：最后 bar close == 10.50（强制对齐 1D）
+        """
+        from data_manager.period_bar_builder import PeriodBarBuilder, _CONVERGENCE_HARD_LIMIT
+
+        INTRADAY_CLOSE = 10.45
+        DAILY_CLOSE    = 10.50
+        gap = abs(INTRADAY_CLOSE - DAILY_CLOSE) / DAILY_CLOSE
+        assert gap < _CONVERGENCE_HARD_LIMIT, "测试前置条件：价差必须在硬限制以内"
+
+        df_1m = _make_1m_bars(trade_date="2024-01-02", close=INTRADAY_CLOSE)
+        df_1d = _make_1d_df(start="2024-01-02", n=1, close=DAILY_CLOSE)
+
+        result = PeriodBarBuilder().build_intraday_bars(
+            data_1m=df_1m, period_minutes=period_min, daily_ref=df_1d
+        )
+        assert result is not None and not result.empty, f"{period_min}m: 无输出"
+
+        last_close = float(result.iloc[-1]["close"])
+        assert abs(last_close - DAILY_CLOSE) < 1e-6, (
+            f"{period_min}m 正常收敛失败：last_close={last_close:.4f}，"
+            f"期望={DAILY_CLOSE}"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # P2 — 多日自定义周期左对齐契约
@@ -415,6 +471,7 @@ class TestGetListingDate:
         udi._listing_date_cache = {}
         udi.duckdb_available = False
         udi.con = None
+        udi._xtdata_call_mode = "direct"
         return udi
 
     def test_xtquant_opendate_used_when_available(self):
@@ -656,3 +713,112 @@ class TestAggregationChain:
         )
         assert result_1w is not None and not result_1w.empty, "1W: 无输出"
         assert (result_1w["high"] >= result_1w["low"]).all(), "1W: OHLCV 违规"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# P2：detect_suspension_gaps 停牌间隙检测契约测试
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestDetectSuspensionGaps:
+    """verify detect_suspension_gaps() contract for in-memory 1D gap detection."""
+
+    # ── 构造辅助 ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_df(dates: list[str]) -> pd.DataFrame:
+        """从日期字符串列表构造最小 1D DataFrame"""
+        return pd.DataFrame({
+            "time": pd.to_datetime(dates),
+            "open": 10.0, "high": 10.5, "low": 9.5,
+            "close": 10.0, "volume": 1000.0,
+        })
+
+    # ── 正常场景 ────────────────────────────────────────────────────────────
+
+    def test_no_gap_returns_empty_list(self):
+        """连续交易日（自然间隔 ≤ 3 天含周末），无停牌间隙"""
+        from data_manager.period_bar_builder import detect_suspension_gaps
+        # 周一到周五连续5个交易日，最大间隔=3天（周五→下周一）
+        dates = ["2024-01-08", "2024-01-09", "2024-01-10",
+                 "2024-01-11", "2024-01-12", "2024-01-15"]
+        df = self._make_df(dates)
+        gaps = detect_suspension_gaps(df)
+        assert gaps == [], f"预期无间隙，实际: {gaps}"
+
+    def test_single_long_gap_detected(self):
+        """一段明显停牌间隙（30个自然日）被检测到"""
+        from data_manager.period_bar_builder import detect_suspension_gaps
+        dates = ["2024-01-02", "2024-02-01", "2024-02-02"]  # 跨越约30天
+        df = self._make_df(dates)
+        gaps = detect_suspension_gaps(df)
+        assert len(gaps) == 1, f"预期1个间隙，实际: {gaps}"
+        g = gaps[0]
+        assert g["calendar_days"] == (pd.Timestamp("2024-02-01")
+                                       - pd.Timestamp("2024-01-02")).days
+        assert str(g["gap_start"]) == "2024-01-02"
+        assert str(g["gap_end"]) == "2024-02-01"
+
+    def test_multiple_gaps_all_detected(self):
+        """多段停牌，每段均应出现在输出中"""
+        from data_manager.period_bar_builder import detect_suspension_gaps
+        dates = [
+            "2023-01-03",             # 正常
+            "2023-03-01",             # 停牌 ~57天
+            "2023-03-02",             # 正常
+            "2023-06-01",             # 停牌 ~91天
+            "2023-06-02",
+        ]
+        df = self._make_df(dates)
+        gaps = detect_suspension_gaps(df)
+        assert len(gaps) == 2, f"预期2个间隙，实际: {gaps}"
+        assert gaps[0]["calendar_days"] > 50
+        assert gaps[1]["calendar_days"] > 80
+
+    def test_gaps_sorted_by_start_date(self):
+        """返回的间隙列表按 gap_start 升序排列"""
+        from data_manager.period_bar_builder import detect_suspension_gaps
+        dates = ["2023-01-02", "2023-03-01", "2023-03-02", "2023-07-01"]
+        df = self._make_df(dates)
+        gaps = detect_suspension_gaps(df, threshold_calendar_days=10)
+        starts = [g["gap_start"] for g in gaps]
+        assert starts == sorted(starts), "间隙列表未按 gap_start 排序"
+
+    # ── 边界场景 ────────────────────────────────────────────────────────────
+
+    def test_empty_dataframe_returns_empty(self):
+        """空 DataFrame 返回空列表，不抛出异常"""
+        from data_manager.period_bar_builder import detect_suspension_gaps
+        df = self._make_df([])
+        gaps = detect_suspension_gaps(df)
+        assert gaps == []
+
+    def test_single_row_returns_empty(self):
+        """单行数据（无法计算相邻差）返回空列表"""
+        from data_manager.period_bar_builder import detect_suspension_gaps
+        df = self._make_df(["2024-01-02"])
+        gaps = detect_suspension_gaps(df)
+        assert gaps == []
+
+    def test_custom_threshold_respected(self):
+        """自定义阈值生效：threshold=5 能检测到 7 天间隙"""
+        from data_manager.period_bar_builder import detect_suspension_gaps
+        # 2024-01-05（周五） → 2024-01-15（下下周一），间距 10 天
+        dates = ["2024-01-05", "2024-01-15"]
+        df = self._make_df(dates)
+        # 默认阈值 10 天：10 > 10 为 False，不应触发
+        assert detect_suspension_gaps(df, threshold_calendar_days=10) == []
+        # 阈值改为 9：10 > 9 为 True，应触发
+        gaps = detect_suspension_gaps(df, threshold_calendar_days=9)
+        assert len(gaps) == 1
+        assert gaps[0]["calendar_days"] == 10
+
+    def test_gap_fields_complete(self):
+        """每个间隙 dict 必须包含 gap_start, gap_end, calendar_days 三个字段"""
+        from data_manager.period_bar_builder import detect_suspension_gaps
+        dates = ["2024-01-02", "2024-03-01"]
+        df = self._make_df(dates)
+        gaps = detect_suspension_gaps(df, threshold_calendar_days=10)
+        assert len(gaps) == 1
+        g = gaps[0]
+        assert set(g.keys()) == {"gap_start", "gap_end", "calendar_days"}, \
+            f"字段不完整: {set(g.keys())}"

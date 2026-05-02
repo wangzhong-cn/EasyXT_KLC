@@ -42,7 +42,10 @@ from PyQt5.QtWidgets import (
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'strategies'))
 
-EASYXT_AVAILABLE = importlib.util.find_spec("easy_xt") is not None
+try:
+    EASYXT_AVAILABLE = importlib.util.find_spec("easy_xt") is not None
+except (ValueError, AttributeError):
+    EASYXT_AVAILABLE = "easy_xt" in sys.modules
 
 from core.events import Events
 from core.signal_bus import signal_bus
@@ -186,7 +189,8 @@ class GridTradingWidget(QWidget):
         self.account_type_combo.addItems(["STOCK", "CREDIT"])
         account_layout.addRow("账户类型:", self.account_type_combo)
 
-        self.qmt_path_edit = QLineEdit("D:\\国金QMT交易端模拟\\userdata_mini")
+        self.qmt_path_edit = QLineEdit("")
+        self.qmt_path_edit.setPlaceholderText("请填写真实 QMT userdata 路径")
         account_layout.addRow("QMT路径:", self.qmt_path_edit)
 
         # 添加测试模式选项

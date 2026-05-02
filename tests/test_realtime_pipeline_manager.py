@@ -26,7 +26,7 @@ class TestRealtimePipelineManagerEventTime:
         mgr.enqueue_quote(quote)
         result = mgr.flush(force=True)
         assert result is not None
-        assert str(result["bar"]["time"]).endswith("14:55:00")
+        assert str(result["bar"]["time"]).endswith("15:00:00")  # 右边界: 14:55-15:00 区间
 
     def test_intraday_ignores_after_hours_quote(self):
         mgr = RealtimePipelineManager()
@@ -77,4 +77,4 @@ class TestRealtimePipelineManagerEventTime:
         mgr.enqueue_quote(quote)
         result = mgr.flush(force=True)
         assert result is not None
-        assert str(result["bar"]["time"]).endswith("14:59:00")
+        assert str(result["bar"]["time"]).endswith("15:00:00")  # 右边界: 14:59-15:00 区间

@@ -193,6 +193,8 @@ P2 增强方向：
 - 图表渲染使用 lightweight-charts，业务操作面板沿用 EasyXT UI
 - 数据源统一经 DuckDB，本地优先、必要时回退 QMT 并回写入库
 - 任何 UI 触发的数据请求必须避免阻塞主线程
+- **读链路不自愈，修复链路默认开启**：`/api/v1/chart/bars`、Qt/Tauri 图表、策略/回测等读路径只消费本地事实与质量状态，禁止在读取请求内顺手联网补历史或写库。
+- **Golden 1D 修复必须异步、可观察、可重试、可死信、可复审**：诊断层只签发 repair plan；后台编排层将可自动修复项入 `HistoryBackfillScheduler`；回填成功后必须重新跑 `Golden1dAuditor` 复审，`manual_review/blocked` 问题不得伪装成 queued/complete。
 
 ---
 

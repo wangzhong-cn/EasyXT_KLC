@@ -102,7 +102,7 @@ class WatchlistWidget(QFrame):
         self.table.setSortingEnabled(True)
         self.table.verticalHeader().setVisible(False)
 
-        self.model = WatchlistModel()
+        self.model = WatchlistModel(state_key=self._state_key)
         self.proxy = _WatchlistProxyModel(self)
         self.proxy.setSourceModel(self.model)
         self.table.setModel(self.proxy)
@@ -111,10 +111,8 @@ class WatchlistWidget(QFrame):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(True)
-        self.table.setColumnWidth(0, 100)
-        self.table.setColumnWidth(1, 95)
-        for col in range(2, 12):
-            self.table.setColumnWidth(col, 72)
+        self._apply_saved_column_widths()
+        header.sectionResized.connect(self._on_column_resized)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -194,6 +192,18 @@ class WatchlistWidget(QFrame):
         self._on_group_changed(self._current_group)
         self._refresh_action_filter_options()
         self._refresh_action_log()
+
+    def _apply_saved_column_widths(self) -> None:
+        widths = self.model.get_column_widths()
+        header = self.table.horizontalHeader()
+        from PyQt5.QtCore import QModelIndex
+        for col, width in enumerate(widths):
+            if 0 <= col < self.model.columnCount(QModelIndex()):
+                self.table.setColumnWidth(col, width)
+
+    def _on_column_resized(self, logicalIndex: int, oldSize: int, newSize: int) -> None:
+        widths = [self.table.columnWidth(c) for c in range(self.model.columnCount(None))]
+        self.model.update_column_widths(widths)
 
     def _toggle_audit_panel(self, checked: bool) -> None:
         self._audit_panel.setVisible(checked)

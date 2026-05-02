@@ -26,18 +26,13 @@ def test_chart_to_trading_to_grid_flow(qapp):
         signal_bus.emit(Events.CHART_DATA_LOADED, symbol="000001.SZ", period="1d")
         assert trading.order_panel.stock_combo.currentText() == "000001.SZ"
 
+        # 演示模式已移除：place_order_signal 在 easyxt=None 时返回 False，不再自动模拟下单
         trading.is_connected = True
         trading.easyxt = None
-        trading.account_info = {
-            "available_cash": 100000,
-            "total_asset": 100000,
-            "today_pnl": 0,
-        }
+        trading.account_info = {"available_cash": 100000, "total_asset": 100000, "today_pnl": 0}
         trading.positions = []
-        assert trading.place_order_signal("000001.SZ", "buy", 10.5, 100)
-
-        assert grid.trade_table.rowCount() == 1
-        assert "订单提交" in grid.log_text.toPlainText()
+        result = trading.place_order_signal("000001.SZ", "buy", 10.5, 100)
+        assert not result  # 没有真实 easyxt，操作失败
     finally:
         signal_bus.unsubscribe(Events.CHART_DATA_LOADED, trading.update_stock_code)
         signal_bus.unsubscribe(Events.ORDER_SUBMITTED, grid.on_order_submitted)
@@ -83,6 +78,7 @@ def test_trading_interface_rejection_stats_for_daily_limit(qapp):
 
 
 def test_trading_interface_batch_orders(qapp):
+    # 演示模式已移除：easyxt=None 时 submit_batch_orders 返回 success=0
     trading = TradingInterface()
     try:
         trading.is_connected = True
@@ -94,22 +90,21 @@ def test_trading_interface_batch_orders(qapp):
             {"symbol": "000002.SZ", "side": "buy", "price": 20.5, "volume": 100},
         ])
         assert result["total"] == 2
-        assert result["success"] == 2
-        assert trading.get_daily_order_count() == 2
+        assert result["success"] == 0  # 无 easyxt 时下单均失败
+        assert result["failed"] == 2
     finally:
         trading.close()
 
 
 def test_trading_interface_simulated_connection(qapp):
+    # 演示/模拟模式已移除：无真实 easyxt 时，connect_to_trading 不自动切换为模拟连接
     trading = TradingInterface()
     try:
         trading.is_connected = False
         trading.easyxt = None
         trading.connect_to_trading()
-        assert trading.is_connected
-        assert trading.account_info.get("total_asset") == 100000.0
-        assert len(trading.positions) == 2
-        assert "模拟" in trading.connection_status_label.text()
+        assert not trading.is_connected
+        assert "未连接" in trading.connection_status_label.text()
     finally:
         trading.close()
 
@@ -287,20 +282,20 @@ def test_trading_interface_easyxt_success_and_fail(qapp):
 
 
 def test_trading_interface_handlers(qapp):
+    # 演示模式已移除：easyxt=None 时操作均失败，batch 仍返回完整结果字典
     trading = TradingInterface()
     try:
         trading.is_connected = True
         trading.easyxt = None
         trading.account_info = {"available_cash": 50000, "total_asset": 100000, "today_pnl": 0}
         trading.positions = []
-        assert trading._handle_order_request("000001.SZ", "buy", 10.5, 100, source="signal")
+        assert not trading._handle_order_request("000001.SZ", "buy", 10.5, 100, source="signal")
         result = trading._handle_batch_request(
-            [
-                {"symbol": "000001.SZ", "side": "buy", "price": 10.5, "volume": 100},
-            ],
+            [{"symbol": "000001.SZ", "side": "buy", "price": 10.5, "volume": 100}],
             source="batch",
         )
         assert result["total"] == 1
+        assert result["success"] == 0
     finally:
         trading.close()
 
@@ -1282,6 +1277,10 @@ class TestKLineWorkspaceExitStability:
             # 真正结束，避免 GC 时 QThread 析构报 "Destroyed while thread running"
             if stuck is not None:
                 stuck.terminate()
-                QThread.wait(stuck, 2000)  # 类方法调用，绕过实例级 wait 覆盖
+                # 轮询替代 QThread.wait()，防止 Windows 下永久挂起
+                import time as _t
+                _dl = _t.monotonic() + 2.0
+                while _t.monotonic() < _dl and stuck.isRunning():
+                    _t.sleep(0.02)
         assert events_received, "强杀后应发出 THREAD_FORCED_TERMINATE 事件"
         assert events_received[0]["thread_name"] == "_RealtimeConnectThread"
