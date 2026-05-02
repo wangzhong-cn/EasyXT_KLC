@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# Python
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -23,6 +23,12 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Keep Tauri shell source helpers trackable despite the generic Python lib/ ignore.
+!apps/tauri-shell/src/lib/
+!apps/tauri-shell/src/lib/*.ts
+!apps/tauri-shell/src/lib/__tests__/
+!apps/tauri-shell/src/lib/__tests__/*.ts
+
 # Native chart adapter — auto-copied LWC lib (populated at first run)
 gui_app/chart_native/lib/
 !gui_app/chart_native/lib/
@@ -38,6 +44,9 @@ node_modules/
 apps/tauri-shell/node_modules/
 apps/tauri-shell/dist/
 apps/tauri-shell/src-tauri/target/
+
+# Dev launcher cache (dep-sync stamps)
+.dev-cache/
 
 # Installer logs
 pip-log.txt
@@ -182,6 +191,9 @@ tmp/
 *.sublime-project
 *.sublime-workspace
 
+# graphify outputs
+graphify-out/
+
 # 系统文件
 .DS_Store
 Thumbs.db
@@ -290,6 +302,7 @@ reports/
 tests/
 !/tests/
 /tests/*
+!/tests/test_account_bindings_api.py
 !/tests/test_api_server_smoke.py
 !/tests/test_ws_bridge_logic.py
 !/tests/test_rpc_protocol.py
@@ -348,6 +361,11 @@ skills/
 code_converter/转换后的ptrade代码.py
 code_converter/full_converted_strategy.py
 gui_app/widgets/GUI使用说明.md
+
+# 运行态用户/账户数据（启动时自动生成）
+config/users.json
+config/broker_accounts.json
+config/.broker_key
 nul
 FACTOR_ENHANCEMENT_PLAN.md
 data_manager/unified_data_interface.py.backup
@@ -399,3 +417,28 @@ refactor_t1_part1.py
 test_v2*.json
 docs/Untitled-*.jsonc
 *.dmp
+
+# ==================== 本地运行态与会话噪音（P0 收敛） ====================
+# 这些文件由本地启动、Playwright/MCP、图谱刷新、调试探针或研究出图生成，
+# 不应混入业务 PR；已被 Git 跟踪的文件仍需用 git restore/rm --cached 单独处理。
+.backend.pid
+.playwright-mcp/
+.opencode/
+.zed/
+**/graphify-out/
+runtime/state/
+coverage_matrix_assets/
+paper_assets_real/
+paper_assets_real_2025/
+paper_assets_test/
+/*.png
+/*.pdf
+/2026-*.txt
+/_*.txt
+/_diag_*.py
+/_tmp_*.py
+/env_compare_probe.py
+/sleep_*.py
+/temp_*probe.py
+/temp_xt_*.py
+/tradeapi_detached_probe.py
